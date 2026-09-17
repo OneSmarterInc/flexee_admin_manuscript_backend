@@ -1,0 +1,7 @@
+.venv/
+.env
+__pycache__/
+**/__pycache__/
+*.pyc
+media/
+# Keep db.sqlite3 in this delivered SQLite build.

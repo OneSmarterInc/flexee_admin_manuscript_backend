@@ -16,4 +16,5 @@ urlpatterns = [
     path('admin/submissions/<uuid:submission_id>/send-email/', views.admin_submission_send_email),
     path('admin/submissions/<uuid:submission_id>/download/', views.admin_submission_download),
     path('admin/smtp/', views.admin_smtp_settings),
+    path('admin/smtp/test/', views.admin_smtp_test),
 ]

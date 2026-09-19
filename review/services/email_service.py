@@ -2,7 +2,6 @@ import os
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives, get_connection
 from django.utils import timezone
-from django.utils import timezone
 from ..models import SMTPSettings
 
 
@@ -29,12 +28,16 @@ def build_html_email(subject, body):
 </html>"""
 
 
-def _send(to, subject, body):
+def _send(to, subject, body, bcc=None):
     if not to:
         return {'skipped': True, 'reason': 'No recipient configured'}
         
     connection = None
     smtp_settings = SMTPSettings.objects.first()
+    
+    from_email = settings.DEFAULT_FROM_EMAIL
+    reply_to = []
+    
     if smtp_settings and smtp_settings.host:
         connection = get_connection(
             backend='django.core.mail.backends.smtp.EmailBackend',
@@ -43,12 +46,52 @@ def _send(to, subject, body):
             username=smtp_settings.username,
             password=smtp_settings.password,
             use_tls=smtp_settings.use_tls,
+            use_ssl=smtp_settings.use_ssl,
             fail_silently=False,
         )
         
-    message = EmailMultiAlternatives(subject=subject, body=body, from_email=settings.DEFAULT_FROM_EMAIL, to=[to], connection=connection)
+        if smtp_settings.sender_email:
+            if smtp_settings.sender_name:
+                from_email = f"{smtp_settings.sender_name} <{smtp_settings.sender_email}>"
+            else:
+                from_email = smtp_settings.sender_email
+        else:
+            if smtp_settings.sender_name:
+                from_email = f"{smtp_settings.sender_name} <{smtp_settings.username}>"
+            else:
+                from_email = smtp_settings.username
+                
+        if smtp_settings.reply_to_email:
+            reply_to = [smtp_settings.reply_to_email]
+            
+    message = EmailMultiAlternatives(
+        subject=subject, 
+        body=body, 
+        from_email=from_email, 
+        to=[to], 
+        connection=connection,
+        reply_to=reply_to if reply_to else None
+    )
     message.attach_alternative(build_html_email(subject, body), "text/html")
     sent = message.send(fail_silently=False)
+    
+    # Send separate explicit copies to BCC recipients to bypass SMTP restrictions
+    if bcc:
+        for bcc_email in bcc:
+            bcc_email = bcc_email.strip()
+            # Don't send a duplicate to the author if they are in the BCC list
+            if bcc_email and bcc_email.lower() != to.strip().lower():
+                bcc_message = EmailMultiAlternatives(
+                    subject=subject, 
+                    body=body, 
+                    from_email=from_email, 
+                    to=[bcc_email], 
+                    connection=connection,
+                    reply_to=reply_to if reply_to else None
+                )
+                bcc_message.attach_alternative(build_html_email(subject, body), "text/html")
+                bcc_message.send(fail_silently=True)
+                
     return {'recipient': to, 'sent': bool(sent)}
 
 
@@ -57,20 +100,36 @@ def send_review_emails(submission, result):
     editor = default_review or os.getenv('EDITOR_EMAIL', 'editor@flexee.org').strip()
     author_target = submission.author_email.strip() or default_review
     detail = {'author': None, 'editor': None}
+    smtp_settings = SMTPSettings.objects.first()
+    bcc_list = []
+    if smtp_settings and smtp_settings.admin_notification_emails:
+        bcc_list = [email.strip() for email in smtp_settings.admin_notification_emails.split(',') if email.strip()]
+        
+    body = (
+        f"Dear {submission.author_name},\n\n"
+        f"Thank you for submitting \"{submission.title}\" to Flexee.\n\n"
+        f"We have successfully received your submission and it is currently under editorial review. Our team will evaluate your work based on our review guidelines and overall suitability.\n\n"
+        f"We will update you once the review process is complete.\n\n"
+        f"Thank you for sharing your work with us.\n\n"
+        f"Best regards,\nFlexee Editorial Team\neditor@flexee.org"
+    )
+
     if author_target:
-        body = (
-            f"Dear {submission.author_name},\n\n"
-            f"Thank you for submitting \"{submission.title}\" to Flexee.\n\n"
-            f"We have successfully received your submission and it is currently under editorial review. Our team will evaluate your work based on our review guidelines and overall suitability.\n\n"
-            f"We will update you once the review process is complete.\n\n"
-            f"Thank you for sharing your work with us.\n\n"
-            f"Best regards,\nFlexee Editorial Team\neditor@flexee.org"
-        )
         detail['author'] = _send(
             author_target,
             'Your Submission Has Been Received – Flexee Editorial Review',
             body,
+            bcc=bcc_list
         )
+    elif bcc_list:
+        for bcc_email in bcc_list:
+            if bcc_email.strip():
+                _send(
+                    bcc_email.strip(),
+                    'Your Submission Has Been Received – Flexee Editorial Review',
+                    body
+                )
+        detail['author'] = {'recipient': 'Admins Only (No Author Email)', 'sent': True}
     detail['editor'] = _send(
         editor,
         f"First-gate review: {submission.title} — {result['decision']}",
@@ -82,8 +141,6 @@ def send_review_emails(submission, result):
 
 def send_acceptance_email(submission, message):
     target = submission.author_email.strip()
-    if not target:
-        return {'status': 'error', 'detail': {'error': 'No author email provided'}}
     
     body = (
         f"Dear {submission.author_name},\n\n"
@@ -96,14 +153,27 @@ def send_acceptance_email(submission, message):
         f"Thank you for sharing your work with Flexee. We look forward to working with you.\n\n"
         f"Best regards,\nFlexee Editorial Team\neditor@flexee.org"
     )
-    detail = _send(target, 'Your Submission Has Been Approved – Flexee', body)
+    
+    smtp_settings = SMTPSettings.objects.first()
+    bcc_list = []
+    if smtp_settings and smtp_settings.admin_notification_emails:
+        bcc_list = [email.strip() for email in smtp_settings.admin_notification_emails.split(',') if email.strip()]
+        
+    if target:
+        detail = _send(target, 'Your Submission Has Been Approved – Flexee', body, bcc=bcc_list)
+    elif bcc_list:
+        for bcc_email in bcc_list:
+            if bcc_email.strip():
+                _send(bcc_email.strip(), 'Your Submission Has Been Approved – Flexee', body)
+        detail = {'recipient': 'Admins Only (No Author Email)', 'sent': True}
+    else:
+        return {'status': 'error', 'detail': {'error': 'No author email provided and no admins configured'}}
+        
     return {'status': 'sent' if detail.get('sent') else 'error', 'detail': detail, 'notified_at': timezone.now()}
 
 
 def send_rejection_email(submission, reason):
     target = submission.author_email.strip()
-    if not target:
-        return {'status': 'error', 'detail': {'error': 'No author email provided'}}
     
     body = (
         f"Dear {submission.author_name},\n\n"
@@ -114,14 +184,41 @@ def send_rejection_email(submission, reason):
         f"Thank you for your interest in Flexee.\n\n"
         f"Best regards,\nFlexee Editorial Team\neditor@flexee.org"
     )
-    detail = _send(target, 'Update Regarding Your Submission – Flexee Editorial Review', body)
+    
+    smtp_settings = SMTPSettings.objects.first()
+    bcc_list = []
+    if smtp_settings and smtp_settings.admin_notification_emails:
+        bcc_list = [email.strip() for email in smtp_settings.admin_notification_emails.split(',') if email.strip()]
+        
+    if target:
+        detail = _send(target, 'Update Regarding Your Submission – Flexee Editorial Review', body, bcc=bcc_list)
+    elif bcc_list:
+        for bcc_email in bcc_list:
+            if bcc_email.strip():
+                _send(bcc_email.strip(), 'Update Regarding Your Submission – Flexee Editorial Review', body)
+        detail = {'recipient': 'Admins Only (No Author Email)', 'sent': True}
+    else:
+        return {'status': 'error', 'detail': {'error': 'No author email provided and no admins configured'}}
+        
     return {'status': 'sent' if detail.get('sent') else 'error', 'detail': detail, 'notified_at': timezone.now()}
 
 
 def send_custom_email(submission, subject, body):
     target = submission.author_email.strip()
-    if not target:
-        return {'status': 'error', 'detail': {'error': 'No author email provided'}}
     
-    detail = _send(target, subject, body)
+    smtp_settings = SMTPSettings.objects.first()
+    bcc_list = []
+    if smtp_settings and smtp_settings.admin_notification_emails:
+        bcc_list = [email.strip() for email in smtp_settings.admin_notification_emails.split(',') if email.strip()]
+        
+    if target:
+        detail = _send(target, subject, body, bcc=bcc_list)
+    elif bcc_list:
+        for bcc_email in bcc_list:
+            if bcc_email.strip():
+                _send(bcc_email.strip(), subject, body)
+        detail = {'recipient': 'Admins Only (No Author Email)', 'sent': True}
+    else:
+        return {'status': 'error', 'detail': {'error': 'No author email provided and no admins configured'}}
+        
     return {'status': 'sent' if detail.get('sent') else 'error', 'detail': detail, 'notified_at': timezone.now()}

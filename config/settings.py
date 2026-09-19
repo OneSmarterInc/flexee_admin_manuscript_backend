@@ -40,8 +40,9 @@ ASGI_APPLICATION = 'config.asgi.application'
 
 if 'DATABASE_URL' in os.environ:
     import dj_database_url
+    _require_ssl = not DEBUG  # SSL required in production, not needed locally
     DATABASES = {
-        'default': dj_database_url.config(conn_max_age=600, ssl_require=True)
+        'default': dj_database_url.config(conn_max_age=600, ssl_require=_require_ssl)
     }
 else:
     DATABASES = {
@@ -60,6 +61,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv('MAX_MANUSCRIPT_BYTES', str(20 * 1024 * 1024))) + 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = DATA_UPLOAD_MAX_MEMORY_SIZE
+
+MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_URL = '/media/'
 
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 if os.getenv('SMTP_HOST', '').strip():

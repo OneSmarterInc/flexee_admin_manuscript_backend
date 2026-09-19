@@ -369,7 +369,7 @@ def judge_with_anthropic(text, declared_sim, rubric_items, kind, disclosure, mea
     key = os.getenv('ANTHROPIC_API_KEY', '').strip()
     if not key:
         raise RuntimeError('ANTHROPIC_API_KEY is not configured')
-    model = os.getenv('ANTHROPIC_MODEL', 'claude-sonnet-5').strip()
+    model = os.getenv('ANTHROPIC_MODEL', 'claude-3-5-haiku-20241022').strip()
     response = httpx.post(
         'https://api.anthropic.com/v1/messages',
         headers={'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01'},

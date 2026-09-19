@@ -3,7 +3,11 @@ import json
 import os
 import urllib.parse
 import uuid
+import zipfile
+import httpx
+import concurrent.futures
 from datetime import timedelta
+from io import BytesIO
 from django.db.models import Q, Count
 from django.http import JsonResponse, FileResponse
 from django.utils import timezone
@@ -17,6 +21,34 @@ from .models import AdminAuthEvent, ReviewEvent, Submission, SMTPSettings
 from .services.email_service import send_review_emails, send_acceptance_email, send_rejection_email
 from .services.review_engine import run_review
 
+def _generate_chapter_summary(text):
+    if not text:
+        return "(no text)"
+    preview = text[:500].strip()
+    if len(text) > 500:
+        preview += '…'
+    if os.getenv('MOCK_AI_REVIEW', 'false').lower() in {'1', 'true', 'yes', 'on'}:
+        return f"[MOCK AI] This is a mock AI summary for a chapter of {len(text)} characters."
+    key = os.getenv('ANTHROPIC_API_KEY', '').strip()
+    if not key:
+        return preview
+    model = os.getenv('ANTHROPIC_MODEL', 'claude-3-5-haiku-20241022').strip()
+    prompt = "Summarize the following chapter in 1-3 highly concise sentences. Focus purely on the main plot points or core arguments:\n\n" + text[:25000]
+    try:
+        response = httpx.post(
+            'https://api.anthropic.com/v1/messages',
+            headers={'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01'},
+            json={'model': model, 'max_tokens': 150, 'messages': [{'role': 'user', 'content': prompt}]},
+            timeout=45.0,
+        )
+        if response.status_code < 400:
+            payload = response.json()
+            ai_summary = ''.join(part.get('text', '') for part in payload.get('content', []) if part.get('type') == 'text').strip()
+            if ai_summary:
+                return ai_summary
+    except Exception:
+        pass
+    return preview
 
 def _json_body(request):
     try:
@@ -26,6 +58,9 @@ def _json_body(request):
 
 
 def _submission_summary(item):
+    zip_contents = None
+    if item.review_record and isinstance(item.review_record, dict):
+        zip_contents = item.review_record.get('zip_contents')
     return {
         'id': str(item.id),
         'created_at': item.created_at.isoformat(),
@@ -42,6 +77,7 @@ def _submission_summary(item):
         'manuscript_filename': item.manuscript_filename,
         'notification_status': item.notification_status,
         'editor_summary': item.editor_summary,
+        'zip_contents': zip_contents,
     }
 
 
@@ -86,14 +122,80 @@ def submit(request):
         errors.append('manuscript is empty')
     elif upload.size > max_bytes:
         errors.append(f'manuscript exceeds the {max_bytes // 1024 // 1024} MB upload limit')
-    elif not upload.name.lower().endswith(('.docx', '.pdf', '.md')):
-        errors.append('manuscript must be a .docx, .pdf, or .md file')
+    elif not upload.name.lower().endswith(('.docx', '.pdf', '.md', '.zip')):
+        errors.append('manuscript must be a .docx, .pdf, .md, or .zip file')
     if errors:
         return JsonResponse({'detail': errors[0], 'errors': errors}, status=400)
 
     content = upload.read()
     upload.seek(0)
     digest = hashlib.sha256(content).hexdigest()
+
+    # If the upload is a zip, extract ALL manuscript files from inside it
+    review_content = content
+    review_filename = upload.name
+    zip_contents = None  # will hold per-document metadata for ZIP uploads
+    if upload.name.lower().endswith('.zip'):
+        try:
+            from .services.review_engine import extract_text, word_count as wc_fn
+            with zipfile.ZipFile(BytesIO(content)) as zf:
+                manuscript_entries = []
+                for name in zf.namelist():
+                    if name.lower().endswith(('.docx', '.pdf', '.md')) and not name.startswith('__MACOSX') and not os.path.basename(name).startswith('.'):
+                        manuscript_entries.append(name)
+                if not manuscript_entries:
+                    return JsonResponse({'detail': 'No .docx, .pdf, or .md file found inside the ZIP archive', 'errors': ['No .docx, .pdf, or .md file found inside the ZIP archive']}, status=400)
+
+                # Extract text and stats for every document in the ZIP
+                zip_docs = []
+                all_texts = []
+                docs_to_summarize = []
+                for entry_name in manuscript_entries:
+                    entry_bytes = zf.read(entry_name)
+                    base_name = os.path.basename(entry_name)
+                    try:
+                        doc_text = extract_text(entry_bytes, base_name)
+                        doc_words = wc_fn(doc_text)
+                    except Exception:
+                        doc_text = ''
+                        doc_words = 0
+                    
+                    docs_to_summarize.append((base_name, entry_name, doc_words, doc_text))
+                    all_texts.append(doc_text)
+                
+                # Fetch AI summaries in parallel (max 5 concurrent requests)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                    futures = {
+                        executor.submit(_generate_chapter_summary, d[3]): d 
+                        for d in docs_to_summarize
+                    }
+                    results_map = {}
+                    for future in concurrent.futures.as_completed(futures):
+                        d = futures[future]
+                        try:
+                            results_map[d[1]] = future.result()
+                        except Exception:
+                            results_map[d[1]] = d[3][:500].strip() + '…'
+                
+                for d in docs_to_summarize:
+                    base_name, entry_name, doc_words, doc_text = d
+                    zip_docs.append({
+                        'filename': base_name,
+                        'path': entry_name,
+                        'word_count': doc_words,
+                        'preview': results_map.get(entry_name, "(error)"),
+                    })
+
+                zip_contents = zip_docs
+
+                # Use the first document as the primary review file,
+                # and concatenate all texts for the combined review
+                review_content = zf.read(manuscript_entries[0])
+                review_filename = os.path.basename(manuscript_entries[0])
+
+        except zipfile.BadZipFile:
+            return JsonResponse({'detail': 'The uploaded file is not a valid ZIP archive', 'errors': ['The uploaded file is not a valid ZIP archive']}, status=400)
+
     submission = Submission.objects.create(
         status='processing', kind=kind, author_name=author, author_email=author_email,
         coauthors=coauthors, title=title, declared_sim=declared_sim, disclosure=disclosure,
@@ -104,13 +206,16 @@ def submit(request):
     ReviewEvent.objects.create(submission=submission, event_type='accepted', detail={'filename': upload.name, 'bytes': len(content)})
 
     try:
-        result = run_review(content, upload.name, kind, declared_sim, disclosure)
+        result = run_review(review_content, review_filename, kind, declared_sim, disclosure)
         submission.status = 'completed'
         submission.completed_at = timezone.now()
         submission.decision = result['decision']
         submission.model = result['model']
         submission.total_words = result['total_words']
-        submission.review_record = result['record']
+        review_record = result['record']
+        if zip_contents:
+            review_record['zip_contents'] = zip_contents
+        submission.review_record = review_record
         submission.editor_summary = result['editor_summary']
         submission.author_letter = result['author_letter']
         submission.notification_status = 'pending'
@@ -249,6 +354,8 @@ def admin_submissions(request):
         qs = qs.filter(status=status)
     if decision in {'PASS_TO_HUMAN', 'REFER_TO_HUMAN_WITH_FLAGS', 'RETURN_TO_AUTHOR'}:
         qs = qs.filter(decision=decision)
+    elif decision in {'ACCEPTED', 'REJECTED'}:
+        qs = qs.filter(admin_decision=decision)
     limit = min(max(int(request.GET.get('limit', '100') or 100), 1), 200)
     items = list(qs[:limit])
     counts = Submission.objects.aggregate(
@@ -270,6 +377,10 @@ def admin_submission_detail(request, submission_id):
     except Submission.DoesNotExist:
         return JsonResponse({'detail': 'Submission not found'}, status=404)
     data = _submission_summary(item)
+    # Extract zip_contents from the review_record if present
+    zip_contents = None
+    if item.review_record and isinstance(item.review_record, dict):
+        zip_contents = item.review_record.get('zip_contents')
     data.update({
         'coauthors': item.coauthors,
         'declared_sim': item.declared_sim,
@@ -282,6 +393,7 @@ def admin_submission_detail(request, submission_id):
         'editor_summary': item.editor_summary,
         'author_letter': item.author_letter,
         'error': item.error,
+        'zip_contents': zip_contents,
         'notification_detail': item.notification_detail,
         'notified_at': item.notified_at.isoformat() if item.notified_at else None,
         'events': [
@@ -432,6 +544,8 @@ def admin_submission_download(request, submission_id):
             content_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
         elif submission.manuscript_filename.lower().endswith('.md'):
             content_type = 'text/markdown'
+        elif submission.manuscript_filename.lower().endswith('.zip'):
+            content_type = 'application/zip'
             
         return FileResponse(
             submission.manuscript_file.open('rb'),
@@ -448,22 +562,85 @@ def admin_smtp_settings(request):
     smtp, _ = SMTPSettings.objects.get_or_create(id=1)
     if request.method == 'GET':
         return JsonResponse({
+            'sender_name': smtp.sender_name,
+            'sender_email': smtp.sender_email,
+            'reply_to_email': smtp.reply_to_email,
             'host': smtp.host,
             'port': smtp.port,
             'username': smtp.username,
             'password': smtp.password,
             'use_tls': smtp.use_tls,
+            'use_ssl': smtp.use_ssl,
+            'admin_notification_emails': smtp.admin_notification_emails,
         })
     elif request.method == 'POST':
         try:
             body = json.loads(request.body)
+            smtp.sender_name = body.get('sender_name', smtp.sender_name)
+            smtp.sender_email = body.get('sender_email', smtp.sender_email)
+            smtp.reply_to_email = body.get('reply_to_email', smtp.reply_to_email)
             smtp.host = body.get('host', smtp.host)
             smtp.port = int(body.get('port', smtp.port))
             smtp.username = body.get('username', smtp.username)
-            smtp.password = body.get('password', smtp.password)
+            if 'password' in body and body['password'].strip() != '':
+                smtp.password = body['password']
             smtp.use_tls = bool(body.get('use_tls', smtp.use_tls))
+            smtp.use_ssl = bool(body.get('use_ssl', smtp.use_ssl))
+            smtp.admin_notification_emails = body.get('admin_notification_emails', smtp.admin_notification_emails)
             smtp.save()
             return JsonResponse({'ok': True})
         except Exception as e:
             return JsonResponse({'error': str(e)}, status=400)
     return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+@csrf_exempt
+@require_admin
+def admin_smtp_test(request):
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+    
+    try:
+        body = json.loads(request.body)
+        host = body.get('host', '')
+        port = int(body.get('port', 587))
+        username = body.get('username', '')
+        password = body.get('password', '')
+        use_tls = bool(body.get('use_tls', True))
+        use_ssl = bool(body.get('use_ssl', False))
+        sender_email = body.get('sender_email', '')
+        sender_name = body.get('sender_name', '')
+        test_email = body.get('test_email', '').strip()
+        
+        if password.strip() == '':
+            smtp, _ = SMTPSettings.objects.get_or_create(id=1)
+            password = smtp.password
+            
+        from django.core.mail import get_connection, EmailMultiAlternatives
+        connection = get_connection(
+            backend='django.core.mail.backends.smtp.EmailBackend',
+            host=host,
+            port=port,
+            username=username,
+            password=password,
+            use_tls=use_tls,
+            use_ssl=use_ssl,
+            fail_silently=False,
+        )
+        
+        from_header = f"{sender_name} <{sender_email}>" if sender_name and sender_email else (sender_email or username)
+        target_email = test_email or sender_email or username
+        message = EmailMultiAlternatives(
+            subject='Test SMTP Connection - Flexee', 
+            body='This is a test email to verify your SMTP configuration in Flexee.', 
+            from_email=from_header, 
+            to=[target_email], 
+            connection=connection
+        )
+        sent = message.send(fail_silently=False)
+        if sent:
+            return JsonResponse({'ok': True, 'message': 'Test email sent successfully!'})
+        else:
+            return JsonResponse({'error': 'Failed to send test email for unknown reasons.'}, status=400)
+            
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=400)

@@ -76,11 +76,16 @@ class AdminAuthEvent(models.Model):
 
 
 class SMTPSettings(models.Model):
+    sender_name = models.CharField(max_length=255, blank=True)
+    sender_email = models.CharField(max_length=255, blank=True)
+    reply_to_email = models.CharField(max_length=255, blank=True)
     host = models.CharField(max_length=255, blank=True)
     port = models.IntegerField(default=587)
     username = models.CharField(max_length=255, blank=True)
     password = models.CharField(max_length=255, blank=True)
     use_tls = models.BooleanField(default=True)
+    use_ssl = models.BooleanField(default=False)
+    admin_notification_emails = models.TextField(blank=True, help_text="Comma-separated emails to BCC on accept/reject")
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

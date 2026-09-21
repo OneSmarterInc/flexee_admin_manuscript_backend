@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import urllib.parse
 import uuid
 import zipfile
@@ -20,39 +21,121 @@ from .models import AdminAuthEvent, ReviewEvent, Submission, SMTPSettings
 from .services.email_service import send_review_emails, send_acceptance_email, send_rejection_email
 from .services.review_engine import run_review
 
-def _generate_chapter_summary(text):
-    if not text:
-        return "(no text)"
+
+def _clean_summary_text(value, limit=700):
+    text = re.sub(r'\s+', ' ', str(value or '')).strip()
+    if len(text) > limit:
+        text = text[:limit - 1].rstrip() + '…'
+    return text
+
+
+def _chapter_figure_count(text):
+    return sum(
+        1 for line in str(text or '').split('\n')
+        if re.match(r'^\s*(figure|fig\.?)\s+\d+', line, re.I)
+    )
+
+
+def _format_chapter_editor_summary(filename, word_count, figure_count, model_summary='', key_gaps='', conclusion=''):
+    summary = _clean_summary_text(model_summary) or 'No chapter-level narrative summary was returned by the model.'
+    gaps = _clean_summary_text(key_gaps) or 'No specific chapter-level gaps were identified by the model.'
+    final = _clean_summary_text(conclusion) or 'This chapter/PDF summary is provided for human review alongside the overall manuscript summary.'
+    extracted_status = 'PASS' if word_count > 0 else 'FAIL'
+    return '\n'.join([
+        'Editor Summary',
+        '',
+        '1. Structural Findings',
+        f'   - Source file: {filename or "Unknown"}',
+        f'   - Total word count: {word_count:,}',
+        '   - Chapter count: 1',
+        f'   - Figure count: {figure_count}',
+        f'   - Text extraction: {extracted_status} - Extracted {word_count:,} words from this ZIP document.',
+        '',
+        '2. Rubric Findings',
+        '   - Criteria that passed: Not evaluated at chapter-summary level.',
+        '   - Criteria needing work: Not evaluated at chapter-summary level.',
+        '   - Criteria that failed: Not evaluated at chapter-summary level.',
+        f'   - Supporting evidence: {summary}',
+        '',
+        '3. Key Gaps / Issues',
+        f'   - Problems identified: {gaps}',
+        '   - What needs attention or correction: review this chapter/PDF together with the overall manuscript findings.',
+        '',
+        '4. Overall Review Conclusion',
+        '   - Decision: See overall manuscript review.',
+        f'   - {final}',
+    ])
+
+
+def _generate_chapter_summary(text, filename='', word_count=0):
+    text = str(text or '')
+    word_count = int(word_count or 0)
+    figure_count = _chapter_figure_count(text)
+    if not text.strip():
+        return _format_chapter_editor_summary(
+            filename,
+            word_count,
+            figure_count,
+            model_summary='No extractable text was found for this chapter/PDF.',
+            key_gaps='The uploaded chapter/PDF may be scanned, image-only, empty, or unsupported by text extraction.',
+            conclusion='No chapter-level summary can be generated until extractable text is available.',
+        )
     preview = text[:500].strip()
     if len(text) > 500:
         preview += '…'
     if os.getenv('MOCK_AI_REVIEW', 'false').lower() in {'1', 'true', 'yes', 'on'}:
-        return f"[MOCK AI] This is a mock AI summary for a chapter of {len(text)} characters."
+        return _format_chapter_editor_summary(
+            filename,
+            word_count,
+            figure_count,
+            model_summary=f'[MOCK AI] This is a mock AI summary for a chapter of {len(text)} characters.',
+            key_gaps='Mock mode did not evaluate chapter-level gaps.',
+            conclusion='Mock mode generated a structured chapter summary placeholder.',
+        )
 
     # Chapter summaries are intentionally small and use a shorter context/output
     # budget than the full rubric review. This keeps ZIP uploads responsive on
     # 8 GB RAM development machines while preserving the existing response shape.
     from .services.local_llm import ollama_chat_json
     prompt = (
-        "Summarize the following manuscript chapter in 1-3 concise sentences. "
-        "Focus only on the main plot points or core arguments. Do not invent facts. "
-        "Return JSON only with one key: \"summary\".\n\n"
+        'Summarize this ZIP document/chapter using only the supplied text. '
+        'Return JSON only with keys: "summary", "key_gaps", and "conclusion". '
+        'summary should be 1-3 concise sentences about the main plot points or core arguments. '
+        'key_gaps should list any obvious chapter-level problems, or say none identified. '
+        'conclusion should be one concise sentence. Do not invent facts.\n\n'
         + text[:12000]
     )
     try:
         _, output = ollama_chat_json(
             prompt,
-            max_tokens=160,
+            max_tokens=220,
             timeout=120,
             num_ctx=4096,
         )
         payload = json.loads(output)
-        summary = payload.get("summary", "") if isinstance(payload, dict) else ""
-        if isinstance(summary, str) and summary.strip():
-            return summary.strip()
+        if isinstance(payload, dict):
+            summary = payload.get('summary', '')
+            key_gaps = payload.get('key_gaps', '')
+            conclusion = payload.get('conclusion', '')
+            return _format_chapter_editor_summary(
+                filename,
+                word_count,
+                figure_count,
+                model_summary=summary,
+                key_gaps=key_gaps,
+                conclusion=conclusion,
+            )
     except (RuntimeError, ValueError, TypeError, json.JSONDecodeError):
         pass
-    return preview
+    return _format_chapter_editor_summary(
+        filename,
+        word_count,
+        figure_count,
+        model_summary=preview,
+        key_gaps='The local model did not return a valid structured chapter summary, so a text preview was used.',
+        conclusion='This fallback chapter summary should be reviewed by a human editor.',
+    )
+
 
 def _json_body(request):
     try:
@@ -180,7 +263,7 @@ def submit(request):
                 max_workers = max(1, min(int(os.getenv('OLLAMA_CHAPTER_WORKERS', '2')), 2))
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = {
-                        executor.submit(_generate_chapter_summary, d[3]): d
+                        executor.submit(_generate_chapter_summary, d[3], d[0], d[2]): d
                         for d in docs_to_summarize
                     }
                     results_map = {}
@@ -189,8 +272,14 @@ def submit(request):
                         try:
                             results_map[d[1]] = future.result()
                         except Exception:
-                            fallback = d[3][:500].strip()
-                            results_map[d[1]] = (fallback + '…') if fallback else '(error)'
+                            results_map[d[1]] = _format_chapter_editor_summary(
+                                d[0],
+                                d[2],
+                                _chapter_figure_count(d[3]),
+                                model_summary='Chapter/PDF summary generation failed.',
+                                key_gaps='The chapter-level summary call failed for this document.',
+                                conclusion='A human editor should inspect this chapter/PDF directly.',
+                            )
 
                 for d in docs_to_summarize:
                     base_name, entry_name, doc_words, doc_text = d

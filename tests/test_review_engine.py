@@ -111,6 +111,52 @@ class EngineTests(unittest.TestCase):
         self.assertIn("Structural review: 14,200 words.", summary)
         self.assertIn("revised and resubmitted", letter)
 
+    def test_editor_summary_has_required_four_sections(self):
+        from review.services.review_engine import DECISION_REFER, _format_editor_summary
+
+        measured = {
+            "total_words": 14200,
+            "chapters": [{"number": i} for i in range(1, 13)],
+            "figures": 8,
+            "checks": [
+                {"label": "Twelve chapters", "passed": True, "detail": "Found 12 chapters."},
+                {"label": "Total length", "passed": False, "detail": "Total is 14,200 words."},
+                {"label": "At least 40 figures", "passed": False, "detail": "Found 8 captioned figures."},
+            ],
+        }
+        judgments = [
+            {"id": "sim_fit", "verdict": "pass", "evidence": "Pairs with the named simulation.", "gap": ""},
+            {"id": "teaches_claim", "verdict": "needs_work", "evidence": "One chapter is thin.", "gap": "Strengthen chapter content."},
+            {"id": "ai_disclosure", "verdict": "fail", "evidence": "No disclosure found.", "gap": "Add a specific AI-use disclosure."},
+        ]
+        summary = _format_editor_summary(
+            """1. Structural Findings
+- Wrong model-generated structure.
+
+2. Rubric Findings
+- More model text.
+
+3. Key Gaps / Issues
+- More gaps.
+
+4. Overall Review Conclusion
+The manuscript needs human review or clarification.""",
+            measured,
+            judgments,
+            DECISION_REFER,
+        )
+        self.assertIn("1. Structural Findings", summary)
+        self.assertIn("2. Rubric Findings", summary)
+        self.assertIn("3. Key Gaps / Issues", summary)
+        self.assertIn("4. Overall Review Conclusion", summary)
+        self.assertIn("- Total word count: 14,200", summary)
+        self.assertIn("- Chapter count: 12", summary)
+        self.assertIn("- Figure count: 8", summary)
+        self.assertIn("sim_fit", summary)
+        self.assertIn("teaches_claim", summary)
+        self.assertIn("ai_disclosure", summary)
+        self.assertIn("The manuscript needs human review or clarification.", summary)
+
     def test_ollama_client_reports_unavailable_server(self):
         from review.services.local_llm import ollama_chat_json
         with patch(

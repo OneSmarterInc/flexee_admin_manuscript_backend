@@ -320,12 +320,16 @@ Based on the structural measurements and your criteria judgments, you must deter
 - If ANY criterion needs work, or an advisory criterion fails, the decision MUST be "REFER_TO_HUMAN_WITH_FLAGS".
 - Otherwise, the decision is "PASS_TO_HUMAN".
 
-You must also write an `editor_summary` (a professional summary of the structural checks and your findings. Format it clearly using paragraphs or bullet points so it is highly readable, and add an empty line/space after every 2 points or concepts to keep it minimal and visually spaced out) and an `author_letter` (a polite letter to the author outlining the results, using the decision logic: "ready for human review" if pass, "needs human review or clarification" if refer, "revise and resubmit" if return).
+You must also write an `editor_summary` using exactly these four numbered sections:
+1. Structural Findings
+2. Rubric Findings
+3. Key Gaps / Issues
+4. Overall Review Conclusion
 
 Return ONLY a JSON object, no prose, no code fences. Shape:
 { 
   "decision": "PASS_TO_HUMAN|REFER_TO_HUMAN_WITH_FLAGS|RETURN_TO_AUTHOR",
-  "editor_summary": "<full text of the editor summary>",
+  "editor_summary": "Editor Summary\n\n1. Structural Findings\n   - ...\n\n2. Rubric Findings\n   - ...\n\n3. Key Gaps / Issues\n   - ...\n\n4. Overall Review Conclusion\n   - ...",
   "author_letter": "<full text of the author letter>",
   "items": [ {"id": "<id>", "verdict": "pass|needs_work|fail", "evidence": "<1-2 sentences citing the manuscript>", "gap": "<what the author must change; empty string if pass>"} ] 
 }''')
@@ -361,25 +365,109 @@ def _mock_judgment(rubric_items, disclosure, measured):
     elif has_needs_work:
         decision = DECISION_REFER
 
-    return '(mock)', items, decision, "Mock editor summary.", "Mock author letter."
+    summary = _format_editor_summary(measured, items, decision, "Mock editor summary.")
+    return '(mock)', items, decision, summary, "Mock author letter."
 
 
-def _fallback_editor_summary(measured, judgments):
-    failed_checks = [check['detail'] for check in measured['checks'] if not check['passed']]
-    needs_work = [item for item in judgments if item.get('verdict') in {'needs_work', 'fail'}]
-    parts = [
-        f"Structural review: {measured['total_words']:,} words.",
+def _criterion_name(item):
+    return str(item.get('id') or 'criterion').replace('_', ' ').title()
+
+
+def _list_criteria(items):
+    if not items:
+        return 'None.'
+    return ', '.join(_criterion_name(item) for item in items) + '.'
+
+
+def _clean_inline(value, limit=280):
+    text = re.sub(r'\s+', ' ', str(value or '')).strip()
+    if len(text) > limit:
+        text = text[:limit - 1].rstrip() + '…'
+    return text
+
+
+def _format_editor_summary(measured, judgments, decision, model_summary=''):
+    """Return the fixed four-section editor summary shown in the admin portal."""
+    checks = measured.get('checks', []) if isinstance(measured, dict) else []
+    chapters = measured.get('chapters', []) if isinstance(measured, dict) else []
+    figures = measured.get('figures', None) if isinstance(measured, dict) else None
+    total_words = measured.get('total_words', 0) if isinstance(measured, dict) else 0
+
+    passed_items = [item for item in judgments if item.get('verdict') == 'pass']
+    needs_work_items = [item for item in judgments if item.get('verdict') == 'needs_work']
+    failed_items = [item for item in judgments if item.get('verdict') == 'fail']
+
+    lines = [
+        'Editor Summary',
+        '',
+        '1. Structural Findings',
+        f'   - Total word count: {total_words:,}',
+        f"   - Chapter count: {len(chapters) if chapters else 'Not applicable'}",
+        f"   - Figure count: {figures if figures is not None else 'Not applicable'}",
     ]
-    if failed_checks:
-        parts.append("Structural issues: " + " ".join(failed_checks))
+    if checks:
+        for check in checks:
+            status = 'PASS' if check.get('passed') else 'FAIL'
+            label = check.get('label') or check.get('id') or 'Structural check'
+            detail = _clean_inline(check.get('detail'))
+            lines.append(f'   - {label}: {status} - {detail}')
     else:
-        parts.append("All measured structural requirements passed.")
-    if needs_work:
-        labels = ", ".join(item.get('id', 'criterion') for item in needs_work)
-        parts.append(f"Criteria needing attention: {labels}.")
+        lines.append('   - Structural checks/results: No structural checks were recorded.')
+
+    lines.extend([
+        '',
+        '2. Rubric Findings',
+        f'   - Criteria that passed: {_list_criteria(passed_items)}',
+        f'   - Criteria needing work: {_list_criteria(needs_work_items)}',
+        f'   - Criteria that failed: {_list_criteria(failed_items)}',
+    ])
+    evidence_items = [item for item in judgments if _clean_inline(item.get('evidence'))]
+    if evidence_items:
+        for item in evidence_items:
+            lines.append(f"   - Supporting evidence ({_criterion_name(item)}): {_clean_inline(item.get('evidence'))}")
     else:
-        parts.append("No rubric criterion was marked as needing additional work.")
-    return " ".join(parts)
+        lines.append('   - Supporting evidence: No criterion-level evidence was returned by the model.')
+
+    gap_details = []
+    for check in checks:
+        if not check.get('passed'):
+            gap_details.append(_clean_inline(check.get('detail')))
+    for item in judgments:
+        if item.get('verdict') in {'needs_work', 'fail'} and _clean_inline(item.get('gap')):
+            gap_details.append(f"{_criterion_name(item)}: {_clean_inline(item.get('gap'))}")
+
+    lines.extend([
+        '',
+        '3. Key Gaps / Issues',
+    ])
+    if gap_details:
+        for detail in gap_details:
+            lines.append(f'   - {detail}')
+    else:
+        lines.append('   - No major gaps were identified by the automated review.')
+    lines.append('   - What needs attention or correction: address the failed structural checks and any rubric items marked needs_work or fail.')
+
+    if decision == DECISION_PASS:
+        conclusion = 'The manuscript is ready to move to human review based on the recorded structural and rubric findings.'
+    elif decision == DECISION_REFER:
+        conclusion = 'The manuscript should be reviewed by a human editor because one or more findings require clarification or judgment.'
+    else:
+        conclusion = 'The manuscript should be returned to the author for revision before it proceeds.'
+    model_note = _clean_inline(model_summary, 500)
+    if model_note and not model_note.lower().startswith('editor summary'):
+        conclusion = f'{conclusion} Model note: {model_note}'
+
+    lines.extend([
+        '',
+        '4. Overall Review Conclusion',
+        f'   - Decision: {decision}',
+        f'   - {conclusion}',
+    ])
+    return '\n'.join(lines)
+
+
+def _fallback_editor_summary(measured, judgments, decision=None):
+    return _format_editor_summary(measured, judgments, decision or DECISION_REFER)
 
 
 def _fallback_author_letter(decision, measured, judgments):
@@ -395,9 +483,9 @@ def _fallback_author_letter(decision, measured, judgments):
 def _repair_missing_outputs(parsed, decision, measured, judgments, kind):
     """Repair missing small output fields without resending the manuscript.
 
-    A small Qwen3 repair request is deliberately based only on the already
-    computed measurements/judgments. If local inference fails, deterministic
-    text is returned so the admin portal never displays an empty AI result.
+    A small local-model repair request is based only on the already computed
+    measurements/judgments. If local inference fails, deterministic text is
+    returned so the admin portal never displays an empty AI result.
     """
     summary = parsed.get('editor_summary') if isinstance(parsed, dict) else None
     letter = parsed.get('author_letter') if isinstance(parsed, dict) else None
@@ -406,7 +494,7 @@ def _repair_missing_outputs(parsed, decision, measured, judgments, kind):
     if summary_ok and letter_ok:
         return summary.strip(), letter.strip()
 
-    fallback_summary = _fallback_editor_summary(measured, judgments)
+    fallback_summary = _fallback_editor_summary(measured, judgments, decision)
     fallback_letter = _fallback_author_letter(decision, measured, judgments)
     if os.getenv('MOCK_AI_REVIEW', 'false').lower() in {'1', 'true', 'yes', 'on'}:
         return (
@@ -430,7 +518,8 @@ def _repair_missing_outputs(parsed, decision, measured, judgments, kind):
     prompt = (
         "Repair the missing fields in this manuscript review. Return JSON only. "
         "Do not invent facts and use only the supplied review data. "
-        "editor_summary must be 2-4 concise sentences. "
+        "editor_summary must use exactly these sections: 1. Structural Findings; "
+        "2. Rubric Findings; 3. Key Gaps / Issues; 4. Overall Review Conclusion. "
         "author_letter must be 2-4 polite sentences appropriate to the decision. "
         f"Review data:\n{json.dumps(compact, ensure_ascii=False)}"
     )
@@ -485,6 +574,7 @@ def judge_with_local_model(text, declared_sim, rubric_items, kind, disclosure, m
     editor_summary, author_letter = _repair_missing_outputs(
         parsed, decision, measured, items, kind
     )
+    editor_summary = _format_editor_summary(measured, items, decision, editor_summary)
     return model, items, decision, editor_summary, author_letter
 
 

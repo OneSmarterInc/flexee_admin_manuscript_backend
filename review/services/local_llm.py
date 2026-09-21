@@ -5,7 +5,7 @@ import httpx
 
 
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
-DEFAULT_OLLAMA_MODEL = "qwen3:1.7b"
+DEFAULT_OLLAMA_MODEL = "qwen2.5:0.5b-instruct"
 
 
 def _as_bool(value, default=False):
@@ -21,7 +21,7 @@ def _strip_thinking(text):
 
 
 def ollama_chat_json(prompt, *, max_tokens=None, timeout=None, num_ctx=None):
-    """Call the local Ollama Qwen3 endpoint and return its JSON-mode content.
+    """Call the local Ollama Qwen2.5 endpoint and return its JSON-mode content.
 
     No cloud credentials are used. The caller remains responsible for validating
     the returned application-level schema.
@@ -41,7 +41,6 @@ def ollama_chat_json(prompt, *, max_tokens=None, timeout=None, num_ctx=None):
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
-        "think": False,
         "keep_alive": "5m",
         "format": "json",
         "options": {

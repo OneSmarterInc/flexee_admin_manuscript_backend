@@ -24,15 +24,14 @@ class EngineTests(unittest.TestCase):
         with patch("review.services.local_llm.httpx.post", return_value=response) as post:
             from review.services.local_llm import ollama_chat_json
             model, content = ollama_chat_json("Return JSON", max_tokens=123)
-        self.assertEqual(model, "qwen3:1.7b")
+        self.assertEqual(model, "qwen2.5:0.5b-instruct")
         self.assertEqual(json.loads(content), {"ok": True})
         payload = post.call_args.kwargs["json"]
-        self.assertEqual(payload["model"], "qwen3:1.7b")
-        self.assertFalse(payload["think"])
+        self.assertEqual(payload["model"], "qwen2.5:0.5b-instruct")
         self.assertFalse(payload["stream"])
         self.assertEqual(payload["format"], "json")
         self.assertEqual(payload["options"]["num_predict"], 123)
-        self.assertEqual(payload["options"]["num_ctx"], 6144)
+        self.assertEqual(payload["options"]["num_ctx"], 4096)
 
     def test_chapter_summary_uses_small_context_and_output_budget(self):
         response = httpx.Response(

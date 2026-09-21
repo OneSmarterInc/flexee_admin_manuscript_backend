@@ -14,4 +14,4 @@ python manage.py migrate
 python manage.py runserver 0.0.0.0:8000
 ```
 
-Copy the generated `ADMIN_*` values into `.env`, and set `ANTHROPIC_API_KEY`.
+Copy the generated `ADMIN_*` values into `.env`, install Ollama, and run `ollama pull qwen3:1.7b`. The review engine uses the local Ollama API; no cloud AI API key is required. The default 8192-token context is intentionally conservative for an 8 GB RAM development machine.

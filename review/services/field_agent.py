@@ -3,66 +3,36 @@ import json
 import httpx
 import random
 
+from .local_llm import ollama_chat_json
+
 def _extract_citations(raw_text):
-    """Uses Claude to extract a JSON list of citations from the raw text."""
-    key = os.getenv('ANTHROPIC_API_KEY', '').strip()
-    model = os.getenv('ANTHROPIC_MODEL', 'claude-haiku-4-5-20251001').strip()
-    
-    if not key:
-        return []
-
-    # Only send the end of the manuscript to save tokens and focus on references
-    # 30,000 chars is roughly the last 15-20 pages.
+    """Extract reference metadata using the same local Qwen3 model as the review engine."""
     text_end = raw_text[-30000:] if len(raw_text) > 30000 else raw_text
-
     prompt = f"""
-    You are an expert academic assistant.
-    Your task is to extract the bibliography or references section from the following manuscript text.
-    Return the result as a JSON object with two keys:
-    1. "total_count": The total number of references you found in the manuscript.
-    2. "citations": A JSON array containing a MAXIMUM of 15 citations. Do not extract more than 15 strings for this array, even if there are hundreds.
-    
-    Do NOT return any other text, markdown formatting, or explanations. Just the raw JSON object.
-    If there are no references, return {{"total_count": 0, "citations": []}}.
+You are an expert academic assistant.
+Extract the bibliography or references section from the manuscript text below.
 
-    MANUSCRIPT END:
-    {text_end}
-    """
-    
+Return JSON only with:
+1. "total_count": integer total number of references found.
+2. "citations": an array containing at most 15 citation strings.
+
+Do not invent citations. If references are absent, return exactly:
+{{"total_count": 0, "citations": []}}
+
+MANUSCRIPT END:
+{text_end}
+"""
     try:
-        response = httpx.post(
-            'https://api.anthropic.com/v1/messages',
-            headers={'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01'},
-            json={'model': model, 'max_tokens': 2000, 'messages': [{'role': 'user', 'content': prompt}]},
-            timeout=60.0,
-        )
-        if response.status_code >= 400:
-            return []
-            
-        payload = response.json()
-        output = ''.join(part.get('text', '') for part in payload.get('content', []) if part.get('type') == 'text').strip()
-        
-        # Clean markdown if claude included it
-        if output.startswith("```json"):
-            output = output[7:]
-        if output.startswith("```"):
-            output = output[3:]
-        if output.endswith("```"):
-            output = output[:-3]
-            
-        try:
-            parsed = json.loads(output.strip())
-            if isinstance(parsed, dict):
-                total_count = parsed.get("total_count", 0)
-                citations = parsed.get("citations", [])
-                if isinstance(citations, list):
-                    clean_citations = [c for c in citations if isinstance(c, str)]
-                    return total_count, clean_citations
-        except Exception:
-            pass
-    except Exception:
+        _, output = ollama_chat_json(prompt, max_tokens=2000, timeout=120)
+        parsed = json.loads(output)
+        if isinstance(parsed, dict):
+            total_count = parsed.get("total_count", 0)
+            citations = parsed.get("citations", [])
+            if isinstance(total_count, int) and isinstance(citations, list):
+                clean_citations = [c.strip() for c in citations if isinstance(c, str) and c.strip()]
+                return max(total_count, 0), clean_citations[:15]
+    except (RuntimeError, ValueError, TypeError, json.JSONDecodeError):
         pass
-        
     return 0, []
 
 def _verify_citation_crossref(citation_text):

@@ -1,4 +1,8 @@
+import json
 import unittest
+from unittest.mock import patch
+
+import httpx
 
 from review.services.review_engine import (
     ARTICLE_JUDGMENT,
@@ -11,6 +15,33 @@ from review.services.review_engine import (
 class EngineTests(unittest.TestCase):
     def test_word_count(self):
         self.assertEqual(word_count('one two three'), 3)
+
+    def test_ollama_client_uses_local_qwen_and_json_mode(self):
+        response = httpx.Response(
+            200,
+            json={"message": {"role": "assistant", "content": json.dumps({"ok": True})}},
+        )
+        with patch("review.services.local_llm.httpx.post", return_value=response) as post:
+            from review.services.local_llm import ollama_chat_json
+            model, content = ollama_chat_json("Return JSON", max_tokens=123)
+        self.assertEqual(model, "qwen3:1.7b")
+        self.assertEqual(json.loads(content), {"ok": True})
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["model"], "qwen3:1.7b")
+        self.assertFalse(payload["think"])
+        self.assertFalse(payload["stream"])
+        self.assertEqual(payload["format"], "json")
+        self.assertEqual(payload["options"]["num_predict"], 123)
+        self.assertEqual(payload["options"]["num_ctx"], 8192)
+
+    def test_ollama_client_reports_unavailable_server(self):
+        from review.services.local_llm import ollama_chat_json
+        with patch(
+            "review.services.local_llm.httpx.post",
+            side_effect=httpx.ConnectError("connection refused"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Could not connect to Ollama"):
+                ollama_chat_json("Return JSON")
 
     def test_article_structural_pass(self):
         text = ' '.join(f'word{i}' for i in range(1700))

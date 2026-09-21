@@ -2,9 +2,10 @@ import json
 import os
 import re
 from io import BytesIO
-import httpx
 from docx import Document
 from pypdf import PdfReader
+
+from .local_llm import ollama_chat_json
 
 BOOK_STRUCTURE = {
     'chapters_required': 12,
@@ -363,25 +364,16 @@ def _mock_judgment(rubric_items, disclosure, measured):
     return '(mock)', items, decision, "Mock editor summary.", "Mock author letter."
 
 
-def judge_with_anthropic(text, declared_sim, rubric_items, kind, disclosure, measured):
+def judge_with_local_model(text, declared_sim, rubric_items, kind, disclosure, measured):
     if os.getenv('MOCK_AI_REVIEW', 'false').lower() in {'1', 'true', 'yes', 'on'}:
         return _mock_judgment(rubric_items, disclosure, measured)
-    key = os.getenv('ANTHROPIC_API_KEY', '').strip()
-    if not key:
-        raise RuntimeError('ANTHROPIC_API_KEY is not configured')
-    model = os.getenv('ANTHROPIC_MODEL', 'claude-3-5-haiku-20241022').strip()
-    response = httpx.post(
-        'https://api.anthropic.com/v1/messages',
-        headers={'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01'},
-        json={'model': model, 'max_tokens': 4000, 'messages': [{'role': 'user', 'content': _build_prompt(text, declared_sim, rubric_items, kind, measured)}]},
-        timeout=180.0,
+
+    model, output = ollama_chat_json(
+        _build_prompt(text, declared_sim, rubric_items, kind, measured),
+        max_tokens=int(os.getenv('OLLAMA_NUM_PREDICT', '4000')),
     )
-    if response.status_code >= 400:
-        raise RuntimeError(f'Anthropic request failed ({response.status_code}): {response.text[:500]}')
-    payload = response.json()
-    output = ''.join(part.get('text', '') for part in payload.get('content', []) if part.get('type') == 'text')
     parsed = _parse_model_json(output)
-    by_id = {item.get('id'): item for item in parsed.get('items', [])}
+    by_id = {item.get('id'): item for item in parsed.get('items', []) if isinstance(item, dict)}
     allowed = {'pass', 'needs_work', 'fail'}
     items = []
     for rubric in rubric_items:
@@ -390,15 +382,23 @@ def judge_with_anthropic(text, declared_sim, rubric_items, kind, disclosure, mea
         if rubric.get('advisory') and verdict == 'fail':
             verdict = 'needs_work'
         items.append({
-            'id': rubric['id'], 'verdict': verdict,
+            'id': rubric['id'],
+            'verdict': verdict,
             'evidence': got.get('evidence', '') if isinstance(got.get('evidence', ''), str) else '',
             'gap': got.get('gap', '') if isinstance(got.get('gap', ''), str) else '',
         })
-    
+
     decision = parsed.get('decision', DECISION_FAIL)
-    editor_summary = parsed.get('editor_summary', 'No summary provided by AI.')
-    author_letter = parsed.get('author_letter', 'No letter provided by AI.')
-    
+    if decision not in {DECISION_PASS, DECISION_REFER, DECISION_FAIL}:
+        decision = DECISION_FAIL
+
+    editor_summary = parsed.get('editor_summary', 'No summary provided by local AI.')
+    author_letter = parsed.get('author_letter', 'No letter provided by local AI.')
+    if not isinstance(editor_summary, str):
+        editor_summary = str(editor_summary)
+    if not isinstance(author_letter, str):
+        author_letter = str(author_letter)
+
     return model, items, decision, editor_summary, author_letter
 
 
@@ -410,7 +410,7 @@ def run_review(content, filename, kind, declared_sim='', disclosure=''):
     measured = structural_checks(raw_text, kind)
     rubric_items = BOOK_JUDGMENT if kind == 'book' else ARTICLE_JUDGMENT
     
-    model, judgments, decision, editor_summary, author_letter = judge_with_anthropic(
+    model, judgments, decision, editor_summary, author_letter = judge_with_local_model(
         f"{raw_text}\n\nAI-Use Disclosure (submitted with the manuscript):\n{disclosure}",
         declared_sim,
         rubric_items,

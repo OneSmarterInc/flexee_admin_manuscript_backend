@@ -364,6 +364,93 @@ def _mock_judgment(rubric_items, disclosure, measured):
     return '(mock)', items, decision, "Mock editor summary.", "Mock author letter."
 
 
+def _fallback_editor_summary(measured, judgments):
+    failed_checks = [check['detail'] for check in measured['checks'] if not check['passed']]
+    needs_work = [item for item in judgments if item.get('verdict') in {'needs_work', 'fail'}]
+    parts = [
+        f"Structural review: {measured['total_words']:,} words.",
+    ]
+    if failed_checks:
+        parts.append("Structural issues: " + " ".join(failed_checks))
+    else:
+        parts.append("All measured structural requirements passed.")
+    if needs_work:
+        labels = ", ".join(item.get('id', 'criterion') for item in needs_work)
+        parts.append(f"Criteria needing attention: {labels}.")
+    else:
+        parts.append("No rubric criterion was marked as needing additional work.")
+    return " ".join(parts)
+
+
+def _fallback_author_letter(decision, measured, judgments):
+    if decision == DECISION_PASS:
+        opening = "The manuscript is ready for human review."
+    elif decision == DECISION_REFER:
+        opening = "The manuscript needs human review or clarification before a final decision."
+    else:
+        opening = "The manuscript should be revised and resubmitted."
+    return f"{opening} The automated review measured {measured['total_words']:,} words and recorded the current structural and rubric findings in the review record."
+
+
+def _repair_missing_outputs(parsed, decision, measured, judgments, kind):
+    """Repair missing small output fields without resending the manuscript.
+
+    A small Qwen3 repair request is deliberately based only on the already
+    computed measurements/judgments. If local inference fails, deterministic
+    text is returned so the admin portal never displays an empty AI result.
+    """
+    summary = parsed.get('editor_summary') if isinstance(parsed, dict) else None
+    letter = parsed.get('author_letter') if isinstance(parsed, dict) else None
+    summary_ok = isinstance(summary, str) and bool(summary.strip())
+    letter_ok = isinstance(letter, str) and bool(letter.strip())
+    if summary_ok and letter_ok:
+        return summary.strip(), letter.strip()
+
+    fallback_summary = _fallback_editor_summary(measured, judgments)
+    fallback_letter = _fallback_author_letter(decision, measured, judgments)
+    if os.getenv('MOCK_AI_REVIEW', 'false').lower() in {'1', 'true', 'yes', 'on'}:
+        return (
+            summary.strip() if summary_ok else fallback_summary,
+            letter.strip() if letter_ok else fallback_letter,
+        )
+
+    missing = []
+    if not summary_ok:
+        missing.append('editor_summary')
+    if not letter_ok:
+        missing.append('author_letter')
+    compact = {
+        'decision': decision,
+        'kind': kind,
+        'total_words': measured.get('total_words', 0),
+        'structural_checks': measured.get('checks', []),
+        'judgments': judgments,
+        'missing_fields': missing,
+    }
+    prompt = (
+        "Repair the missing fields in this manuscript review. Return JSON only. "
+        "Do not invent facts and use only the supplied review data. "
+        "editor_summary must be 2-4 concise sentences. "
+        "author_letter must be 2-4 polite sentences appropriate to the decision. "
+        f"Review data:\n{json.dumps(compact, ensure_ascii=False)}"
+    )
+    try:
+        _, output = ollama_chat_json(prompt, max_tokens=300, timeout=90, num_ctx=2048)
+        repaired = _parse_model_json(output)
+        repaired_summary = repaired.get('editor_summary') if isinstance(repaired, dict) else None
+        repaired_letter = repaired.get('author_letter') if isinstance(repaired, dict) else None
+        if not isinstance(repaired_summary, str) or not repaired_summary.strip():
+            repaired_summary = fallback_summary
+        if not isinstance(repaired_letter, str) or not repaired_letter.strip():
+            repaired_letter = fallback_letter
+        return repaired_summary.strip(), repaired_letter.strip()
+    except (RuntimeError, ValueError, TypeError, json.JSONDecodeError):
+        return (
+            summary.strip() if summary_ok else fallback_summary,
+            letter.strip() if letter_ok else fallback_letter,
+        )
+
+
 def judge_with_local_model(text, declared_sim, rubric_items, kind, disclosure, measured):
     if os.getenv('MOCK_AI_REVIEW', 'false').lower() in {'1', 'true', 'yes', 'on'}:
         return _mock_judgment(rubric_items, disclosure, measured)
@@ -373,6 +460,9 @@ def judge_with_local_model(text, declared_sim, rubric_items, kind, disclosure, m
         max_tokens=int(os.getenv('OLLAMA_NUM_PREDICT', '4000')),
     )
     parsed = _parse_model_json(output)
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Local AI returned JSON, but the review payload was not an object.")
+
     by_id = {item.get('id'): item for item in parsed.get('items', []) if isinstance(item, dict)}
     allowed = {'pass', 'needs_work', 'fail'}
     items = []
@@ -392,13 +482,9 @@ def judge_with_local_model(text, declared_sim, rubric_items, kind, disclosure, m
     if decision not in {DECISION_PASS, DECISION_REFER, DECISION_FAIL}:
         decision = DECISION_FAIL
 
-    editor_summary = parsed.get('editor_summary', 'No summary provided by local AI.')
-    author_letter = parsed.get('author_letter', 'No letter provided by local AI.')
-    if not isinstance(editor_summary, str):
-        editor_summary = str(editor_summary)
-    if not isinstance(author_letter, str):
-        author_letter = str(author_letter)
-
+    editor_summary, author_letter = _repair_missing_outputs(
+        parsed, decision, measured, items, kind
+    )
     return model, items, decision, editor_summary, author_letter
 
 

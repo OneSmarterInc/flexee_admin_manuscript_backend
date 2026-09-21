@@ -49,6 +49,69 @@ class EngineTests(unittest.TestCase):
         self.assertIn("Return JSON only", payload["messages"][0]["content"])
         self.assertLess(len(payload["messages"][0]["content"]), 13000)
 
+    def test_missing_ai_summary_is_repaired_without_resending_manuscript(self):
+        from review.services.review_engine import (
+            DECISION_REFER,
+            _repair_missing_outputs,
+        )
+
+        measured = {
+            "total_words": 14200,
+            "checks": [{"id": "total_words", "passed": False, "detail": "Outside target range.", "advisory": False}],
+        }
+        judgments = [
+            {"id": "sim_fit", "verdict": "pass", "evidence": "evidence", "gap": ""},
+        ]
+        response = httpx.Response(
+            200,
+            json={
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps({
+                        "editor_summary": "Repaired editor summary.",
+                        "author_letter": "Repaired author letter.",
+                    }),
+                }
+            },
+        )
+        with patch("review.services.local_llm.httpx.post", return_value=response) as post:
+            summary, letter = _repair_missing_outputs(
+                {"decision": DECISION_REFER},
+                DECISION_REFER,
+                measured,
+                judgments,
+                "book",
+            )
+        self.assertEqual(summary, "Repaired editor summary.")
+        self.assertEqual(letter, "Repaired author letter.")
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["options"]["num_ctx"], 2048)
+        self.assertEqual(payload["options"]["num_predict"], 300)
+        self.assertLess(len(payload["messages"][0]["content"]), 5000)
+        self.assertIn("14200", payload["messages"][0]["content"])
+
+    def test_missing_ai_summary_has_deterministic_fallback(self):
+        from review.services.review_engine import DECISION_FAIL, _repair_missing_outputs
+
+        measured = {
+            "total_words": 14200,
+            "checks": [{"id": "total_words", "passed": False, "detail": "Outside target range.", "advisory": False}],
+        }
+        judgments = []
+        with patch(
+            "review.services.review_engine.ollama_chat_json",
+            side_effect=RuntimeError("Ollama unavailable"),
+        ):
+            summary, letter = _repair_missing_outputs(
+                {},
+                DECISION_FAIL,
+                measured,
+                judgments,
+                "book",
+            )
+        self.assertIn("Structural review: 14,200 words.", summary)
+        self.assertIn("revised and resubmitted", letter)
+
     def test_ollama_client_reports_unavailable_server(self):
         from review.services.local_llm import ollama_chat_json
         with patch(

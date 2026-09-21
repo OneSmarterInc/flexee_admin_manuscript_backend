@@ -320,7 +320,7 @@ Based on the structural measurements and your criteria judgments, you must deter
 - If ANY criterion needs work, or an advisory criterion fails, the decision MUST be "REFER_TO_HUMAN_WITH_FLAGS".
 - Otherwise, the decision is "PASS_TO_HUMAN".
 
-You must also write an `editor_summary` (a professional summary of the structural checks and your findings. Format it clearly using paragraphs or bullet points so it is highly readable, and add an empty line/space after every 2 points or concepts to keep it minimal and visually spaced out) and an `author_letter` (a polite letter to the author outlining the results, using the decision logic: "ready for human review" if pass, "needs human review or clarification" if refer, "revise and resubmit" if return).
+You must also write an `editor_summary`. It MUST contain exactly these four numbered sections in this order: "1. Structural Findings", "2. Rubric Findings", "3. Key Gaps / Issues", and "4. Overall Review Conclusion". Under each section use concise bullet points. Include the supplied structural measurements and rubric findings accurately. Do not invent counts or evidence. The backend will also validate and format the structure before displaying it. Then write an `author_letter` (a polite letter to the author outlining the results, using the decision logic: "ready for human review" if pass, "needs human review or clarification" if refer, "revise and resubmit" if return).
 
 Return ONLY a JSON object, no prose, no code fences. Shape:
 { 
@@ -364,22 +364,121 @@ def _mock_judgment(rubric_items, disclosure, measured):
     return '(mock)', items, decision, "Mock editor summary.", "Mock author letter."
 
 
-def _fallback_editor_summary(measured, judgments):
-    failed_checks = [check['detail'] for check in measured['checks'] if not check['passed']]
-    needs_work = [item for item in judgments if item.get('verdict') in {'needs_work', 'fail'}]
-    parts = [
-        f"Structural review: {measured['total_words']:,} words.",
+def _summary_items_by_verdict(judgments, verdict):
+    return [item for item in judgments if item.get('verdict') == verdict]
+
+
+def _format_editor_summary(ai_summary, measured, judgments):
+    """Enforce the Admin Portal editor-summary structure.
+
+    Facts and counts come from deterministic Python review measurements. The
+    model supplies the narrative conclusion/key-gap wording, but cannot change
+    the required section order or numeric findings.
+    """
+    checks = measured.get('checks', [])
+    structural_lines = [
+        f"- Total word count: {measured.get('total_words', 0):,}",
     ]
-    if failed_checks:
-        parts.append("Structural issues: " + " ".join(failed_checks))
+    if 'chapters' in measured:
+        structural_lines.append(f"- Chapter count: {len(measured.get('chapters', []))}")
+        structural_lines.append(f"- Figure count: {measured.get('figures', 0)}")
+    structural_lines.append("- Structural checks:")
+    structural_lines.extend(
+        f"  - {check['label']}: {'PASS' if check['passed'] else 'FAIL'} — {check['detail']}"
+        for check in checks
+    )
+
+    passed = _summary_items_by_verdict(judgments, 'pass')
+    needs_work = _summary_items_by_verdict(judgments, 'needs_work')
+    failed = _summary_items_by_verdict(judgments, 'fail')
+
+    rubric_lines = [
+        "- Criteria that passed: " + (
+            ", ".join(item.get('id', '') for item in passed) if passed else "None."
+        ),
+        "- Criteria needing work: " + (
+            ", ".join(item.get('id', '') for item in needs_work) if needs_work else "None."
+        ),
+        "- Criteria that failed: " + (
+            ", ".join(item.get('id', '') for item in failed) if failed else "None."
+        ),
+        "- Supporting evidence:",
+    ]
+    evidence_items = [item for item in judgments if item.get('evidence')]
+    if evidence_items:
+        rubric_lines.extend(
+            f"  - {item.get('id', 'criterion')}: {item.get('evidence')}"
+            for item in evidence_items
+        )
     else:
-        parts.append("All measured structural requirements passed.")
-    if needs_work:
-        labels = ", ".join(item.get('id', 'criterion') for item in needs_work)
-        parts.append(f"Criteria needing attention: {labels}.")
-    else:
-        parts.append("No rubric criterion was marked as needing additional work.")
-    return " ".join(parts)
+        rubric_lines.append("  - No supporting evidence was returned by the local AI.")
+
+    gap_items = [
+        item for item in judgments
+        if item.get('gap') and item.get('verdict') in {'needs_work', 'fail'}
+    ]
+    structural_gaps = [check['detail'] for check in checks if not check['passed']]
+    gap_lines = []
+    for detail in structural_gaps:
+        gap_lines.append(f"- {detail}")
+    for item in gap_items:
+        gap_lines.append(f"- {item.get('id', 'criterion')}: {item.get('gap')}")
+    if not gap_lines:
+        gap_lines.append("- No key gaps or issues were identified by the automated review.")
+
+    # Keep the AI's narrative as the conclusion, while stripping any headings
+    # it may have generated so the backend owns the visible structure.
+    conclusion = str(ai_summary or '').strip()
+    conclusion = re.sub(
+        r'(?im)^\s*(?:1\.?\s*)?Structural Findings\s*:?[ \t]*$',
+        '',
+        conclusion,
+    )
+    conclusion = re.sub(
+        r'(?im)^\s*(?:2\.?\s*)?Rubric Findings\s*:?[ \t]*$',
+        '',
+        conclusion,
+    )
+    conclusion = re.sub(
+        r'(?im)^\s*(?:3\.?\s*)?Key Gaps\s*/?\s*Issues\s*:?[ \t]*$',
+        '',
+        conclusion,
+    )
+    conclusion = re.sub(
+        r'(?im)^\s*(?:4\.?\s*)?Overall Review Conclusion\s*:?[ \t]*$',
+        '',
+        conclusion,
+    ).strip()
+    if not conclusion:
+        decision_text = {
+            DECISION_PASS: "The manuscript meets the automated structural and rubric checks and is ready for human review.",
+            DECISION_REFER: "The manuscript has findings that require human review or clarification before a final decision.",
+            DECISION_FAIL: "The manuscript has structural or rubric findings that should be addressed before resubmission.",
+        }
+        conclusion = decision_text.get(
+            measured.get('decision'),
+            "The automated review identified the findings listed above.",
+        )
+
+    return (
+        "Editor Summary\n\n"
+        "1. Structural Findings\n"
+        + "\n".join(structural_lines)
+        + "\n\n"
+        "2. Rubric Findings\n"
+        + "\n".join(rubric_lines)
+        + "\n\n"
+        "3. Key Gaps / Issues\n"
+        + "\n".join(gap_lines)
+        + "\n\n"
+        "4. Overall Review Conclusion\n"
+        + conclusion
+    )
+
+
+def _fallback_editor_summary(measured, judgments):
+    decision = DECISION_FAIL if any(not c['passed'] for c in measured.get('checks', [])) else DECISION_PASS
+    return _format_editor_summary("", measured, judgments)
 
 
 def _fallback_author_letter(decision, measured, judgments):
@@ -393,24 +492,19 @@ def _fallback_author_letter(decision, measured, judgments):
 
 
 def _repair_missing_outputs(parsed, decision, measured, judgments, kind):
-    """Repair missing small output fields without resending the manuscript.
-
-    A small Qwen3 repair request is deliberately based only on the already
-    computed measurements/judgments. If local inference fails, deterministic
-    text is returned so the admin portal never displays an empty AI result.
-    """
+    """Repair missing small output fields without resending the manuscript."""
     summary = parsed.get('editor_summary') if isinstance(parsed, dict) else None
     letter = parsed.get('author_letter') if isinstance(parsed, dict) else None
     summary_ok = isinstance(summary, str) and bool(summary.strip())
     letter_ok = isinstance(letter, str) and bool(letter.strip())
     if summary_ok and letter_ok:
-        return summary.strip(), letter.strip()
+        return _format_editor_summary(summary, measured, judgments), letter.strip()
 
     fallback_summary = _fallback_editor_summary(measured, judgments)
     fallback_letter = _fallback_author_letter(decision, measured, judgments)
     if os.getenv('MOCK_AI_REVIEW', 'false').lower() in {'1', 'true', 'yes', 'on'}:
         return (
-            summary.strip() if summary_ok else fallback_summary,
+            _format_editor_summary(summary if summary_ok else "", measured, judgments),
             letter.strip() if letter_ok else fallback_letter,
         )
 
@@ -430,12 +524,14 @@ def _repair_missing_outputs(parsed, decision, measured, judgments, kind):
     prompt = (
         "Repair the missing fields in this manuscript review. Return JSON only. "
         "Do not invent facts and use only the supplied review data. "
-        "editor_summary must be 2-4 concise sentences. "
+        "editor_summary must contain exactly four numbered sections: "
+        "1. Structural Findings; 2. Rubric Findings; 3. Key Gaps / Issues; "
+        "4. Overall Review Conclusion. "
         "author_letter must be 2-4 polite sentences appropriate to the decision. "
         f"Review data:\n{json.dumps(compact, ensure_ascii=False)}"
     )
     try:
-        _, output = ollama_chat_json(prompt, max_tokens=300, timeout=90, num_ctx=2048)
+        _, output = ollama_chat_json(prompt, max_tokens=400, timeout=90, num_ctx=2048)
         repaired = _parse_model_json(output)
         repaired_summary = repaired.get('editor_summary') if isinstance(repaired, dict) else None
         repaired_letter = repaired.get('author_letter') if isinstance(repaired, dict) else None
@@ -443,11 +539,11 @@ def _repair_missing_outputs(parsed, decision, measured, judgments, kind):
             repaired_summary = fallback_summary
         if not isinstance(repaired_letter, str) or not repaired_letter.strip():
             repaired_letter = fallback_letter
-        return repaired_summary.strip(), repaired_letter.strip()
+        return _format_editor_summary(repaired_summary, measured, judgments), repaired_letter.strip()
     except (RuntimeError, ValueError, TypeError, json.JSONDecodeError):
         return (
-            summary.strip() if summary_ok else fallback_summary,
-            letter.strip() if letter_ok else fallback_letter,
+            fallback_summary,
+            fallback_letter,
         )
 
 
@@ -509,7 +605,7 @@ def run_review(content, filename, kind, declared_sim='', disclosure=''):
     if kind == 'book':
         # Append the field briefing to the editor summary
         field_briefing = run_field_agent(raw_text)
-        editor_summary += field_briefing
+        editor_summary += "\n\n" + field_briefing.lstrip()
     
     record = {
         'version': 'django-sqlite-v1',

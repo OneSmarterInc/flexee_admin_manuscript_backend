@@ -135,10 +135,10 @@ def submit(request):
     upload.seek(0)
     digest = hashlib.sha256(content).hexdigest()
 
-    # If the upload is a zip, extract ALL manuscript files from inside it
     review_content = content
     review_filename = upload.name
-    zip_contents = None  # will hold per-document metadata for ZIP uploads
+    zip_contents = None
+    zip_overall_source = None
     if upload.name.lower().endswith('.zip'):
         try:
             from .services.review_engine import extract_text, word_count as wc_fn
@@ -150,11 +150,10 @@ def submit(request):
                 if not manuscript_entries:
                     return JsonResponse({'detail': 'No .docx, .pdf, or .md file found inside the ZIP archive', 'errors': ['No .docx, .pdf, or .md file found inside the ZIP archive']}, status=400)
 
-                # Extract text and stats for every document in the ZIP
                 zip_docs = []
-                all_texts = []
                 docs_to_summarize = []
-                for entry_name in manuscript_entries:
+                combined_parts = []
+                for index, entry_name in enumerate(manuscript_entries, start=1):
                     entry_bytes = zf.read(entry_name)
                     base_name = os.path.basename(entry_name)
                     try:
@@ -163,16 +162,25 @@ def submit(request):
                     except Exception:
                         doc_text = ''
                         doc_words = 0
-                    
+
                     docs_to_summarize.append((base_name, entry_name, doc_words, doc_text))
-                    all_texts.append(doc_text)
-                
+                    if doc_text.strip():
+                        combined_parts.append(
+                            f"# ZIP Document {index}: {base_name}\n"
+                            f"Source path: {entry_name}\n"
+                            f"Word count: {doc_words}\n\n"
+                            f"{doc_text.strip()}"
+                        )
+
+                if not combined_parts:
+                    return JsonResponse({'detail': 'No extractable text found inside the ZIP archive', 'errors': ['No extractable text found inside the ZIP archive']}, status=400)
+
                 # Keep concurrency low so CPU/RAM contention does not make local
-                # Qwen3 slower on an 8 GB machine. Ollama reuses the loaded model.
+                # Qwen2.5 slower on an 8 GB machine. Ollama reuses the loaded model.
                 max_workers = max(1, min(int(os.getenv('OLLAMA_CHAPTER_WORKERS', '2')), 2))
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = {
-                        executor.submit(_generate_chapter_summary, d[3]): d 
+                        executor.submit(_generate_chapter_summary, d[3]): d
                         for d in docs_to_summarize
                     }
                     results_map = {}
@@ -181,8 +189,9 @@ def submit(request):
                         try:
                             results_map[d[1]] = future.result()
                         except Exception:
-                            results_map[d[1]] = d[3][:500].strip() + '…'
-                
+                            fallback = d[3][:500].strip()
+                            results_map[d[1]] = (fallback + '…') if fallback else '(error)'
+
                 for d in docs_to_summarize:
                     base_name, entry_name, doc_words, doc_text = d
                     zip_docs.append({
@@ -194,10 +203,17 @@ def submit(request):
 
                 zip_contents = zip_docs
 
-                # Use the first document as the primary review file,
-                # and concatenate all texts for the combined review
-                review_content = zf.read(manuscript_entries[0])
-                review_filename = os.path.basename(manuscript_entries[0])
+                # Generate the main editor summary from all extracted ZIP documents,
+                # not only the first chapter/file. The per-file chapter summaries
+                # remain available separately in zip_contents.
+                combined_text = "\n\n---\n\n".join(combined_parts)
+                review_content = combined_text.encode('utf-8')
+                review_filename = f"{os.path.splitext(os.path.basename(upload.name))[0]}_combined.md"
+                zip_overall_source = {
+                    'type': 'combined_zip_text',
+                    'document_count': len(zip_docs),
+                    'filename': review_filename,
+                }
 
         except zipfile.BadZipFile:
             return JsonResponse({'detail': 'The uploaded file is not a valid ZIP archive', 'errors': ['The uploaded file is not a valid ZIP archive']}, status=400)
@@ -221,6 +237,8 @@ def submit(request):
         review_record = result['record']
         if zip_contents:
             review_record['zip_contents'] = zip_contents
+        if zip_overall_source:
+            review_record['zip_overall_summary_source'] = zip_overall_source
         submission.review_record = review_record
         submission.editor_summary = result['editor_summary']
         submission.author_letter = result['author_letter']
@@ -276,17 +294,17 @@ def admin_verify_password(request):
     password_hash = os.getenv('ADMIN_PASSWORD_HASH', '')
     totp_secret = os.getenv('ADMIN_TOTP_SECRET', '')
     configured = bool(password_hash and totp_secret and os.getenv('ADMIN_SESSION_SECRET', ''))
-    
+
     ok = configured and username == expected_user and verify_password(password, password_hash)
-    
+
     if not ok:
         AdminAuthEvent.objects.create(remote_hash=rh, success=False, detail={'username': username, 'reason': 'invalid_credentials'})
         return JsonResponse({'detail': 'Invalid username or password.'}, status=401)
-        
+
     issuer = urllib.parse.quote('Flexee Admin')
     user = urllib.parse.quote(username)
     totp_uri = f"otpauth://totp/{issuer}:{user}?secret={totp_secret}&issuer={issuer}"
-    
+
     return JsonResponse({'ok': True, 'totp_uri': totp_uri})
 
 
@@ -420,10 +438,10 @@ def admin_submission_accept(request, submission_id):
         submission = Submission.objects.get(id=submission_id)
     except Submission.DoesNotExist:
         return JsonResponse({'detail': 'Submission not found'}, status=404)
-        
+
     if submission.admin_decision:
         return JsonResponse({'detail': 'Submission already has an admin decision'}, status=400)
-        
+
     data = _json_body(request)
     message = str(data.get('message', '')).strip()
 
@@ -431,7 +449,7 @@ def admin_submission_accept(request, submission_id):
     submission.acceptance_message = message
     submission.save(update_fields=['admin_decision', 'acceptance_message', 'updated_at'])
     ReviewEvent.objects.create(submission=submission, event_type='admin_accepted', detail={'message': message})
-    
+
     email_warning = None
     try:
         delivery = send_acceptance_email(submission, message)
@@ -446,7 +464,7 @@ def admin_submission_accept(request, submission_id):
         submission.notification_detail = {'error': email_warning}
         submission.save(update_fields=['notification_status', 'notification_detail', 'updated_at'])
         ReviewEvent.objects.create(submission=submission, event_type='acceptance_email_error', detail={'error': email_warning})
-        
+
     return JsonResponse({'ok': True, 'admin_decision': submission.admin_decision, 'email_warning': email_warning})
 
 
@@ -458,20 +476,20 @@ def admin_submission_reject(request, submission_id):
         submission = Submission.objects.get(id=submission_id)
     except Submission.DoesNotExist:
         return JsonResponse({'detail': 'Submission not found'}, status=404)
-        
+
     if submission.admin_decision:
         return JsonResponse({'detail': 'Submission already has an admin decision'}, status=400)
-        
+
     data = _json_body(request)
     reason = str(data.get('reason', '')).strip()
     if not reason:
         return JsonResponse({'detail': 'Rejection reason is required'}, status=400)
-        
+
     submission.admin_decision = 'REJECTED'
     submission.rejection_reason = reason
     submission.save(update_fields=['admin_decision', 'rejection_reason', 'updated_at'])
     ReviewEvent.objects.create(submission=submission, event_type='admin_rejected', detail={'reason': reason})
-    
+
     email_warning = None
     try:
         delivery = send_rejection_email(submission, reason)
@@ -486,7 +504,7 @@ def admin_submission_reject(request, submission_id):
         submission.notification_detail = {'error': email_warning}
         submission.save(update_fields=['notification_status', 'notification_detail', 'updated_at'])
         ReviewEvent.objects.create(submission=submission, event_type='rejection_email_error', detail={'error': email_warning})
-        
+
     return JsonResponse({'ok': True, 'admin_decision': submission.admin_decision, 'email_warning': email_warning})
 
 
@@ -509,14 +527,14 @@ def admin_submission_send_email(request, submission_id):
         submission = Submission.objects.get(id=submission_id)
     except Submission.DoesNotExist:
         return JsonResponse({'detail': 'Submission not found'}, status=404)
-        
+
     data = _json_body(request)
     subject = str(data.get('subject', '')).strip()
     body = str(data.get('body', '')).strip()
-    
+
     if not subject or not body:
         return JsonResponse({'detail': 'Subject and body are required'}, status=400)
-        
+
     email_warning = None
     try:
         from .services.email_service import send_custom_email
@@ -532,7 +550,7 @@ def admin_submission_send_email(request, submission_id):
         submission.notification_detail = {'error': email_warning}
         submission.save(update_fields=['notification_status', 'notification_detail', 'updated_at'])
         ReviewEvent.objects.create(submission=submission, event_type='custom_email_error', detail={'error': email_warning})
-        
+
     return JsonResponse({'ok': True, 'email_warning': email_warning})
 
 
@@ -543,7 +561,7 @@ def admin_submission_download(request, submission_id):
         submission = Submission.objects.get(id=submission_id)
         if not submission.manuscript_file:
             return JsonResponse({'detail': 'No manuscript file available for this submission (likely submitted before storage feature)'}, status=404)
-        
+
         # Determine content type based on filename
         content_type = 'application/pdf'
         if submission.manuscript_filename.lower().endswith('.docx'):
@@ -552,7 +570,7 @@ def admin_submission_download(request, submission_id):
             content_type = 'text/markdown'
         elif submission.manuscript_filename.lower().endswith('.zip'):
             content_type = 'application/zip'
-            
+
         return FileResponse(
             submission.manuscript_file.open('rb'),
             content_type=content_type,
@@ -604,7 +622,7 @@ def admin_smtp_settings(request):
 def admin_smtp_test(request):
     if request.method != 'POST':
         return JsonResponse({'error': 'Method not allowed'}, status=405)
-    
+
     try:
         body = json.loads(request.body)
         host = body.get('host', '')
@@ -616,11 +634,11 @@ def admin_smtp_test(request):
         sender_email = body.get('sender_email', '')
         sender_name = body.get('sender_name', '')
         test_email = body.get('test_email', '').strip()
-        
+
         if password.strip() == '':
             smtp, _ = SMTPSettings.objects.get_or_create(id=1)
             password = smtp.password
-            
+
         from django.core.mail import get_connection, EmailMultiAlternatives
         connection = get_connection(
             backend='django.core.mail.backends.smtp.EmailBackend',
@@ -632,14 +650,14 @@ def admin_smtp_test(request):
             use_ssl=use_ssl,
             fail_silently=False,
         )
-        
+
         from_header = f"{sender_name} <{sender_email}>" if sender_name and sender_email else (sender_email or username)
         target_email = test_email or sender_email or username
         message = EmailMultiAlternatives(
-            subject='Test SMTP Connection - Flexee', 
-            body='This is a test email to verify your SMTP configuration in Flexee.', 
-            from_email=from_header, 
-            to=[target_email], 
+            subject='Test SMTP Connection - Flexee',
+            body='This is a test email to verify your SMTP configuration in Flexee.',
+            from_email=from_header,
+            to=[target_email],
             connection=connection
         )
         sent = message.send(fail_silently=False)
@@ -647,6 +665,6 @@ def admin_smtp_test(request):
             return JsonResponse({'ok': True, 'message': 'Test email sent successfully!'})
         else:
             return JsonResponse({'error': 'Failed to send test email for unknown reasons.'}, status=400)
-            
+
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=400)

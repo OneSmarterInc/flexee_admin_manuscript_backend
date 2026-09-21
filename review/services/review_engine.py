@@ -368,7 +368,7 @@ def _summary_items_by_verdict(judgments, verdict):
     return [item for item in judgments if item.get('verdict') == verdict]
 
 
-def _format_editor_summary(ai_summary, measured, judgments):
+def _format_editor_summary(ai_summary, measured, judgments, decision=None):
     """Enforce the Admin Portal editor-summary structure.
 
     Facts and counts come from deterministic Python review measurements. The
@@ -429,6 +429,208 @@ def _format_editor_summary(ai_summary, measured, judgments):
     # Keep the AI's narrative as the conclusion, while stripping any headings
     # it may have generated so the backend owns the visible structure.
     conclusion = str(ai_summary or '').strip()
+    section_four = re.search(
+        r'(?is)(?:^|\\n)\\s*4\\.?\\s*Overall Review Conclusion\\s*:?\\s*\\n?(.*)
+        r'(?im)^\s*(?:1\.?\s*)?Structural Findings\s*:?[ \t]*$',
+        '',
+        conclusion,
+    )
+    conclusion = re.sub(
+        r'(?im)^\s*(?:2\.?\s*)?Rubric Findings\s*:?[ \t]*$',
+        '',
+        conclusion,
+    )
+    conclusion = re.sub(
+        r'(?im)^\s*(?:3\.?\s*)?Key Gaps\s*/?\s*Issues\s*:?[ \t]*$',
+        '',
+        conclusion,
+    )
+    conclusion = re.sub(
+        r'(?im)^\s*(?:4\.?\s*)?Overall Review Conclusion\s*:?[ \t]*$',
+        '',
+        conclusion,
+    ).strip()
+    if not conclusion:
+        decision_text = {
+            DECISION_PASS: "The manuscript meets the automated structural and rubric checks and is ready for human review.",
+            DECISION_REFER: "The manuscript has findings that require human review or clarification before a final decision.",
+            DECISION_FAIL: "The manuscript has structural or rubric findings that should be addressed before resubmission.",
+        }
+        conclusion = decision_text.get(
+            decision,
+            "The automated review identified the findings listed above.",
+        )
+
+    return (
+        "Editor Summary\n\n"
+        "1. Structural Findings\n"
+        + "\n".join(structural_lines)
+        + "\n\n"
+        "2. Rubric Findings\n"
+        + "\n".join(rubric_lines)
+        + "\n\n"
+        "3. Key Gaps / Issues\n"
+        + "\n".join(gap_lines)
+        + "\n\n"
+        "4. Overall Review Conclusion\n"
+        + conclusion
+    )
+
+
+def _fallback_editor_summary(measured, judgments):
+    decision = DECISION_FAIL if any(not c['passed'] for c in measured.get('checks', [])) else DECISION_PASS
+    return _format_editor_summary("", measured, judgments, DECISION_FAIL if any(not c['passed'] for c in measured.get('checks', [])) else DECISION_PASS)
+
+
+def _fallback_author_letter(decision, measured, judgments):
+    if decision == DECISION_PASS:
+        opening = "The manuscript is ready for human review."
+    elif decision == DECISION_REFER:
+        opening = "The manuscript needs human review or clarification before a final decision."
+    else:
+        opening = "The manuscript should be revised and resubmitted."
+    return f"{opening} The automated review measured {measured['total_words']:,} words and recorded the current structural and rubric findings in the review record."
+
+
+def _repair_missing_outputs(parsed, decision, measured, judgments, kind):
+    """Repair missing small output fields without resending the manuscript."""
+    summary = parsed.get('editor_summary') if isinstance(parsed, dict) else None
+    letter = parsed.get('author_letter') if isinstance(parsed, dict) else None
+    summary_ok = isinstance(summary, str) and bool(summary.strip())
+    letter_ok = isinstance(letter, str) and bool(letter.strip())
+    if summary_ok and letter_ok:
+        return _format_editor_summary(summary, measured, judgments, decision), letter.strip()
+
+    fallback_summary = _fallback_editor_summary(measured, judgments)
+    fallback_letter = _fallback_author_letter(decision, measured, judgments)
+    if os.getenv('MOCK_AI_REVIEW', 'false').lower() in {'1', 'true', 'yes', 'on'}:
+        return (
+            _format_editor_summary(summary if summary_ok else "", measured, judgments, decision),
+            letter.strip() if letter_ok else fallback_letter,
+        )
+
+    missing = []
+    if not summary_ok:
+        missing.append('editor_summary')
+    if not letter_ok:
+        missing.append('author_letter')
+    compact = {
+        'decision': decision,
+        'kind': kind,
+        'total_words': measured.get('total_words', 0),
+        'structural_checks': measured.get('checks', []),
+        'judgments': judgments,
+        'missing_fields': missing,
+    }
+    prompt = (
+        "Repair the missing fields in this manuscript review. Return JSON only. "
+        "Do not invent facts and use only the supplied review data. "
+        "editor_summary must contain exactly four numbered sections: "
+        "1. Structural Findings; 2. Rubric Findings; 3. Key Gaps / Issues; "
+        "4. Overall Review Conclusion. "
+        "author_letter must be 2-4 polite sentences appropriate to the decision. "
+        f"Review data:\n{json.dumps(compact, ensure_ascii=False)}"
+    )
+    try:
+        _, output = ollama_chat_json(prompt, max_tokens=400, timeout=90, num_ctx=2048)
+        repaired = _parse_model_json(output)
+        repaired_summary = repaired.get('editor_summary') if isinstance(repaired, dict) else None
+        repaired_letter = repaired.get('author_letter') if isinstance(repaired, dict) else None
+        if not isinstance(repaired_summary, str) or not repaired_summary.strip():
+            repaired_summary = fallback_summary
+        if not isinstance(repaired_letter, str) or not repaired_letter.strip():
+            repaired_letter = fallback_letter
+        return _format_editor_summary(repaired_summary, measured, judgments, decision), repaired_letter.strip()
+    except (RuntimeError, ValueError, TypeError, json.JSONDecodeError):
+        return (
+            fallback_summary,
+            fallback_letter,
+        )
+
+
+def judge_with_local_model(text, declared_sim, rubric_items, kind, disclosure, measured):
+    if os.getenv('MOCK_AI_REVIEW', 'false').lower() in {'1', 'true', 'yes', 'on'}:
+        return _mock_judgment(rubric_items, disclosure, measured)
+
+    model, output = ollama_chat_json(
+        _build_prompt(text, declared_sim, rubric_items, kind, measured),
+        max_tokens=int(os.getenv('OLLAMA_NUM_PREDICT', '4000')),
+    )
+    parsed = _parse_model_json(output)
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Local AI returned JSON, but the review payload was not an object.")
+
+    by_id = {item.get('id'): item for item in parsed.get('items', []) if isinstance(item, dict)}
+    allowed = {'pass', 'needs_work', 'fail'}
+    items = []
+    for rubric in rubric_items:
+        got = by_id.get(rubric['id'], {})
+        verdict = got.get('verdict') if got.get('verdict') in allowed else 'needs_work'
+        if rubric.get('advisory') and verdict == 'fail':
+            verdict = 'needs_work'
+        items.append({
+            'id': rubric['id'],
+            'verdict': verdict,
+            'evidence': got.get('evidence', '') if isinstance(got.get('evidence', ''), str) else '',
+            'gap': got.get('gap', '') if isinstance(got.get('gap', ''), str) else '',
+        })
+
+    decision = parsed.get('decision', DECISION_FAIL)
+    if decision not in {DECISION_PASS, DECISION_REFER, DECISION_FAIL}:
+        decision = DECISION_FAIL
+
+    editor_summary, author_letter = _repair_missing_outputs(
+        parsed, decision, measured, items, kind
+    )
+    return model, items, decision, editor_summary, author_letter
+
+
+
+from .field_agent import run_field_agent
+
+def run_review(content, filename, kind, declared_sim='', disclosure=''):
+    raw_text = extract_text(content, filename)
+    measured = structural_checks(raw_text, kind)
+    rubric_items = BOOK_JUDGMENT if kind == 'book' else ARTICLE_JUDGMENT
+    
+    model, judgments, decision, editor_summary, author_letter = judge_with_local_model(
+        f"{raw_text}\n\nAI-Use Disclosure (submitted with the manuscript):\n{disclosure}",
+        declared_sim,
+        rubric_items,
+        kind,
+        disclosure,
+        measured
+    )
+    
+    # --- Field Agent Logic ---
+    if kind == 'book':
+        # Append the field briefing to the editor summary
+        field_briefing = run_field_agent(raw_text)
+        editor_summary += "\n\n" + field_briefing.lstrip()
+    
+    record = {
+        'version': 'django-sqlite-v1',
+        'decision': decision,
+        'kind': kind,
+        'model': model,
+        'measured': measured,
+        'structural': measured['checks'],
+        'judgment': judgments,
+        'declared_sim': declared_sim,
+    }
+    return {
+        'decision': decision,
+        'model': model,
+        'total_words': measured['total_words'],
+        'record': record,
+        'editor_summary': editor_summary,
+        'author_letter': author_letter,
+    }
+,
+        conclusion,
+    )
+    if section_four:
+        conclusion = section_four.group(1).strip()
     conclusion = re.sub(
         r'(?im)^\s*(?:1\.?\s*)?Structural Findings\s*:?[ \t]*$',
         '',

@@ -32,7 +32,22 @@ class EngineTests(unittest.TestCase):
         self.assertFalse(payload["stream"])
         self.assertEqual(payload["format"], "json")
         self.assertEqual(payload["options"]["num_predict"], 123)
-        self.assertEqual(payload["options"]["num_ctx"], 8192)
+        self.assertEqual(payload["options"]["num_ctx"], 6144)
+
+    def test_chapter_summary_uses_small_context_and_output_budget(self):
+        response = httpx.Response(
+            200,
+            json={"message": {"role": "assistant", "content": json.dumps({"summary": "A concise chapter summary."})}},
+        )
+        with patch("review.services.local_llm.httpx.post", return_value=response) as post:
+            from review.views import _generate_chapter_summary
+            summary = _generate_chapter_summary("chapter text " * 5000)
+        self.assertEqual(summary, "A concise chapter summary.")
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["options"]["num_ctx"], 4096)
+        self.assertEqual(payload["options"]["num_predict"], 160)
+        self.assertIn("Return JSON only", payload["messages"][0]["content"])
+        self.assertLess(len(payload["messages"][0]["content"]), 13000)
 
     def test_ollama_client_reports_unavailable_server(self):
         from review.services.local_llm import ollama_chat_json

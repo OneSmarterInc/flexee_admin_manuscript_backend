@@ -20,7 +20,7 @@ def _strip_thinking(text):
     return value.strip()
 
 
-def ollama_chat_json(prompt, *, max_tokens=None, timeout=None):
+def ollama_chat_json(prompt, *, max_tokens=None, timeout=None, num_ctx=None):
     """Call the local Ollama Qwen3 endpoint and return its JSON-mode content.
 
     No cloud credentials are used. The caller remains responsible for validating
@@ -28,7 +28,7 @@ def ollama_chat_json(prompt, *, max_tokens=None, timeout=None):
     """
     base_url = os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_URL).rstrip("/")
     model = os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL).strip() or DEFAULT_OLLAMA_MODEL
-    num_ctx = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
+    num_ctx = int(num_ctx if num_ctx is not None else os.getenv("OLLAMA_NUM_CTX", "6144"))
     num_predict = int(
         max_tokens if max_tokens is not None else os.getenv("OLLAMA_NUM_PREDICT", "4000")
     )
@@ -42,6 +42,7 @@ def ollama_chat_json(prompt, *, max_tokens=None, timeout=None):
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
         "think": False,
+        "keep_alive": "5m",
         "format": "json",
         "options": {
             "temperature": temperature,

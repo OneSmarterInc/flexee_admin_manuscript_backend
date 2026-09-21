@@ -4,7 +4,6 @@ import os
 import urllib.parse
 import uuid
 import zipfile
-import httpx
 import concurrent.futures
 from datetime import timedelta
 from io import BytesIO
@@ -29,24 +28,29 @@ def _generate_chapter_summary(text):
         preview += '…'
     if os.getenv('MOCK_AI_REVIEW', 'false').lower() in {'1', 'true', 'yes', 'on'}:
         return f"[MOCK AI] This is a mock AI summary for a chapter of {len(text)} characters."
-    key = os.getenv('ANTHROPIC_API_KEY', '').strip()
-    if not key:
-        return preview
-    model = os.getenv('ANTHROPIC_MODEL', 'claude-3-5-haiku-20241022').strip()
-    prompt = "Summarize the following chapter in 1-3 highly concise sentences. Focus purely on the main plot points or core arguments:\n\n" + text[:25000]
+
+    # Chapter summaries are intentionally small and use a shorter context/output
+    # budget than the full rubric review. This keeps ZIP uploads responsive on
+    # 8 GB RAM development machines while preserving the existing response shape.
+    from .services.local_llm import ollama_chat_json
+    prompt = (
+        "Summarize the following manuscript chapter in 1-3 concise sentences. "
+        "Focus only on the main plot points or core arguments. Do not invent facts. "
+        "Return JSON only with one key: \"summary\".\n\n"
+        + text[:12000]
+    )
     try:
-        response = httpx.post(
-            'https://api.anthropic.com/v1/messages',
-            headers={'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01'},
-            json={'model': model, 'max_tokens': 150, 'messages': [{'role': 'user', 'content': prompt}]},
-            timeout=45.0,
+        _, output = ollama_chat_json(
+            prompt,
+            max_tokens=160,
+            timeout=120,
+            num_ctx=4096,
         )
-        if response.status_code < 400:
-            payload = response.json()
-            ai_summary = ''.join(part.get('text', '') for part in payload.get('content', []) if part.get('type') == 'text').strip()
-            if ai_summary:
-                return ai_summary
-    except Exception:
+        payload = json.loads(output)
+        summary = payload.get("summary", "") if isinstance(payload, dict) else ""
+        if isinstance(summary, str) and summary.strip():
+            return summary.strip()
+    except (RuntimeError, ValueError, TypeError, json.JSONDecodeError):
         pass
     return preview
 
@@ -163,8 +167,10 @@ def submit(request):
                     docs_to_summarize.append((base_name, entry_name, doc_words, doc_text))
                     all_texts.append(doc_text)
                 
-                # Fetch AI summaries in parallel (max 5 concurrent requests)
-                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                # Keep concurrency low so CPU/RAM contention does not make local
+                # Qwen3 slower on an 8 GB machine. Ollama reuses the loaded model.
+                max_workers = max(1, min(int(os.getenv('OLLAMA_CHAPTER_WORKERS', '2')), 2))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = {
                         executor.submit(_generate_chapter_summary, d[3]): d 
                         for d in docs_to_summarize

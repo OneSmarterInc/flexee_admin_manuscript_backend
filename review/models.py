@@ -96,7 +96,7 @@ class SMTPSettings(models.Model):
 # Agentic Scholarly Submission Network
 #
 # These models intentionally live alongside the legacy Submission model while
-# the new multi-venue author workflow is introduced.  The existing book/article
+# the new multi-venue author workflow is introduced. The existing book/article
 # review pipeline therefore remains backward compatible.
 # ---------------------------------------------------------------------------
 
@@ -123,6 +123,8 @@ class Manuscript(models.Model):
     abstract = models.TextField(blank=True)
     keywords = models.JSONField(default=list, blank=True)
     ai_disclosure = models.TextField()
+    authorship_attested = models.BooleanField(default=False)
+    author_notes = models.TextField(blank=True)
     manuscript_filename = models.CharField(max_length=500)
     manuscript_file = models.FileField(upload_to='network_manuscripts/')
     manuscript_bytes = models.BigIntegerField()
@@ -229,11 +231,16 @@ class VenueMatch(models.Model):
     gaps = models.JSONField(default=list, blank=True)
     required_changes = models.JSONField(default=list, blank=True)
     matching_metadata = models.JSONField(default=dict, blank=True)
+    is_current = models.BooleanField(default=True, db_index=True)
 
     class Meta:
-        ordering = ['created_at', 'venue__name']
+        ordering = ['-created_at', 'venue__name']
         constraints = [
-            models.UniqueConstraint(fields=['manuscript', 'venue'], name='unique_current_venue_match'),
+            models.UniqueConstraint(
+                fields=['manuscript', 'venue'],
+                condition=models.Q(is_current=True),
+                name='unique_current_venue_match',
+            ),
         ]
 
 
@@ -251,11 +258,16 @@ class VenueAssessment(models.Model):
     agent_config_version = models.PositiveIntegerField(null=True, blank=True)
     engine_version = models.CharField(max_length=100, blank=True)
     error = models.JSONField(null=True, blank=True)
+    is_current = models.BooleanField(default=True, db_index=True)
 
     class Meta:
         ordering = ['-created_at']
         constraints = [
-            models.UniqueConstraint(fields=['manuscript', 'venue'], name='unique_current_venue_assess'),
+            models.UniqueConstraint(
+                fields=['manuscript', 'venue'],
+                condition=models.Q(is_current=True),
+                name='unique_current_venue_assess',
+            ),
         ]
 
 

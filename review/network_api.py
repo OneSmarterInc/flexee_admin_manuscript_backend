@@ -323,7 +323,7 @@ def author_manuscript_detail(request, manuscript_id):
         return JsonResponse({'detail': 'Manuscript not found'}, status=404)
 
     latest_readiness = manuscript.readiness_assessments.prefetch_related('evidence').first()
-    matches = manuscript.venue_matches.select_related('venue').all()
+    matches = manuscript.venue_matches.select_related('venue').filter(is_current=True)
     current_submission = manuscript.venue_submissions.select_related('venue').filter(is_current=True).first()
 
     response = JsonResponse({
@@ -352,7 +352,7 @@ def author_venue_matches(request, manuscript_id):
     manuscript = _get_author_manuscript(request, manuscript_id)
     if not manuscript:
         return JsonResponse({'detail': 'Manuscript not found'}, status=404)
-    matches = manuscript.venue_matches.select_related('venue').filter(venue__active=True)
+    matches = manuscript.venue_matches.select_related('venue').filter(venue__active=True, is_current=True)
     response = JsonResponse({'items': [_match_payload(item) for item in matches]})
     response['Cache-Control'] = 'no-store'
     return response
@@ -368,7 +368,7 @@ def author_venue_assessment(request, manuscript_id, venue_slug):
     except Venue.DoesNotExist:
         return JsonResponse({'detail': 'Venue not found'}, status=404)
 
-    item = manuscript.venue_assessments.select_related('venue').prefetch_related('evidence').filter(venue=venue).first()
+    item = manuscript.venue_assessments.select_related('venue').prefetch_related('evidence').filter(venue=venue, is_current=True).first()
     response = JsonResponse(_assessment_payload(item))
     response['Cache-Control'] = 'no-store'
     return response
@@ -426,14 +426,14 @@ def author_choose_venue(request, manuscript_id):
     except Venue.DoesNotExist:
         return JsonResponse({'detail': 'Venue not found'}, status=404)
 
-    match = manuscript.venue_matches.filter(venue=venue).first()
+    match = manuscript.venue_matches.filter(venue=venue, is_current=True).first()
     if not match:
         return JsonResponse({'detail': 'This venue has not been matched to the manuscript yet'}, status=409)
     if match.fit_level == 'not_fit':
         return JsonResponse({'detail': 'This venue is marked as not a fit for the manuscript'}, status=409)
 
     readiness = manuscript.readiness_assessments.filter(status='completed').first()
-    assessment = manuscript.venue_assessments.filter(venue=venue, status='completed').first()
+    assessment = manuscript.venue_assessments.filter(venue=venue, status='completed', is_current=True).first()
     packet_ready = bool(readiness and readiness.overall_state == 'ready' and assessment)
 
     with transaction.atomic():
@@ -524,12 +524,12 @@ def author_transfer_submission(request, manuscript_id):
     if venue.id == source.venue_id:
         return JsonResponse({'detail': 'Choose a different venue for transfer'}, status=400)
 
-    match = manuscript.venue_matches.filter(venue=venue).first()
+    match = manuscript.venue_matches.filter(venue=venue, is_current=True).first()
     if not match or match.fit_level == 'not_fit':
         return JsonResponse({'detail': 'The destination venue is not an eligible manuscript match'}, status=409)
 
     readiness = manuscript.readiness_assessments.filter(status='completed').first()
-    assessment = manuscript.venue_assessments.filter(venue=venue, status='completed').first()
+    assessment = manuscript.venue_assessments.filter(venue=venue, status='completed', is_current=True).first()
     packet_ready = bool(readiness and readiness.overall_state == 'ready' and assessment)
 
     with transaction.atomic():

@@ -106,7 +106,7 @@ class Migration(migrations.Migration):
                 ('manuscript', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='venue_matches', to='review.manuscript')),
                 ('venue', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='manuscript_matches', to='review.venue')),
             ],
-            options={'ordering': ['created_at', 'venue__name']},
+            options={'ordering': ['-created_at', 'venue__name']},
         ),
         migrations.CreateModel(
             name='VenueAssessment',
@@ -206,11 +206,11 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='venuematch',
-            constraint=models.UniqueConstraint(fields=('manuscript', 'venue'), name='unique_current_venue_match'),
+            constraint=models.UniqueConstraint(condition=models.Q(('is_current', True)), fields=('manuscript', 'venue'), name='unique_current_venue_match'),
         ),
         migrations.AddConstraint(
             model_name='venueassessment',
-            constraint=models.UniqueConstraint(fields=('manuscript', 'venue'), name='unique_current_venue_assess'),
+            constraint=models.UniqueConstraint(condition=models.Q(('is_current', True)), fields=('manuscript', 'venue'), name='unique_current_venue_assess'),
         ),
         migrations.AddIndex(
             model_name='venuesubmission',

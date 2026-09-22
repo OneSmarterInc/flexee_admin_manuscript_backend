@@ -64,6 +64,28 @@ DECISION_REFER = 'REFER_TO_HUMAN_WITH_FLAGS'
 DECISION_FAIL = 'RETURN_TO_AUTHOR'
 
 
+def compute_decision(measured, judgments):
+    """Compute the final review decision deterministically in Python.
+
+    The model may explain criteria and provide evidence, but it must not own the
+    final gate decision.  These rules intentionally mirror the acceptance policy:
+    structural failure and required-criterion failure return to the author;
+    needs-work findings refer to a human; only a clean pass advances.
+    """
+    checks = measured.get('checks', []) if isinstance(measured, dict) else []
+    if any(not check.get('passed') for check in checks):
+        return DECISION_FAIL
+
+    for item in judgments or []:
+        if item.get('verdict') == 'fail' and not item.get('advisory', False):
+            return DECISION_FAIL
+
+    if any(item.get('verdict') == 'needs_work' for item in judgments or []):
+        return DECISION_REFER
+
+    return DECISION_PASS
+
+
 def normalize_text(text):
     return str(text or '').replace('\r\n', '\n').replace('\r', '\n').replace('\x00', '').strip()
 
@@ -314,10 +336,12 @@ def _build_prompt(manuscript_text, declared_sim, rubric_items, kind, measured):
         lines.append(f"\n[{item['id']}] {item['label']}\n{item['criterion']}")
         
     lines.append('''
-Based on the structural measurements and your criteria judgments, you must determine the final decision.
+The application code will compute the final decision from the structural measurements and normalized criterion verdicts. Focus on judging each criterion and explaining the evidence. Include the `decision` field for compatibility only; it will not be trusted as the authoritative final decision.
+
+Decision rules applied by Python after your response:
 - If ANY structural measurement failed, the decision MUST be "RETURN_TO_AUTHOR".
 - If ANY non-advisory criterion fails, the decision MUST be "RETURN_TO_AUTHOR".
-- If ANY criterion needs work, or an advisory criterion fails, the decision MUST be "REFER_TO_HUMAN_WITH_FLAGS".
+- If ANY criterion needs work, the decision MUST be "REFER_TO_HUMAN_WITH_FLAGS".
 - Otherwise, the decision is "PASS_TO_HUMAN".
 
 You must also write an `editor_summary` using exactly these four numbered sections:
@@ -348,7 +372,6 @@ def _parse_model_json(raw):
 
 def _mock_judgment(rubric_items, disclosure, measured):
     items = []
-    has_needs_work = False
     for item in rubric_items:
         verdict = 'pass'
         evidence = 'Local mock-review mode is enabled; no live model judgment was performed.'
@@ -356,15 +379,15 @@ def _mock_judgment(rubric_items, disclosure, measured):
         if item['id'] == 'ai_disclosure' and len(disclosure.strip()) < 20:
             verdict = 'needs_work'
             gap = 'Provide a more specific AI-use disclosure.'
-            has_needs_work = True
-        items.append({'id': item['id'], 'verdict': verdict, 'evidence': evidence, 'gap': gap})
-        
-    decision = DECISION_PASS
-    if any(not check['passed'] for check in measured['checks']):
-        decision = DECISION_FAIL
-    elif has_needs_work:
-        decision = DECISION_REFER
+        items.append({
+            'id': item['id'],
+            'verdict': verdict,
+            'evidence': evidence,
+            'gap': gap,
+            'advisory': bool(item.get('advisory', False)),
+        })
 
+    decision = compute_decision(measured, items)
     summary = _format_editor_summary(measured, items, decision, "Mock editor summary.")
     return '(mock)', items, decision, summary, "Mock author letter."
 
@@ -565,11 +588,10 @@ def judge_with_local_model(text, declared_sim, rubric_items, kind, disclosure, m
             'verdict': verdict,
             'evidence': got.get('evidence', '') if isinstance(got.get('evidence', ''), str) else '',
             'gap': got.get('gap', '') if isinstance(got.get('gap', ''), str) else '',
+            'advisory': bool(rubric.get('advisory', False)),
         })
 
-    decision = parsed.get('decision', DECISION_FAIL)
-    if decision not in {DECISION_PASS, DECISION_REFER, DECISION_FAIL}:
-        decision = DECISION_FAIL
+    decision = compute_decision(measured, items)
 
     editor_summary, author_letter = _repair_missing_outputs(
         parsed, decision, measured, items, kind

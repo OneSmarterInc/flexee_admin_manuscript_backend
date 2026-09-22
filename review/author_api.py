@@ -367,6 +367,89 @@ def public_venues(request):
     return JsonResponse({'venues': [_venue_payload(item) for item in items]})
 
 
+def _normalise_label(value):
+    return re.sub(r'[^a-z0-9]+', '_', str(value or '').strip().lower()).strip('_')
+
+
+@csrf_exempt
+@require_POST
+def author_generate_matches(request, manuscript_id):
+    try:
+        manuscript = Manuscript.objects.get(id=manuscript_id)
+    except Manuscript.DoesNotExist:
+        return JsonResponse({'detail': 'Manuscript not found'}, status=404)
+
+    latest_readiness = manuscript.readiness_assessments.first()
+    if not latest_readiness or latest_readiness.status != 'completed':
+        return JsonResponse({'detail': 'Complete a readiness assessment before generating venue matches'}, status=409)
+    if not latest_readiness.summary.get('ready_for_matching', False):
+        return JsonResponse({'detail': 'Resolve blocking readiness issues before generating venue matches'}, status=409)
+
+    generated = []
+    for venue in Venue.objects.filter(active=True).select_related('organization'):
+        config = _active_config(venue)
+        reasons = []
+        gaps = []
+        evidence = []
+        eligibility = 'needs_changes'
+
+        if not config:
+            gaps.append('This venue does not yet have an active venue-agent configuration.')
+        else:
+            accepted = {_normalise_label(item) for item in config.article_types}
+            manuscript_type = _normalise_label(manuscript.manuscript_type)
+            if accepted:
+                if manuscript_type in accepted:
+                    reasons.append('The manuscript type is accepted by this venue.')
+                    evidence.append({
+                        'source_type': 'venue_policy',
+                        'source_locator': f'venue config v{config.version} · article_types',
+                        'claim': 'Manuscript type is accepted.',
+                    })
+                    eligibility = 'eligible'
+                else:
+                    gaps.append('The manuscript type is not listed among this venue’s accepted article types.')
+                    evidence.append({
+                        'source_type': 'venue_policy',
+                        'source_locator': f'venue config v{config.version} · article_types',
+                        'claim': 'Manuscript type requires editorial review before routing.',
+                    })
+                    eligibility = 'needs_changes'
+            else:
+                gaps.append('Accepted article types are not configured for this venue.')
+
+            if config.aims_scope:
+                reasons.append('Aims and scope are configured and ready for semantic fit analysis.')
+            else:
+                gaps.append('Aims and scope are not yet configured.')
+
+        fit_summary = (
+            'Passes the currently configured deterministic routing checks. Semantic scope fit still requires the matching agent.'
+            if eligibility == 'eligible'
+            else 'Requires configuration review or manuscript changes before semantic matching.'
+        )
+
+        match, _ = VenueMatch.objects.update_or_create(
+            manuscript=manuscript,
+            venue=venue,
+            defaults={
+                'venue_config': config,
+                'eligibility': eligibility,
+                'fit_summary': fit_summary,
+                'reasons': reasons,
+                'gaps': gaps,
+                'evidence': evidence,
+            },
+        )
+        generated.append(_match_payload(match))
+
+    return JsonResponse({
+        'matches': generated,
+        'matching_stage': 'deterministic_policy_gate_v1',
+        'note': 'No semantic fit ranking is performed by this endpoint. The AI matching agent will extend these persisted records.',
+    }, status=201)
+
+
 @require_GET
 def author_matches(request, manuscript_id):
     try:

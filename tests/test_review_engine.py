@@ -41,7 +41,12 @@ class EngineTests(unittest.TestCase):
         with patch("review.services.local_llm.httpx.post", return_value=response) as post:
             from review.views import _generate_chapter_summary
             summary = _generate_chapter_summary("chapter text " * 5000)
-        self.assertEqual(summary, "A concise chapter summary.")
+        self.assertIn("Editor Summary", summary)
+        self.assertIn("1. Structural Findings", summary)
+        self.assertIn("2. Rubric Findings", summary)
+        self.assertIn("3. Key Gaps / Issues", summary)
+        self.assertIn("4. Overall Review Conclusion", summary)
+        self.assertIn("A concise chapter summary.", summary)
         payload = post.call_args.kwargs["json"]
         self.assertEqual(payload["options"]["num_ctx"], 4096)
         self.assertEqual(payload["options"]["num_predict"], 160)
@@ -108,7 +113,10 @@ class EngineTests(unittest.TestCase):
                 judgments,
                 "book",
             )
-        self.assertIn("Structural review: 14,200 words.", summary)
+        self.assertIn("Editor Summary", summary)
+        self.assertIn("Total word count: 14,200", summary)
+        self.assertIn("Outside target range.", summary)
+        self.assertIn("RETURN_TO_AUTHOR", summary)
         self.assertIn("revised and resubmitted", letter)
 
     def test_ollama_client_reports_unavailable_server(self):

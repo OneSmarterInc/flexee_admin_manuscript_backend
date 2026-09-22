@@ -405,7 +405,7 @@ def author_venue_assessment(request, manuscript_id, venue_slug):
 @require_GET
 def public_venues(request):
     items = Venue.objects.filter(active=True).select_related('agent_config')
-    response = JsonResponse({'items': [_venue_admin(item) for item in items]})
+    response = JsonResponse({'items': [_venue_public(item, include_config=True) for item in items]})
     response['Cache-Control'] = 'no-store'
     return response
 
@@ -589,7 +589,7 @@ def author_transfer_submission(request, manuscript_id):
 def admin_venues(request):
     if request.method == 'GET':
         items = Venue.objects.select_related('agent_config').all()
-        response = JsonResponse({'items': [_venue_public(item, include_config=True) for item in items]})
+        response = JsonResponse({'items': [_venue_admin(item) for item in items]})
         response['Cache-Control'] = 'no-store'
         return response
 

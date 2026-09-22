@@ -49,7 +49,7 @@ class EngineTests(unittest.TestCase):
         self.assertIn("A concise chapter summary.", summary)
         payload = post.call_args.kwargs["json"]
         self.assertEqual(payload["options"]["num_ctx"], 4096)
-        self.assertEqual(payload["options"]["num_predict"], 160)
+        self.assertEqual(payload["options"]["num_predict"], 220)
         self.assertIn("Return JSON only", payload["messages"][0]["content"])
         self.assertLess(len(payload["messages"][0]["content"]), 13000)
 

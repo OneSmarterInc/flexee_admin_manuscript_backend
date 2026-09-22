@@ -58,6 +58,18 @@ def _bool_value(value):
     return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on', 'accepted'}
 
 
+def _parse_capacity(value):
+    if value in (None, ''):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ValueError('submission_capacity must be an integer')
+    if parsed < 0:
+        raise ValueError('submission_capacity cannot be negative')
+    return parsed
+
+
 def _hash_access_key(raw):
     return hashlib.sha256(str(raw or '').encode('utf-8')).hexdigest()
 
@@ -113,6 +125,31 @@ def _manuscript_summary(manuscript):
     }
 
 
+def _venue_public_config(config):
+    return {
+        'version': config.version,
+        'aims_scope': config.aims_scope,
+        'accepted_article_types': config.accepted_article_types,
+        'accepted_methods': config.accepted_methods,
+        'disclosures': config.disclosures,
+        'reporting_standards': config.reporting_standards,
+        'deadline_notes': config.deadline_notes,
+        'current_demand': config.current_demand,
+        'updated_at': config.updated_at.isoformat() if config.updated_at else None,
+    }
+
+
+def _venue_config(config):
+    return {
+        **_venue_public_config(config),
+        'quality_threshold': config.quality_threshold,
+        'policies': config.policies,
+        'desk_rejection_rules': config.desk_rejection_rules,
+        'submission_capacity': config.submission_capacity,
+        'reviewer_criteria': config.reviewer_criteria,
+    }
+
+
 def _venue_public(venue, *, include_config=False):
     data = {
         'id': str(venue.id),
@@ -129,27 +166,18 @@ def _venue_public(venue, *, include_config=False):
             config = venue.agent_config
         except VenueAgentConfig.DoesNotExist:
             config = None
-        data['agent_config'] = _venue_config(config) if config else None
+        data['agent_config'] = _venue_public_config(config) if config else None
     return data
 
 
-def _venue_config(config):
-    return {
-        'version': config.version,
-        'aims_scope': config.aims_scope,
-        'accepted_article_types': config.accepted_article_types,
-        'accepted_methods': config.accepted_methods,
-        'quality_threshold': config.quality_threshold,
-        'policies': config.policies,
-        'disclosures': config.disclosures,
-        'reporting_standards': config.reporting_standards,
-        'desk_rejection_rules': config.desk_rejection_rules,
-        'deadline_notes': config.deadline_notes,
-        'submission_capacity': config.submission_capacity,
-        'current_demand': config.current_demand,
-        'reviewer_criteria': config.reviewer_criteria,
-        'updated_at': config.updated_at.isoformat() if config.updated_at else None,
-    }
+def _venue_admin(venue):
+    data = _venue_public(venue, include_config=False)
+    try:
+        config = venue.agent_config
+    except VenueAgentConfig.DoesNotExist:
+        config = None
+    data['agent_config'] = _venue_config(config) if config else None
+    return data
 
 
 def _readiness_payload(item):
@@ -377,7 +405,7 @@ def author_venue_assessment(request, manuscript_id, venue_slug):
 @require_GET
 def public_venues(request):
     items = Venue.objects.filter(active=True).select_related('agent_config')
-    response = JsonResponse({'items': [_venue_public(item, include_config=True) for item in items]})
+    response = JsonResponse({'items': [_venue_admin(item) for item in items]})
     response['Cache-Control'] = 'no-store'
     return response
 
@@ -581,6 +609,11 @@ def admin_venues(request):
     if errors:
         return JsonResponse({'detail': errors[0], 'errors': errors}, status=400)
 
+    try:
+        submission_capacity = _parse_capacity(data.get('submission_capacity'))
+    except ValueError as error:
+        return JsonResponse({'detail': str(error)}, status=400)
+
     with transaction.atomic():
         venue = Venue.objects.create(
             name=name,
@@ -602,11 +635,11 @@ def admin_venues(request):
             reporting_standards=_list_value(data.get('reporting_standards', [])),
             desk_rejection_rules=_list_value(data.get('desk_rejection_rules', [])),
             deadline_notes=str(data.get('deadline_notes', '')).strip(),
-            submission_capacity=data.get('submission_capacity') or None,
+            submission_capacity=submission_capacity,
             current_demand=data.get('current_demand') if isinstance(data.get('current_demand'), dict) else {},
             reviewer_criteria=data.get('reviewer_criteria') if isinstance(data.get('reviewer_criteria'), dict) else {},
         )
-    return JsonResponse({'venue': _venue_public(venue, include_config=True)}, status=201)
+    return JsonResponse({'venue': _venue_admin(venue)}, status=201)
 
 
 @csrf_exempt
@@ -619,7 +652,7 @@ def admin_venue_detail(request, venue_id):
         return JsonResponse({'detail': 'Venue not found'}, status=404)
 
     if request.method == 'GET':
-        response = JsonResponse({'venue': _venue_public(venue, include_config=True)})
+        response = JsonResponse({'venue': _venue_admin(venue)})
         response['Cache-Control'] = 'no-store'
         return response
 
@@ -693,7 +726,7 @@ def admin_venue_detail(request, venue_id):
         config.version += 1
         config.save(update_fields=list(dict.fromkeys(config_changed + ['version', 'updated_at'])))
 
-    return JsonResponse({'venue': _venue_public(venue, include_config=True)})
+    return JsonResponse({'venue': _venue_admin(venue)})
 
 
 @csrf_exempt

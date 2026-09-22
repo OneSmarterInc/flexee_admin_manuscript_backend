@@ -16,7 +16,7 @@ from .services.review_engine import extract_text, word_count
 
 ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
 ANTHROPIC_VERSION = '2023-06-01'
-DEFAULT_API_MODEL = 'claude-3-5-sonnet-latest'
+DEFAULT_API_MODEL = 'claude-3-haiku-20240307'
 
 
 def _json_body(request):

@@ -27,6 +27,8 @@ class Migration(migrations.Migration):
                 ('abstract', models.TextField(blank=True)),
                 ('keywords', models.JSONField(blank=True, default=list)),
                 ('ai_disclosure', models.TextField()),
+                ('authorship_attested', models.BooleanField(default=False)),
+                ('author_notes', models.TextField(blank=True)),
                 ('manuscript_filename', models.CharField(max_length=500)),
                 ('manuscript_file', models.FileField(upload_to='network_manuscripts/')),
                 ('manuscript_bytes', models.BigIntegerField()),
@@ -103,6 +105,7 @@ class Migration(migrations.Migration):
                 ('gaps', models.JSONField(blank=True, default=list)),
                 ('required_changes', models.JSONField(blank=True, default=list)),
                 ('matching_metadata', models.JSONField(blank=True, default=dict)),
+                ('is_current', models.BooleanField(db_index=True, default=True)),
                 ('manuscript', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='venue_matches', to='review.manuscript')),
                 ('venue', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='manuscript_matches', to='review.venue')),
             ],
@@ -120,6 +123,7 @@ class Migration(migrations.Migration):
                 ('agent_config_version', models.PositiveIntegerField(blank=True, null=True)),
                 ('engine_version', models.CharField(blank=True, max_length=100)),
                 ('error', models.JSONField(blank=True, null=True)),
+                ('is_current', models.BooleanField(db_index=True, default=True)),
                 ('manuscript', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='venue_assessments', to='review.manuscript')),
                 ('venue', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='assessments', to='review.venue')),
             ],
@@ -206,11 +210,11 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='venuematch',
-            constraint=models.UniqueConstraint(condition=models.Q(('is_current', True)), fields=('manuscript', 'venue'), name='unique_current_venue_match'),
+            constraint=models.UniqueConstraint(condition=models.Q(is_current=True), fields=('manuscript', 'venue'), name='unique_current_venue_match'),
         ),
         migrations.AddConstraint(
             model_name='venueassessment',
-            constraint=models.UniqueConstraint(condition=models.Q(('is_current', True)), fields=('manuscript', 'venue'), name='unique_current_venue_assess'),
+            constraint=models.UniqueConstraint(condition=models.Q(is_current=True), fields=('manuscript', 'venue'), name='unique_current_venue_assess'),
         ),
         migrations.AddIndex(
             model_name='venuesubmission',

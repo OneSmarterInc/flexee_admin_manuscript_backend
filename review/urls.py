@@ -1,6 +1,7 @@
 from django.urls import path
 from . import views
 from . import author_api
+from . import editor_api
 from .api_summary import admin_submission_api_summary
 
 urlpatterns = [
@@ -38,8 +39,18 @@ urlpatterns = [
 
     # Subscriber / venue configuration.
     path('admin/venues/', author_api.admin_venues),
+    path('admin/venues/<uuid:venue_id>/', editor_api.admin_venue_detail),
     path('admin/venues/<uuid:venue_id>/config/', author_api.admin_venue_config),
+    path('admin/venues/<uuid:venue_id>/configs/', editor_api.admin_venue_configs),
+    path('admin/venues/<uuid:venue_id>/configs/<int:config_id>/activate/', editor_api.admin_activate_venue_config),
     path('admin/venues/<uuid:venue_id>/feedback/', author_api.admin_editor_feedback),
+
+    # Venue editor workspace.
+    path('admin/venue-submissions/', editor_api.admin_venue_submissions),
+    path('admin/venue-submissions/<uuid:submission_id>/', editor_api.admin_venue_submission_detail),
+    path('admin/venue-submissions/<uuid:submission_id>/start-review/', editor_api.admin_start_venue_review),
+    path('admin/venue-submissions/<uuid:submission_id>/decision/', editor_api.admin_venue_submission_decision),
+    path('admin/venue-submissions/<uuid:submission_id>/download/', editor_api.admin_venue_submission_download),
 
     path('admin/smtp/', views.admin_smtp_settings),
     path('admin/smtp/test/', views.admin_smtp_test),

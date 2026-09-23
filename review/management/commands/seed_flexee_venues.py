@@ -15,7 +15,11 @@ FIELD_NOTES_CONFIG = {
         'A strong article is a grounded account of a real business use of AI and substantively covers '
         'the business/problem, what was tried, what happened, and what did not work.'
     ),
-    'reviewer_criteria': [],
+    'reviewer_criteria': [
+        'Applied AI implementation in real organizations',
+        'Business operations and change management',
+        'Practitioner evidence and implementation outcomes',
+    ],
     'policies': {
         'word_count': {'min': 1500, 'max': 3000},
         'authorship': 'Human-authored with AI assistance; AI-authored articles are not accepted.',
@@ -39,8 +43,15 @@ FIELD_NOTES_CONFIG = {
     ],
     'deadlines': {'submission': 'rolling', 'first_review_days': 15},
     'submission_capacity': {},
-    'current_demand': {},
-    'config_notes': 'Seeded from the existing Field Notes Journal submission page and deterministic review criteria.',
+    'current_demand': {
+        'topics': [
+            'How businesses are actually using AI',
+            'Measured implementation outcomes',
+            'Failed or partially successful AI rollouts',
+        ],
+        'priority': 'Grounded accounts with concrete outcomes, including what did not work.',
+    },
+    'config_notes': 'Seeded from the current Field Notes Journal submission description and deterministic review criteria.',
 }
 
 
@@ -56,7 +67,11 @@ FIVE_ZERO_CONFIG = {
         'The manuscript must genuinely pair with the named Flexee simulation, deliver the learning promised '
         'by its introduction and table of contents, and meet the structural Five Zero requirements.'
     ),
-    'reviewer_criteria': [],
+    'reviewer_criteria': [
+        'Subject-matter expertise for the paired Flexee simulation',
+        'Simulation-based learning and instructional design',
+        'Applied teaching materials and visual explanation',
+    ],
     'policies': {
         'chapters_required': 12,
         'total_words': {'min': 25000, 'max': 30000},
@@ -104,8 +119,18 @@ FIVE_ZERO_CONFIG = {
     ],
     'deadlines': {'submission': 'rolling', 'first_review_days': 15},
     'submission_capacity': {},
-    'current_demand': {},
-    'config_notes': 'Seeded from the existing Five Zero Books submission page and deterministic review criteria.',
+    'current_demand': {
+        'tracks': [
+            'Supply chain',
+            'ERP',
+            'Data analytics',
+            'Healthcare',
+            'Cybersecurity',
+            'Other current and in-development Flexee simulations',
+        ],
+        'priority': 'Companion manuscripts for every Flexee simulation.',
+    },
+    'config_notes': 'Seeded from the current Five Zero Books submission description and deterministic review criteria.',
 }
 
 

@@ -15,3 +15,20 @@ python manage.py runserver 0.0.0.0:8000
 ```
 
 Copy the generated `ADMIN_*` values into `.env`, install Ollama, and run `ollama pull qwen2.5:0.5b-instruct`. The review engine uses the local Ollama API; no cloud AI API key is required. The default 4096-token context is intentionally conservative for an 8 GB RAM development machine.
+
+
+## Scholarly network venue setup
+
+The multi-venue author workflow uses versioned `VenueAgentConfig` records. For the current Flexee Publishing outlets, seed the canonical starting configurations after migrations:
+
+```powershell
+python manage.py seed_flexee_venues
+```
+
+This creates **Field Notes Journal** and **Five Zero Books** under **Flexee Publishing** if they do not already exist. The command is idempotent and preserves existing configuration versions. To intentionally create a new active version from the canonical repository criteria:
+
+```powershell
+python manage.py seed_flexee_venues --refresh
+```
+
+Editors can then maintain venue metadata, create new configuration versions, reactivate older versions, review venue-specific submissions, record venue-scoped feedback, and make human editorial decisions from the protected admin workspace.

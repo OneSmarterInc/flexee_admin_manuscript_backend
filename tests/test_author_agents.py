@@ -36,7 +36,13 @@ class AuthorAgentApiTests(TestCase):
             'manuscript': upload,
         })
         self.assertEqual(response.status_code, 201, response.content)
-        return Manuscript.objects.get(id=response.json()['manuscript']['id'])
+        payload = response.json()
+        manuscript = Manuscript.objects.get(id=payload['manuscript']['id'])
+        manuscript._access_token = payload['access_token']
+        return manuscript
+
+    def _auth(self, manuscript):
+        return {'HTTP_X_MANUSCRIPT_TOKEN': manuscript._access_token}
 
     def _create_venues(self):
         org = Organization.objects.create(name='Agent Test Publisher', organization_type='journal')
@@ -74,7 +80,10 @@ class AuthorAgentApiTests(TestCase):
         return first, second
 
     def _run_mechanical(self, manuscript):
-        response = self.client.post(f'/api/author/manuscripts/{manuscript.id}/readiness/run/')
+        response = self.client.post(
+            f'/api/author/manuscripts/{manuscript.id}/readiness/run/',
+            **self._auth(manuscript),
+        )
         self.assertEqual(response.status_code, 201, response.content)
         return response.json()['readiness']
 
@@ -100,7 +109,10 @@ class AuthorAgentApiTests(TestCase):
             ],
         }))
 
-        response = self.client.post(f'/api/author/manuscripts/{manuscript.id}/readiness/semantic/')
+        response = self.client.post(
+            f'/api/author/manuscripts/{manuscript.id}/readiness/semantic/',
+            **self._auth(manuscript),
+        )
         self.assertEqual(response.status_code, 201, response.content)
         payload = response.json()['readiness']
 
@@ -138,7 +150,10 @@ class AuthorAgentApiTests(TestCase):
         }
         manuscript.save(update_fields=['parsed_profile', 'updated_at'])
 
-        gate = self.client.post(f'/api/author/manuscripts/{manuscript.id}/matches/run/')
+        gate = self.client.post(
+            f'/api/author/manuscripts/{manuscript.id}/matches/run/',
+            **self._auth(manuscript),
+        )
         self.assertEqual(gate.status_code, 201, gate.content)
         before = {m.venue.slug: m.eligibility for m in VenueMatch.objects.filter(manuscript=manuscript).select_related('venue')}
 
@@ -175,6 +190,7 @@ class AuthorAgentApiTests(TestCase):
             f'/api/author/manuscripts/{manuscript.id}/matches/semantic/',
             data='{}',
             content_type='application/json',
+            **self._auth(manuscript),
         )
         self.assertEqual(response.status_code, 201, response.content)
         self.assertIn('does not rank venues', response.json()['note'])
@@ -205,6 +221,7 @@ class AuthorAgentApiTests(TestCase):
             f'/api/author/manuscripts/{manuscript.id}/submissions/',
             data=json.dumps({'venue_id': str(venue.id)}),
             content_type='application/json',
+            **self._auth(manuscript),
         )
         self.assertEqual(create.status_code, 201, create.content)
         submission_id = create.json()['submission']['id']
@@ -244,7 +261,10 @@ class AuthorAgentApiTests(TestCase):
             'reviewer_expertise': ['applied AI', 'operations management'],
         }))
 
-        response = self.client.post(f'/api/author/venue-submissions/{submission_id}/assessment/run/')
+        response = self.client.post(
+            f'/api/author/venue-submissions/{submission_id}/assessment/run/',
+            **self._auth(manuscript),
+        )
         self.assertEqual(response.status_code, 201, response.content)
         submission = response.json()['submission']
 
@@ -261,7 +281,10 @@ class AuthorAgentApiTests(TestCase):
         mechanical = self._run_mechanical(manuscript)
         mock_chat.side_effect = RuntimeError('Ollama unavailable')
 
-        response = self.client.post(f'/api/author/manuscripts/{manuscript.id}/readiness/semantic/')
+        response = self.client.post(
+            f'/api/author/manuscripts/{manuscript.id}/readiness/semantic/',
+            **self._auth(manuscript),
+        )
         self.assertEqual(response.status_code, 503, response.content)
         self.assertEqual(response.json()['code'], 'semantic_readiness_failed')
 

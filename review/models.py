@@ -208,6 +208,7 @@ class Manuscript(models.Model):
     manuscript_file = models.FileField(upload_to='author_manuscripts/')
     manuscript_bytes = models.BigIntegerField(default=0)
     manuscript_sha256 = models.CharField(max_length=64, db_index=True)
+    access_token_hash = models.CharField(max_length=64, blank=True, db_index=True)
     parsed_profile = models.JSONField(default=dict, blank=True)
 
     class Meta:

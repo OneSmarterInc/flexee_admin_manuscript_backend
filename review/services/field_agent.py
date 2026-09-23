@@ -230,6 +230,7 @@ def _verify_citation_crossref(citation_text):
             'matched_title': matched_title or None,
             'score': score,
             'title_similarity': similarity,
+            'doi': item.get('DOI') or None,
         }
     except Exception:
         return {'status': 'not found', 'matched_title': None, 'score': 0.0, 'title_similarity': 0.0}

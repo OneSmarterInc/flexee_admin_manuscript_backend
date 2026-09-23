@@ -1,7 +1,9 @@
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 from django.db import transaction
 from django.http import JsonResponse
 from django.utils import timezone
@@ -35,6 +37,26 @@ from .services.author_agents import (
 
 ALLOWED_MANUSCRIPT_TYPES = {value for value, _ in Manuscript.TYPE_CHOICES}
 ALLOWED_VENUE_TYPES = {value for value, _ in Venue.TYPE_CHOICES}
+
+
+def _hash_author_token(token):
+    return hashlib.sha256(str(token or '').encode('utf-8')).hexdigest()
+
+
+def _author_access_error(request, manuscript):
+    token = request.META.get('HTTP_X_MANUSCRIPT_TOKEN', '').strip()
+    if not token:
+        return JsonResponse(
+            {'detail': 'Author manuscript access token required', 'code': 'author_token_required'},
+            status=401,
+        )
+    stored = str(manuscript.access_token_hash or '')
+    if not stored or not hmac.compare_digest(stored, _hash_author_token(token)):
+        return JsonResponse(
+            {'detail': 'Author manuscript access token is invalid', 'code': 'author_token_invalid'},
+            status=403,
+        )
+    return None
 
 
 def _json_body(request):
@@ -234,6 +256,7 @@ def author_manuscripts(request):
     content = upload.read()
     upload.seek(0)
     digest = hashlib.sha256(content).hexdigest()
+    access_token = secrets.token_urlsafe(32)
 
     item = Manuscript.objects.create(
         author_name=author_name,
@@ -250,8 +273,12 @@ def author_manuscripts(request):
         manuscript_file=upload,
         manuscript_bytes=len(content),
         manuscript_sha256=digest,
+        access_token_hash=_hash_author_token(access_token),
     )
-    return JsonResponse({'manuscript': _manuscript_payload(item)}, status=201)
+    return JsonResponse({
+        'manuscript': _manuscript_payload(item),
+        'access_token': access_token,
+    }, status=201)
 
 
 @require_GET
@@ -260,6 +287,9 @@ def author_manuscript_detail(request, manuscript_id):
         item = Manuscript.objects.get(id=manuscript_id)
     except Manuscript.DoesNotExist:
         return JsonResponse({'detail': 'Manuscript not found'}, status=404)
+    access_error = _author_access_error(request, item)
+    if access_error:
+        return access_error
     return JsonResponse({'manuscript': _manuscript_payload(item)})
 
 
@@ -270,6 +300,9 @@ def author_run_readiness(request, manuscript_id):
         manuscript = Manuscript.objects.get(id=manuscript_id)
     except Manuscript.DoesNotExist:
         return JsonResponse({'detail': 'Manuscript not found'}, status=404)
+    access_error = _author_access_error(request, manuscript)
+    if access_error:
+        return access_error
 
     assessment = ReadinessAssessment.objects.create(
         manuscript=manuscript,
@@ -361,6 +394,9 @@ def author_run_semantic_readiness(request, manuscript_id):
         manuscript = Manuscript.objects.get(id=manuscript_id)
     except Manuscript.DoesNotExist:
         return JsonResponse({'detail': 'Manuscript not found'}, status=404)
+    access_error = _author_access_error(request, manuscript)
+    if access_error:
+        return access_error
 
     try:
         assessment = run_semantic_readiness(manuscript)
@@ -381,10 +417,23 @@ def author_readiness(request, manuscript_id):
         manuscript = Manuscript.objects.get(id=manuscript_id)
     except Manuscript.DoesNotExist:
         return JsonResponse({'detail': 'Manuscript not found'}, status=404)
+    access_error = _author_access_error(request, manuscript)
+    if access_error:
+        return access_error
     item = manuscript.readiness_assessments.first()
     if not item:
         return JsonResponse({'detail': 'No readiness assessment exists for this manuscript'}, status=404)
-    return JsonResponse({'readiness': _readiness_payload(item)})
+    mechanical = manuscript.readiness_assessments.filter(
+        engine_version__startswith='mechanical-'
+    ).first()
+    semantic = manuscript.readiness_assessments.filter(
+        engine_version__startswith='author-agents-v1:semantic-readiness'
+    ).first()
+    return JsonResponse({
+        'readiness': _readiness_payload(item),
+        'mechanical_readiness': _readiness_payload(mechanical) if mechanical else None,
+        'semantic_readiness': _readiness_payload(semantic) if semantic else None,
+    })
 
 
 @require_GET
@@ -404,8 +453,11 @@ def author_generate_matches(request, manuscript_id):
         manuscript = Manuscript.objects.get(id=manuscript_id)
     except Manuscript.DoesNotExist:
         return JsonResponse({'detail': 'Manuscript not found'}, status=404)
+    access_error = _author_access_error(request, manuscript)
+    if access_error:
+        return access_error
 
-    latest_readiness = manuscript.readiness_assessments.first()
+    latest_readiness = manuscript.readiness_assessments.filter(status='completed').first()
     if not latest_readiness or latest_readiness.status != 'completed':
         return JsonResponse({'detail': 'Complete a readiness assessment before generating venue matches'}, status=409)
     if not latest_readiness.summary.get('ready_for_matching', False):
@@ -483,6 +535,9 @@ def author_run_semantic_matches(request, manuscript_id):
         manuscript = Manuscript.objects.get(id=manuscript_id)
     except Manuscript.DoesNotExist:
         return JsonResponse({'detail': 'Manuscript not found'}, status=404)
+    access_error = _author_access_error(request, manuscript)
+    if access_error:
+        return access_error
 
     data = _json_body(request)
     venue_ids = data.get('venue_ids')
@@ -509,6 +564,9 @@ def author_matches(request, manuscript_id):
         manuscript = Manuscript.objects.get(id=manuscript_id)
     except Manuscript.DoesNotExist:
         return JsonResponse({'detail': 'Manuscript not found'}, status=404)
+    access_error = _author_access_error(request, manuscript)
+    if access_error:
+        return access_error
     items = manuscript.venue_matches.select_related('venue', 'venue__organization', 'venue_config').all()
     return JsonResponse({'matches': [_match_payload(item) for item in items]})
 
@@ -520,6 +578,9 @@ def author_create_submission(request, manuscript_id):
         manuscript = Manuscript.objects.get(id=manuscript_id)
     except Manuscript.DoesNotExist:
         return JsonResponse({'detail': 'Manuscript not found'}, status=404)
+    access_error = _author_access_error(request, manuscript)
+    if access_error:
+        return access_error
 
     data = _json_body(request)
     venue_id = data.get('venue_id')
@@ -558,6 +619,9 @@ def author_run_venue_assessment(request, submission_id):
         ).get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
+    access_error = _author_access_error(request, submission.manuscript)
+    if access_error:
+        return access_error
 
     try:
         submission = run_venue_assessment(submission)
@@ -580,6 +644,9 @@ def author_submission_detail(request, submission_id):
         ).prefetch_related('evidence_findings').get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
+    access_error = _author_access_error(request, item.manuscript)
+    if access_error:
+        return access_error
     return JsonResponse({'submission': _submission_payload(item)})
 
 
@@ -590,6 +657,9 @@ def author_submit_packet(request, submission_id):
         item = VenueSubmission.objects.get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
+    access_error = _author_access_error(request, item.manuscript)
+    if access_error:
+        return access_error
 
     if item.status not in {'draft', 'packet_ready'}:
         return JsonResponse({'detail': f'Submission cannot be submitted from status {item.status}'}, status=409)
@@ -608,6 +678,9 @@ def author_transfer_submission(request, submission_id):
         source = VenueSubmission.objects.select_for_update().get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
+    access_error = _author_access_error(request, source.manuscript)
+    if access_error:
+        return access_error
 
     data = _json_body(request)
     venue_id = data.get('venue_id')

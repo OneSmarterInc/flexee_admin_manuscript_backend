@@ -476,8 +476,11 @@ def author_generate_matches(request, manuscript_id):
         else:
             accepted = {_normalise_label(item) for item in config.article_types}
             manuscript_type = _normalise_label(manuscript.manuscript_type)
+            manuscript_type_label = _normalise_label(
+                dict(Manuscript.TYPE_CHOICES).get(manuscript.manuscript_type, manuscript.manuscript_type)
+            )
             if accepted:
-                if manuscript_type in accepted:
+                if manuscript_type in accepted or manuscript_type_label in accepted:
                     reasons.append('The manuscript type is accepted by this venue.')
                     evidence.append({
                         'source_type': 'venue_policy',

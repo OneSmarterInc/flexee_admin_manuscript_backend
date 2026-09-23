@@ -1,0 +1,197 @@
+# Generated for the multi-venue author workflow foundation.
+import django.db.models.deletion
+import uuid
+from django.db import migrations, models
+
+
+class Migration(migrations.Migration):
+
+    dependencies = [
+        ('review', '0007_smtpsettings_admin_notification_emails'),
+    ]
+
+    operations = [
+        migrations.CreateModel(
+            name='Organization',
+            fields=[
+                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('updated_at', models.DateTimeField(auto_now=True)),
+                ('name', models.CharField(max_length=300)),
+                ('organization_type', models.CharField(choices=[('journal', 'Journal publisher'), ('conference', 'Conference organizer'), ('publisher', 'Publisher'), ('other', 'Other')], default='other', max_length=30)),
+                ('active', models.BooleanField(db_index=True, default=True)),
+            ],
+            options={'ordering': ['name']},
+        ),
+        migrations.CreateModel(
+            name='Manuscript',
+            fields=[
+                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ('created_at', models.DateTimeField(auto_now_add=True, db_index=True)),
+                ('updated_at', models.DateTimeField(auto_now=True)),
+                ('author_name', models.CharField(max_length=200)),
+                ('author_email', models.EmailField(blank=True, db_index=True, max_length=320)),
+                ('coauthors', models.TextField(blank=True)),
+                ('title', models.CharField(max_length=500)),
+                ('manuscript_type', models.CharField(choices=[('research_article', 'Research article'), ('practitioner_article', 'Practitioner article'), ('review_article', 'Review article'), ('case_study', 'Case study'), ('conference_paper', 'Conference paper'), ('book', 'Book manuscript'), ('other', 'Other')], default='other', max_length=40)),
+                ('abstract', models.TextField(blank=True)),
+                ('keywords', models.JSONField(blank=True, default=list)),
+                ('disclosure', models.TextField()),
+                ('notes', models.TextField(blank=True)),
+                ('attestation', models.BooleanField(default=True)),
+                ('manuscript_filename', models.CharField(max_length=500)),
+                ('manuscript_file', models.FileField(upload_to='author_manuscripts/')),
+                ('manuscript_bytes', models.BigIntegerField(default=0)),
+                ('manuscript_sha256', models.CharField(db_index=True, max_length=64)),
+                ('parsed_profile', models.JSONField(blank=True, default=dict)),
+            ],
+            options={
+                'ordering': ['-created_at'],
+                'indexes': [models.Index(fields=['author_email', '-created_at'], name='review_ms_email_created_idx')],
+            },
+        ),
+        migrations.CreateModel(
+            name='Venue',
+            fields=[
+                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('updated_at', models.DateTimeField(auto_now=True)),
+                ('name', models.CharField(max_length=300)),
+                ('slug', models.SlugField(max_length=180, unique=True)),
+                ('venue_type', models.CharField(choices=[('journal', 'Journal'), ('conference', 'Conference'), ('publisher', 'Publisher')], max_length=30)),
+                ('description', models.TextField(blank=True)),
+                ('active', models.BooleanField(db_index=True, default=True)),
+                ('organization', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='venues', to='review.organization')),
+            ],
+            options={
+                'ordering': ['name'],
+                'indexes': [models.Index(fields=['active', 'venue_type'], name='review_venue_active_type_idx')],
+            },
+        ),
+        migrations.CreateModel(
+            name='VenueAgentConfig',
+            fields=[
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('version', models.PositiveIntegerField(default=1)),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('effective_at', models.DateTimeField(auto_now_add=True)),
+                ('active', models.BooleanField(db_index=True, default=True)),
+                ('aims_scope', models.TextField(blank=True)),
+                ('article_types', models.JSONField(blank=True, default=list)),
+                ('accepted_methods', models.JSONField(blank=True, default=list)),
+                ('quality_threshold', models.TextField(blank=True)),
+                ('reviewer_criteria', models.JSONField(blank=True, default=list)),
+                ('policies', models.JSONField(blank=True, default=dict)),
+                ('disclosures', models.JSONField(blank=True, default=list)),
+                ('reporting_standards', models.JSONField(blank=True, default=list)),
+                ('desk_rejection_rules', models.JSONField(blank=True, default=list)),
+                ('deadlines', models.JSONField(blank=True, default=dict)),
+                ('submission_capacity', models.JSONField(blank=True, default=dict)),
+                ('current_demand', models.JSONField(blank=True, default=dict)),
+                ('config_notes', models.TextField(blank=True)),
+                ('venue', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='agent_configs', to='review.venue')),
+            ],
+            options={
+                'ordering': ['-version', '-created_at'],
+                'indexes': [models.Index(fields=['venue', 'active', '-version'], name='review_venue_config_active_idx')],
+                'constraints': [models.UniqueConstraint(fields=('venue', 'version'), name='review_unique_venue_config_version')],
+            },
+        ),
+        migrations.CreateModel(
+            name='ReadinessAssessment',
+            fields=[
+                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ('created_at', models.DateTimeField(auto_now_add=True, db_index=True)),
+                ('completed_at', models.DateTimeField(blank=True, null=True)),
+                ('status', models.CharField(choices=[('pending', 'Pending'), ('completed', 'Completed'), ('failed', 'Failed')], db_index=True, default='pending', max_length=20)),
+                ('engine_version', models.CharField(blank=True, max_length=100)),
+                ('summary', models.JSONField(blank=True, default=dict)),
+                ('findings', models.JSONField(blank=True, default=list)),
+                ('error', models.JSONField(blank=True, null=True)),
+                ('manuscript', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='readiness_assessments', to='review.manuscript')),
+            ],
+            options={'ordering': ['-created_at']},
+        ),
+        migrations.CreateModel(
+            name='VenueMatch',
+            fields=[
+                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ('created_at', models.DateTimeField(auto_now_add=True, db_index=True)),
+                ('eligibility', models.CharField(choices=[('eligible', 'Eligible'), ('needs_changes', 'Needs changes'), ('ineligible', 'Ineligible')], default='needs_changes', max_length=20)),
+                ('fit_summary', models.TextField(blank=True)),
+                ('reasons', models.JSONField(blank=True, default=list)),
+                ('gaps', models.JSONField(blank=True, default=list)),
+                ('evidence', models.JSONField(blank=True, default=list)),
+                ('manuscript', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='venue_matches', to='review.manuscript')),
+                ('venue', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='manuscript_matches', to='review.venue')),
+                ('venue_config', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='matches', to='review.venueagentconfig')),
+            ],
+            options={
+                'ordering': ['created_at', 'id'],
+                'constraints': [models.UniqueConstraint(fields=('manuscript', 'venue'), name='review_unique_ms_venue_match')],
+            },
+        ),
+        migrations.CreateModel(
+            name='VenueSubmission',
+            fields=[
+                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ('created_at', models.DateTimeField(auto_now_add=True, db_index=True)),
+                ('updated_at', models.DateTimeField(auto_now=True)),
+                ('submitted_at', models.DateTimeField(blank=True, null=True)),
+                ('status', models.CharField(choices=[('draft', 'Draft'), ('packet_ready', 'Packet ready'), ('submitted', 'Submitted'), ('under_review', 'Under review'), ('revision_requested', 'Revision requested'), ('accepted', 'Accepted'), ('rejected', 'Rejected'), ('withdrawn', 'Withdrawn'), ('transferred', 'Transferred')], db_index=True, default='draft', max_length=30)),
+                ('packet', models.JSONField(blank=True, default=dict)),
+                ('editorial_brief', models.JSONField(blank=True, default=dict)),
+                ('decision', models.JSONField(blank=True, default=dict)),
+                ('manuscript', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='venue_submissions', to='review.manuscript')),
+                ('venue', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='submissions', to='review.venue')),
+                ('venue_config', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='submissions', to='review.venueagentconfig')),
+            ],
+            options={
+                'ordering': ['-created_at'],
+                'indexes': [models.Index(fields=['venue', 'status', '-created_at'], name='review_vsub_venue_status_idx')],
+            },
+        ),
+        migrations.CreateModel(
+            name='EvidenceFinding',
+            fields=[
+                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('finding_type', models.CharField(max_length=100)),
+                ('claim', models.TextField()),
+                ('source_type', models.CharField(choices=[('manuscript', 'Manuscript'), ('venue_policy', 'Venue policy'), ('external', 'External source')], max_length=30)),
+                ('source_locator', models.CharField(blank=True, max_length=500)),
+                ('source_url', models.URLField(blank=True, max_length=1000)),
+                ('excerpt', models.TextField(blank=True)),
+                ('verification', models.JSONField(blank=True, default=dict)),
+                ('manuscript', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='evidence_findings', to='review.manuscript')),
+                ('venue_submission', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='evidence_findings', to='review.venuesubmission')),
+            ],
+            options={'ordering': ['created_at', 'id']},
+        ),
+        migrations.CreateModel(
+            name='EditorFeedback',
+            fields=[
+                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ('created_at', models.DateTimeField(auto_now_add=True, db_index=True)),
+                ('assessment_field', models.CharField(max_length=120)),
+                ('agent_value', models.JSONField(blank=True, null=True)),
+                ('editor_value', models.JSONField(blank=True, null=True)),
+                ('reason', models.TextField(blank=True)),
+                ('venue', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='editor_feedback', to='review.venue')),
+                ('venue_submission', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='editor_feedback', to='review.venuesubmission')),
+            ],
+            options={'ordering': ['-created_at']},
+        ),
+        migrations.CreateModel(
+            name='SubmissionTransfer',
+            fields=[
+                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ('created_at', models.DateTimeField(auto_now_add=True, db_index=True)),
+                ('reason', models.TextField(blank=True)),
+                ('from_submission', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='outgoing_transfers', to='review.venuesubmission')),
+                ('manuscript', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='transfers', to='review.manuscript')),
+                ('to_submission', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='incoming_transfers', to='review.venuesubmission')),
+            ],
+            options={'ordering': ['-created_at']},
+        ),
+    ]

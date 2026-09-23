@@ -27,7 +27,13 @@ class AuthorWorkflowApiTests(TestCase):
             'manuscript': manuscript,
         })
         self.assertEqual(response.status_code, 201, response.content)
-        return response.json()['manuscript']
+        payload = response.json()
+        manuscript = payload['manuscript']
+        manuscript['_access_token'] = payload['access_token']
+        return manuscript
+
+    def _auth(self, manuscript):
+        return {'HTTP_X_MANUSCRIPT_TOKEN': manuscript['_access_token']}
 
     def _create_venues(self):
         org = Organization.objects.create(name='Test Publisher', organization_type='journal')
@@ -62,7 +68,10 @@ class AuthorWorkflowApiTests(TestCase):
         manuscript = self._create_manuscript()
         self.assertTrue(Manuscript.objects.filter(id=manuscript['id']).exists())
 
-        response = self.client.post(f"/api/author/manuscripts/{manuscript['id']}/readiness/run/")
+        response = self.client.post(
+            f"/api/author/manuscripts/{manuscript['id']}/readiness/run/",
+            **self._auth(manuscript),
+        )
         self.assertEqual(response.status_code, 201, response.content)
         readiness = response.json()['readiness']
 
@@ -74,9 +83,15 @@ class AuthorWorkflowApiTests(TestCase):
     def test_policy_gate_generates_persisted_matches_without_ranking(self):
         venue_a, venue_b = self._create_venues()
         manuscript = self._create_manuscript()
-        self.client.post(f"/api/author/manuscripts/{manuscript['id']}/readiness/run/")
+        self.client.post(
+            f"/api/author/manuscripts/{manuscript['id']}/readiness/run/",
+            **self._auth(manuscript),
+        )
 
-        response = self.client.post(f"/api/author/manuscripts/{manuscript['id']}/matches/run/")
+        response = self.client.post(
+            f"/api/author/manuscripts/{manuscript['id']}/matches/run/",
+            **self._auth(manuscript),
+        )
         self.assertEqual(response.status_code, 201, response.content)
         payload = response.json()
 
@@ -88,7 +103,10 @@ class AuthorWorkflowApiTests(TestCase):
         self.assertEqual(by_slug[venue_b.slug]['eligibility'], 'needs_changes')
         self.assertIn('No semantic fit ranking', payload['note'])
 
-        get_response = self.client.get(f"/api/author/manuscripts/{manuscript['id']}/matches/")
+        get_response = self.client.get(
+            f"/api/author/manuscripts/{manuscript['id']}/matches/",
+            **self._auth(manuscript),
+        )
         self.assertEqual(get_response.status_code, 200)
         self.assertEqual(len(get_response.json()['matches']), 2)
 
@@ -100,6 +118,7 @@ class AuthorWorkflowApiTests(TestCase):
             f"/api/author/manuscripts/{manuscript['id']}/submissions/",
             data=json.dumps({'venue_id': str(venue_a.id)}),
             content_type='application/json',
+            **self._auth(manuscript),
         )
         self.assertEqual(create_response.status_code, 201, create_response.content)
         submission = create_response.json()['submission']
@@ -110,6 +129,7 @@ class AuthorWorkflowApiTests(TestCase):
             f"/api/author/venue-submissions/{submission['id']}/submit/",
             data='{}',
             content_type='application/json',
+            **self._auth(manuscript),
         )
         self.assertEqual(submit_response.status_code, 200, submit_response.content)
         self.assertEqual(submit_response.json()['submission']['status'], 'submitted')
@@ -118,6 +138,7 @@ class AuthorWorkflowApiTests(TestCase):
             f"/api/author/venue-submissions/{submission['id']}/transfer/",
             data=json.dumps({'venue_id': str(venue_b.id), 'reason': 'Author selected another venue'}),
             content_type='application/json',
+            **self._auth(manuscript),
         )
         self.assertEqual(transfer_response.status_code, 201, transfer_response.content)
         transferred = transfer_response.json()['submission']
@@ -126,6 +147,22 @@ class AuthorWorkflowApiTests(TestCase):
 
         source = VenueSubmission.objects.get(id=submission['id'])
         self.assertEqual(source.status, 'transferred')
+
+    def test_manuscript_endpoints_require_the_issued_access_token(self):
+        manuscript = self._create_manuscript()
+        path = f"/api/author/manuscripts/{manuscript['id']}/"
+
+        missing = self.client.get(path)
+        self.assertEqual(missing.status_code, 401)
+        self.assertEqual(missing.json()['code'], 'author_token_required')
+
+        invalid = self.client.get(path, HTTP_X_MANUSCRIPT_TOKEN='not-the-token')
+        self.assertEqual(invalid.status_code, 403)
+        self.assertEqual(invalid.json()['code'], 'author_token_invalid')
+
+        allowed = self.client.get(path, **self._auth(manuscript))
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(allowed.json()['manuscript']['id'], manuscript['id'])
 
     def test_public_venue_list_exposes_active_config_only(self):
         venue_a, _ = self._create_venues()

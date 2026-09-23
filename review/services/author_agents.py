@@ -253,6 +253,14 @@ Return JSON only in this exact shape:
   "methods": ["method or study design actually visible in this chunk"],
   "contributions": ["claim about contribution visible in this chunk"],
   "limitations": ["limitation or unresolved issue visible in this chunk"],
+  "evidence_points": [
+    {{
+      "kind": "topic, method, contribution, or limitation",
+      "text": "short manuscript-grounded observation",
+      "line_start": {chunk['start_line']},
+      "line_end": {chunk['start_line']}
+    }}
+  ],
   "findings": [
     {{
       "code": "short_machine_code",
@@ -277,8 +285,33 @@ def _sanitize_chunk_result(data, chunk, full_text):
         'methods': _clean_string_list(data.get('methods'), limit=12, item_limit=220),
         'contributions': _clean_string_list(data.get('contributions'), limit=12, item_limit=260),
         'limitations': _clean_string_list(data.get('limitations'), limit=12, item_limit=260),
+        'evidence_points': [],
         'findings': [],
     }
+    for item in data.get('evidence_points', []) if isinstance(data.get('evidence_points'), list) else []:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get('kind', '')).strip().lower()
+        if kind not in {'topic', 'method', 'contribution', 'limitation'}:
+            continue
+        lines = _normalise_line_range(item, chunk)
+        if not lines:
+            continue
+        start, end = lines
+        point_text = _clean_text(item.get('text'), 500)
+        if not point_text:
+            continue
+        result['evidence_points'].append({
+            'kind': kind,
+            'text': point_text,
+            'source': {
+                'type': 'manuscript',
+                'locator': f'lines {start}-{end}',
+                'line_start': start,
+                'line_end': end,
+                'excerpt': _line_excerpt(full_text, start, end),
+            },
+        })
     for item in data.get('findings', []) if isinstance(data.get('findings'), list) else []:
         if not isinstance(item, dict):
             continue
@@ -323,12 +356,20 @@ def _unique(values, limit):
 
 
 def _aggregate_profile(chunk_results, *, total_chunks, analyzed_chunks):
+    evidence_points = []
+    for result in chunk_results:
+        for point in result.get('evidence_points', []):
+            evidence_points.append({
+                'id': f'M{len(evidence_points) + 1:03d}',
+                **point,
+            })
     return {
         'summary': _clean_text(' '.join(r['summary'] for r in chunk_results if r['summary']), 2600),
         'topics': _unique((x for r in chunk_results for x in r['topics']), 24),
         'methods': _unique((x for r in chunk_results for x in r['methods']), 24),
         'contributions': _unique((x for r in chunk_results for x in r['contributions']), 24),
         'limitations': _unique((x for r in chunk_results for x in r['limitations']), 24),
+        'evidence_points': evidence_points[:120],
         'coverage': {
             'total_chunks': total_chunks,
             'analyzed_chunks': analyzed_chunks,
@@ -559,25 +600,26 @@ Return JSON only:
     {{
       "text": "why the manuscript aligns",
       "venue_fields": ["aims_scope"],
-      "manuscript_terms": ["topic/method visible in the supplied profile"]
+      "manuscript_evidence_ids": ["M001"]
     }}
   ],
   "gaps": [
     {{
       "text": "specific missing or conflicting requirement",
       "venue_fields": ["reporting_standards"],
-      "manuscript_terms": ["relevant visible manuscript feature"]
+      "manuscript_evidence_ids": ["M001"]
     }}
   ]
 }}
 
 venue_fields may only name fields present in the supplied venue configuration.
+manuscript_evidence_ids may only reference IDs that exist in semantic_profile.evidence_points.
 Do not invent manuscript quotations or line numbers; matching operates on the grounded semantic profile.
 Do not recommend accept/reject and do not claim the venue has selected the manuscript.
 """
 
 
-def _sanitize_match_items(value):
+def _sanitize_match_items(value, valid_evidence_ids):
     if not isinstance(value, list):
         return []
     out = []
@@ -590,7 +632,12 @@ def _sanitize_match_items(value):
         out.append({
             'text': text,
             'venue_fields': _clean_string_list(item.get('venue_fields'), limit=8, item_limit=80),
-            'manuscript_terms': _clean_string_list(item.get('manuscript_terms'), limit=8, item_limit=120),
+            'manuscript_evidence_ids': [
+                evidence_id for evidence_id in _clean_string_list(
+                    item.get('manuscript_evidence_ids'), limit=8, item_limit=20
+                )
+                if evidence_id in valid_evidence_ids
+            ],
         })
     return out
 
@@ -606,8 +653,19 @@ def _config_field_excerpt(config, field):
     return _clean_text(json.dumps(getattr(config, field), ensure_ascii=False), 900)
 
 
+def _profile_evidence_map(manuscript):
+    profile = (manuscript.parsed_profile or {}).get('semantic', {})
+    points = profile.get('evidence_points') if isinstance(profile, dict) else []
+    return {
+        str(point.get('id')): point
+        for point in points or []
+        if isinstance(point, dict) and point.get('id')
+    }
+
+
 def _match_evidence(match, config, reasons, gaps):
     evidence = []
+    manuscript_evidence = _profile_evidence_map(match.manuscript)
     for kind, items in [('reason', reasons), ('gap', gaps)]:
         for item in items:
             for field in item['venue_fields']:
@@ -621,13 +679,18 @@ def _match_evidence(match, config, reasons, gaps):
                     'source_locator': f'venue config v{config.version} · {field}',
                     'excerpt': excerpt,
                 })
-            if item['manuscript_terms']:
+            for evidence_id in item['manuscript_evidence_ids']:
+                point = manuscript_evidence.get(evidence_id)
+                if not point:
+                    continue
+                source = point.get('source') if isinstance(point.get('source'), dict) else {}
                 evidence.append({
                     'finding': kind,
                     'claim': item['text'],
-                    'source_type': 'manuscript_profile',
-                    'source_locator': 'grounded semantic profile',
-                    'excerpt': '; '.join(item['manuscript_terms']),
+                    'source_type': 'manuscript',
+                    'source_locator': source.get('locator', 'manuscript'),
+                    'excerpt': source.get('excerpt', ''),
+                    'manuscript_evidence_id': evidence_id,
                 })
     return evidence[:60]
 
@@ -657,8 +720,9 @@ def run_semantic_matching(manuscript, *, venue_ids=None):
         try:
             model, data = _agent_json(_match_prompt(manuscript, match, config), max_tokens=700)
             models.add(model)
-            reasons = _sanitize_match_items(data.get('reasons'))
-            gaps = _sanitize_match_items(data.get('gaps'))
+            evidence_ids = set(_profile_evidence_map(manuscript))
+            reasons = _sanitize_match_items(data.get('reasons'), evidence_ids)
+            gaps = _sanitize_match_items(data.get('gaps'), evidence_ids)
             semantic_reason_text = [item['text'] for item in reasons]
             semantic_gap_text = [item['text'] for item in gaps]
 
@@ -748,13 +812,13 @@ DETERMINISTIC EXTERNAL REFERENCE CHECK
 Return JSON only:
 {{
   "editor_summary": "concise brief for a human editor",
-  "outlet_fit": {{"summary": "...", "venue_fields": ["aims_scope"], "manuscript_terms": ["..."]}},
-  "policy_compliance": {{"summary": "...", "venue_fields": ["policies"], "manuscript_terms": ["..."]}},
-  "contribution": {{"summary": "...", "venue_fields": ["quality_threshold"], "manuscript_terms": ["..."]}},
-  "methods": {{"summary": "...", "venue_fields": ["accepted_methods"], "manuscript_terms": ["..."]}},
-  "citation_integrity": {{"summary": "...", "venue_fields": [], "manuscript_terms": ["..."]}},
+  "outlet_fit": {{"summary": "...", "venue_fields": ["aims_scope"], "manuscript_evidence_ids": ["M001"]}},
+  "policy_compliance": {{"summary": "...", "venue_fields": ["policies"], "manuscript_evidence_ids": ["M001"]}},
+  "contribution": {{"summary": "...", "venue_fields": ["quality_threshold"], "manuscript_evidence_ids": ["M001"]}},
+  "methods": {{"summary": "...", "venue_fields": ["accepted_methods"], "manuscript_evidence_ids": ["M001"]}},
+  "citation_integrity": {{"summary": "...", "venue_fields": [], "manuscript_evidence_ids": ["M001"]}},
   "unresolved_risks": [
-    {{"risk": "...", "venue_fields": ["reporting_standards"], "manuscript_terms": ["..."]}}
+    {{"risk": "...", "venue_fields": ["reporting_standards"], "manuscript_evidence_ids": ["M001"]}}
   ],
   "reviewer_expertise": ["specific expertise"]
 }}
@@ -765,19 +829,25 @@ than inventing one. Editor feedback is outlet-specific guidance and must not be 
 """
 
 
-def _assessment_section(value, key='summary'):
+def _assessment_section(value, valid_evidence_ids, key='summary'):
     if not isinstance(value, dict):
         value = {}
     return {
         key: _clean_text(value.get(key), 1200),
         'venue_fields': _clean_string_list(value.get('venue_fields'), limit=10, item_limit=80),
-        'manuscript_terms': _clean_string_list(value.get('manuscript_terms'), limit=10, item_limit=160),
+        'manuscript_evidence_ids': [
+            evidence_id for evidence_id in _clean_string_list(
+                value.get('manuscript_evidence_ids'), limit=10, item_limit=20
+            )
+            if evidence_id in valid_evidence_ids
+        ],
     }
 
 
 def _persist_assessment_evidence(submission, config, brief, citation_checks, model):
     manuscript = submission.manuscript
     created = []
+    manuscript_evidence = _profile_evidence_map(manuscript)
 
     EvidenceFinding.objects.filter(
         venue_submission=submission,
@@ -802,19 +872,24 @@ def _persist_assessment_evidence(submission, config, brief, citation_checks, mod
                 excerpt=excerpt,
                 verification={'agent_version': AGENT_VERSION, 'model': model},
             ))
-        if section.get('manuscript_terms'):
+        for evidence_id in section.get('manuscript_evidence_ids', []):
+            point = manuscript_evidence.get(evidence_id)
+            if not point:
+                continue
+            source = point.get('source') if isinstance(point.get('source'), dict) else {}
             created.append(EvidenceFinding.objects.create(
                 manuscript=manuscript,
                 venue_submission=submission,
-                finding_type=f'agent:{section_name}:manuscript_profile'[:100],
+                finding_type=f'agent:{section_name}:manuscript'[:100],
                 claim=claim,
                 source_type='manuscript',
-                source_locator='grounded semantic profile',
-                excerpt='; '.join(section['manuscript_terms']),
+                source_locator=_clean_text(source.get('locator') or 'manuscript', 500),
+                excerpt=_clean_text(source.get('excerpt'), 1500),
                 verification={
                     'agent_version': AGENT_VERSION,
                     'model': model,
-                    'grounding': 'terms derived from line-grounded semantic readiness',
+                    'manuscript_evidence_id': evidence_id,
+                    'grounding': 'validated manuscript line range',
                 },
             ))
 
@@ -875,17 +950,18 @@ def run_venue_assessment(submission):
     except Exception as exc:
         raise AgentExecutionError(str(exc)) from exc
 
+    valid_evidence_ids = set(_profile_evidence_map(submission.manuscript))
     brief = {
         'agent_version': AGENT_VERSION,
         'model': model,
         'generated_at': timezone.now().isoformat(),
         'venue_config_version': config.version,
         'editor_summary': _clean_text(data.get('editor_summary'), 1800),
-        'outlet_fit': _assessment_section(data.get('outlet_fit')),
-        'policy_compliance': _assessment_section(data.get('policy_compliance')),
-        'contribution': _assessment_section(data.get('contribution')),
-        'methods': _assessment_section(data.get('methods')),
-        'citation_integrity': _assessment_section(data.get('citation_integrity')),
+        'outlet_fit': _assessment_section(data.get('outlet_fit'), valid_evidence_ids),
+        'policy_compliance': _assessment_section(data.get('policy_compliance'), valid_evidence_ids),
+        'contribution': _assessment_section(data.get('contribution'), valid_evidence_ids),
+        'methods': _assessment_section(data.get('methods'), valid_evidence_ids),
+        'citation_integrity': _assessment_section(data.get('citation_integrity'), valid_evidence_ids),
         'unresolved_risks': [],
         'reviewer_expertise': _clean_string_list(data.get('reviewer_expertise'), limit=16, item_limit=180),
         'external_reference_check': citations,
@@ -902,7 +978,12 @@ def run_venue_assessment(submission):
         brief['unresolved_risks'].append({
             'risk': risk,
             'venue_fields': _clean_string_list(item.get('venue_fields'), limit=8, item_limit=80),
-            'manuscript_terms': _clean_string_list(item.get('manuscript_terms'), limit=8, item_limit=160),
+            'manuscript_evidence_ids': [
+                evidence_id for evidence_id in _clean_string_list(
+                    item.get('manuscript_evidence_ids'), limit=8, item_limit=20
+                )
+                if evidence_id in valid_evidence_ids
+            ],
         })
 
     with transaction.atomic():

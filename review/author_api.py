@@ -661,8 +661,11 @@ def author_submit_packet(request, submission_id):
     if access_error:
         return access_error
 
-    if item.status not in {'draft', 'packet_ready'}:
-        return JsonResponse({'detail': f'Submission cannot be submitted from status {item.status}'}, status=409)
+    if item.status != 'packet_ready':
+        return JsonResponse(
+            {'detail': 'Complete the venue assessment and prepare the packet before submission'},
+            status=409,
+        )
 
     item.status = 'submitted'
     item.submitted_at = timezone.now()
@@ -692,6 +695,11 @@ def author_transfer_submission(request, submission_id):
         return JsonResponse({'detail': 'Active venue not found'}, status=404)
     if target_venue.id == source.venue_id:
         return JsonResponse({'detail': 'Transfer destination must be a different venue'}, status=400)
+    if source.status not in {'rejected', 'withdrawn'}:
+        return JsonResponse(
+            {'detail': 'Transfer is available after a rejection or withdrawal'},
+            status=409,
+        )
 
     target = VenueSubmission.objects.create(
         manuscript=source.manuscript,

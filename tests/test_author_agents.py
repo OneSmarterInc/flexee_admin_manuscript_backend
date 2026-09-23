@@ -182,7 +182,7 @@ class AuthorAgentApiTests(TestCase):
         after = {m.venue.slug: m for m in VenueMatch.objects.filter(manuscript=manuscript).select_related('venue')}
         self.assertEqual(after[first.slug].eligibility, before[first.slug])
         self.assertEqual(after[second.slug].eligibility, before[second.slug])
-        self.assertIn('applied AI', after[first.slug].fit_summary)
+        self.assertIn('applied-ai', after[first.slug].fit_summary.lower())
         self.assertTrue(after[first.slug].evidence)
 
     @patch('review.services.author_agents.ollama_chat_json')

@@ -22,7 +22,15 @@ from .models import (
     VenueMatch,
     VenueSubmission,
 )
-from .services.review_engine import extract_text, word_count
+from .services.review_engine import word_count
+from .services.author_agents import (
+    AgentExecutionError,
+    AgentInputError,
+    load_manuscript_text,
+    run_semantic_matching,
+    run_semantic_readiness,
+    run_venue_assessment,
+)
 
 
 ALLOWED_MANUSCRIPT_TYPES = {value for value, _ in Manuscript.TYPE_CHOICES}
@@ -270,10 +278,7 @@ def author_run_readiness(request, manuscript_id):
     )
 
     try:
-        manuscript.manuscript_file.open('rb')
-        content = manuscript.manuscript_file.read()
-        manuscript.manuscript_file.close()
-        text = extract_text(content, manuscript.manuscript_filename)
+        text = load_manuscript_text(manuscript)
         words = word_count(text)
         lowered = text.lower()
 
@@ -345,6 +350,27 @@ def author_run_readiness(request, manuscript_id):
         assessment.error = {'detail': str(exc)}
         assessment.save(update_fields=['status', 'completed_at', 'error'])
         return JsonResponse({'readiness': _readiness_payload(assessment)}, status=422)
+
+    return JsonResponse({'readiness': _readiness_payload(assessment)}, status=201)
+
+
+@csrf_exempt
+@require_POST
+def author_run_semantic_readiness(request, manuscript_id):
+    try:
+        manuscript = Manuscript.objects.get(id=manuscript_id)
+    except Manuscript.DoesNotExist:
+        return JsonResponse({'detail': 'Manuscript not found'}, status=404)
+
+    try:
+        assessment = run_semantic_readiness(manuscript)
+    except AgentInputError as exc:
+        return JsonResponse({'detail': str(exc)}, status=409)
+    except AgentExecutionError as exc:
+        payload = {'detail': str(exc), 'code': 'semantic_readiness_failed'}
+        if exc.assessment_id:
+            payload['assessment_id'] = exc.assessment_id
+        return JsonResponse(payload, status=503)
 
     return JsonResponse({'readiness': _readiness_payload(assessment)}, status=201)
 
@@ -450,6 +476,33 @@ def author_generate_matches(request, manuscript_id):
     }, status=201)
 
 
+@csrf_exempt
+@require_POST
+def author_run_semantic_matches(request, manuscript_id):
+    try:
+        manuscript = Manuscript.objects.get(id=manuscript_id)
+    except Manuscript.DoesNotExist:
+        return JsonResponse({'detail': 'Manuscript not found'}, status=404)
+
+    data = _json_body(request)
+    venue_ids = data.get('venue_ids')
+    if venue_ids is not None and not isinstance(venue_ids, list):
+        return JsonResponse({'detail': 'venue_ids must be a JSON list when provided'}, status=400)
+
+    try:
+        result = run_semantic_matching(manuscript, venue_ids=venue_ids)
+    except AgentInputError as exc:
+        return JsonResponse({'detail': str(exc)}, status=409)
+
+    return JsonResponse({
+        'matches': [_match_payload(item) for item in result['matches']],
+        'agent_version': result['agent_version'],
+        'models': result['models'],
+        'errors': result['errors'],
+        'note': 'Semantic matching explains each venue independently; it does not rank venues or choose a destination.',
+    }, status=201)
+
+
 @require_GET
 def author_matches(request, manuscript_id):
     try:
@@ -494,6 +547,29 @@ def author_create_submission(request, manuscript_id):
         },
     )
     return JsonResponse({'submission': _submission_payload(item)}, status=201)
+
+
+@csrf_exempt
+@require_POST
+def author_run_venue_assessment(request, submission_id):
+    try:
+        submission = VenueSubmission.objects.select_related(
+            'manuscript', 'venue', 'venue__organization', 'venue_config'
+        ).get(id=submission_id)
+    except VenueSubmission.DoesNotExist:
+        return JsonResponse({'detail': 'Venue submission not found'}, status=404)
+
+    try:
+        submission = run_venue_assessment(submission)
+    except AgentInputError as exc:
+        return JsonResponse({'detail': str(exc)}, status=409)
+    except AgentExecutionError as exc:
+        return JsonResponse({'detail': str(exc), 'code': 'venue_assessment_failed'}, status=503)
+
+    submission = VenueSubmission.objects.select_related(
+        'venue', 'venue__organization', 'venue_config'
+    ).prefetch_related('evidence_findings').get(id=submission.id)
+    return JsonResponse({'submission': _submission_payload(submission)}, status=201)
 
 
 @require_GET

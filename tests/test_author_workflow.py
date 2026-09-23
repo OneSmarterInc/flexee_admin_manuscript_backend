@@ -125,6 +125,18 @@ class AuthorWorkflowApiTests(TestCase):
         self.assertEqual(submission['status'], 'draft')
         self.assertEqual(submission['venue']['slug'], venue_a.slug)
 
+        draft_submit = self.client.post(
+            f"/api/author/venue-submissions/{submission['id']}/submit/",
+            data='{}',
+            content_type='application/json',
+            **self._auth(manuscript),
+        )
+        self.assertEqual(draft_submit.status_code, 409)
+
+        source = VenueSubmission.objects.get(id=submission['id'])
+        source.status = 'packet_ready'
+        source.save(update_fields=['status'])
+
         submit_response = self.client.post(
             f"/api/author/venue-submissions/{submission['id']}/submit/",
             data='{}',
@@ -133,6 +145,18 @@ class AuthorWorkflowApiTests(TestCase):
         )
         self.assertEqual(submit_response.status_code, 200, submit_response.content)
         self.assertEqual(submit_response.json()['submission']['status'], 'submitted')
+
+        early_transfer = self.client.post(
+            f"/api/author/venue-submissions/{submission['id']}/transfer/",
+            data=json.dumps({'venue_id': str(venue_b.id), 'reason': 'Author selected another venue'}),
+            content_type='application/json',
+            **self._auth(manuscript),
+        )
+        self.assertEqual(early_transfer.status_code, 409)
+
+        source = VenueSubmission.objects.get(id=submission['id'])
+        source.status = 'rejected'
+        source.save(update_fields=['status'])
 
         transfer_response = self.client.post(
             f"/api/author/venue-submissions/{submission['id']}/transfer/",

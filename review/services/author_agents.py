@@ -477,22 +477,55 @@ def _config_context(config):
 
 
 def _feedback_context(venue):
-    rows = venue.editor_feedback.order_by('-created_at')[:20]
+    rows = venue.editor_feedback.order_by('-created_at')[:6]
     return [
         {
-            'assessment_field': row.assessment_field,
+            'assessment_field': _clean_text(row.assessment_field, 120),
             'agent_value': _bounded(row.agent_value),
             'editor_value': _bounded(row.editor_value),
-            'reason': _clean_text(row.reason, 500),
+            'reason': _clean_text(row.reason, 350),
         }
         for row in rows
     ]
 
 
+def _profile_context(manuscript):
+    profile = (manuscript.parsed_profile or {}).get('semantic', {})
+    if not isinstance(profile, dict):
+        return {}
+    return {
+        'summary': _clean_text(profile.get('summary'), 1400),
+        'topics': _clean_string_list(profile.get('topics'), limit=10, item_limit=140),
+        'methods': _clean_string_list(profile.get('methods'), limit=10, item_limit=180),
+        'contributions': _clean_string_list(profile.get('contributions'), limit=10, item_limit=220),
+        'limitations': _clean_string_list(profile.get('limitations'), limit=10, item_limit=220),
+        'coverage': profile.get('coverage') if isinstance(profile.get('coverage'), dict) else {},
+    }
+
+
+def _compact_config_context(config):
+    raw = _config_context(config)
+    return {
+        'version': raw['version'],
+        'aims_scope': _clean_text(raw['aims_scope'], 1200),
+        'article_types': _clean_string_list(raw['article_types'], limit=15, item_limit=120),
+        'accepted_methods': _clean_string_list(raw['accepted_methods'], limit=15, item_limit=140),
+        'quality_threshold': _clean_text(raw['quality_threshold'], 700),
+        'reviewer_criteria': _clean_string_list(raw['reviewer_criteria'], limit=15, item_limit=160),
+        'policies': _bounded(raw['policies']),
+        'disclosures': _clean_string_list(raw['disclosures'], limit=15, item_limit=180),
+        'reporting_standards': _clean_string_list(raw['reporting_standards'], limit=15, item_limit=180),
+        'desk_rejection_rules': _clean_string_list(raw['desk_rejection_rules'], limit=15, item_limit=180),
+        'deadlines': _bounded(raw['deadlines']),
+        'submission_capacity': _bounded(raw['submission_capacity']),
+        'current_demand': _bounded(raw['current_demand']),
+    }
+
+
 def _match_prompt(manuscript, match, config):
-    profile = _bounded((manuscript.parsed_profile or {}).get('semantic', {}))
-    context = _bounded(_config_context(config))
-    feedback = _bounded(_feedback_context(match.venue))
+    profile = _profile_context(manuscript)
+    context = _compact_config_context(config)
+    feedback = _feedback_context(match.venue)
     return f"""You are the venue matching agent for a scholarly submission network.
 
 Your job is to explain compatibility between ONE manuscript and ONE venue. Do not rank this venue
@@ -676,7 +709,7 @@ def _citation_checks(text, manuscript_sha):
 
 def _assessment_prompt(submission, config, citation_checks):
     manuscript = submission.manuscript
-    profile = _bounded((manuscript.parsed_profile or {}).get('semantic', {}))
+    profile = _profile_context(manuscript)
     match = manuscript.venue_matches.filter(venue=submission.venue).first()
     match_context = {
         'eligibility': match.eligibility if match else None,
@@ -701,13 +734,13 @@ VENUE
 Name: {submission.venue.name}
 Configuration version: {config.version}
 Configuration:
-{json.dumps(_bounded(_config_context(config)), ensure_ascii=False)}
+{json.dumps(_compact_config_context(config), ensure_ascii=False)}
 
 MATCH CONTEXT
 {json.dumps(_bounded(match_context), ensure_ascii=False)}
 
 VENUE-SPECIFIC EDITOR FEEDBACK
-{json.dumps(_bounded(_feedback_context(submission.venue)), ensure_ascii=False)}
+{json.dumps(_feedback_context(submission.venue), ensure_ascii=False)}
 
 DETERMINISTIC EXTERNAL REFERENCE CHECK
 {json.dumps(_bounded(citation_checks), ensure_ascii=False)}

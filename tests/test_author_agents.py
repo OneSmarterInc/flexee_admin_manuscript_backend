@@ -87,7 +87,7 @@ class AuthorAgentApiTests(TestCase):
         self.assertEqual(response.status_code, 201, response.content)
         return response.json()['readiness']
 
-    @patch('review.services.author_agents.ollama_chat_json')
+    @patch('review.services.author_agents.ai_chat_json')
     def test_semantic_readiness_persists_grounded_profile_and_evidence(self, mock_chat):
         manuscript = self._create_manuscript()
         self._run_mechanical(manuscript)
@@ -120,6 +120,13 @@ class AuthorAgentApiTests(TestCase):
         self.assertIn('semantic-readiness:mock-qwen', payload['engine_version'])
         self.assertTrue(payload['summary']['semantic_advisory_only'])
         self.assertIn('semantic_profile', payload['summary'])
+        
+        # Test short manuscript coverage
+        self.assertEqual(payload['summary']['chunks_analyzed'], 1)
+        self.assertEqual(payload['summary']['chunks_total'], 1)
+        self.assertEqual(payload['summary']['coverage_percent'], 100)
+        self.assertEqual(payload['summary']['coverage']['chunks_analyzed'], 1)
+        self.assertEqual(payload['summary']['coverage']['coverage_percent'], 100)
 
         manuscript.refresh_from_db()
         self.assertEqual(manuscript.parsed_profile['semantic_model'], 'mock-qwen')
@@ -132,7 +139,7 @@ class AuthorAgentApiTests(TestCase):
             ).exists()
         )
 
-    @patch('review.services.author_agents.ollama_chat_json')
+    @patch('review.services.author_agents.ai_chat_json')
     def test_semantic_matching_explains_each_venue_without_overriding_policy_gate(self, mock_chat):
         manuscript = self._create_manuscript()
         first, second = self._create_venues()
@@ -201,7 +208,7 @@ class AuthorAgentApiTests(TestCase):
         self.assertIn('applied-ai', after[first.slug].fit_summary.lower())
         self.assertTrue(after[first.slug].evidence)
 
-    @patch('review.services.author_agents.ollama_chat_json')
+    @patch('review.services.author_agents.ai_chat_json')
     def test_venue_assessment_creates_editorial_brief_and_evidence_packet(self, mock_chat):
         manuscript = self._create_manuscript()
         venue, _ = self._create_venues()
@@ -275,19 +282,61 @@ class AuthorAgentApiTests(TestCase):
         self.assertGreater(len(submission['evidence']), 0)
         self.assertTrue(all(item['claim'] for item in submission['evidence']))
 
-    @patch('review.services.author_agents.ollama_chat_json')
-    def test_semantic_readiness_failure_returns_503_without_corrupting_mechanical_result(self, mock_chat):
+    @patch('review.services.author_agents.ai_chat_json')
+    @patch('review.services.author_agents.ai_available')
+    def test_semantic_readiness_failure_gracefully_degrades_to_deterministic_fallback(self, mock_available, mock_chat):
         manuscript = self._create_manuscript()
         mechanical = self._run_mechanical(manuscript)
+        
+        # Simulate AI provider failing
+        mock_available.return_value = True
         mock_chat.side_effect = RuntimeError('Ollama unavailable')
 
         response = self.client.post(
             f'/api/author/manuscripts/{manuscript.id}/readiness/semantic/',
             **self._auth(manuscript),
         )
-        self.assertEqual(response.status_code, 503, response.content)
-        self.assertEqual(response.json()['code'], 'semantic_readiness_failed')
+        self.assertEqual(response.status_code, 201, response.content)
+        readiness = response.json()['readiness']
+        self.assertEqual(readiness['engine_version'], 'author-agents-v1:semantic-readiness:deterministic-fallback')
+        self.assertEqual(readiness['summary']['model'], 'deterministic-fallback')
+        self.assertTrue(readiness['summary']['semantic_advisory_only'])
+        
+        latest_completed = manuscript.readiness_assessments.filter(status='completed').order_by('-created_at').first()
+        self.assertNotEqual(str(latest_completed.id), mechanical['id'])
+        self.assertEqual(latest_completed.engine_version, 'author-agents-v1:semantic-readiness:deterministic-fallback')
 
-        latest_completed = manuscript.readiness_assessments.filter(status='completed').first()
-        self.assertEqual(str(latest_completed.id), mechanical['id'])
-        self.assertEqual(latest_completed.engine_version, 'mechanical-v1')
+    @patch('review.services.author_agents._chunk_numbered_lines')
+    @patch('review.services.author_agents.ai_chat_json')
+    def test_semantic_readiness_long_manuscript_samples_coverage(self, mock_chat, mock_chunker):
+        manuscript = self._create_manuscript()
+        self._run_mechanical(manuscript)
+        
+        # Create 25 mock chunks
+        mock_chunker.return_value = [{'index': i, 'start_line': i, 'end_line': i, 'text': f'Chunk {i}'} for i in range(1, 26)]
+        
+        mock_chat.return_value = ('mock-qwen', json.dumps({
+            'summary': 'A sampled chunk.',
+            'topics': ['AI agents'],
+            'methods': [],
+            'contributions': [],
+            'limitations': [],
+            'findings': [],
+        }))
+
+        response = self.client.post(
+            f'/api/author/manuscripts/{manuscript.id}/readiness/semantic/',
+            **self._auth(manuscript),
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        payload = response.json()['readiness']
+
+        # AUTHOR_AGENT_MAX_CHUNKS defaults to 8
+        self.assertEqual(payload['summary']['chunks_analyzed'], 8)
+        self.assertEqual(payload['summary']['chunks_total'], 25)
+        self.assertEqual(payload['summary']['coverage_percent'], 32)
+        
+        # Verify same on the nested coverage dict
+        self.assertEqual(payload['summary']['coverage']['chunks_analyzed'], 8)
+        self.assertEqual(payload['summary']['coverage']['chunks_total'], 25)
+        self.assertEqual(payload['summary']['coverage']['coverage_percent'], 32)

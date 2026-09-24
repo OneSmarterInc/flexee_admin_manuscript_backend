@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from ..models import EvidenceFinding, ReadinessAssessment, Venue, VenueMatch, VenueSubmission
 from .field_agent import _extract_citations, _verify_citation_crossref
-from .local_llm import ollama_chat_json
+from .ai_provider import ai_chat_json, ai_available
 from .review_engine import extract_text, word_count
 
 
@@ -77,12 +77,7 @@ def _parse_json_object(raw):
 
 
 def _agent_json(prompt, *, max_tokens=700, timeout=180):
-    model, raw = ollama_chat_json(
-        prompt,
-        max_tokens=max_tokens,
-        timeout=timeout,
-        num_ctx=_env_int('AUTHOR_AGENT_NUM_CTX', 4096, minimum=2048, maximum=32768),
-    )
+    model, raw = ai_chat_json(prompt, max_tokens=max_tokens, timeout=timeout)
     return model, _parse_json_object(raw)
 
 
@@ -374,6 +369,9 @@ def _aggregate_profile(chunk_results, *, total_chunks, analyzed_chunks):
             'total_chunks': total_chunks,
             'analyzed_chunks': analyzed_chunks,
             'complete': total_chunks == analyzed_chunks,
+            'chunks_analyzed': analyzed_chunks,
+            'chunks_total': total_chunks,
+            'coverage_percent': int(round((analyzed_chunks / total_chunks) * 100)) if total_chunks > 0 else 0,
         },
     }
 
@@ -422,22 +420,51 @@ def run_semantic_readiness(manuscript):
             raise AgentInputError('No extractable manuscript text is available for semantic readiness.')
         selected = _select_chunks(all_chunks)
 
-        results = []
+        ai_failed = False
         models = []
-        for chunk in selected:
-            model, raw = _agent_json(_chunk_prompt(manuscript, chunk), max_tokens=650)
-            models.append(model)
-            results.append(_sanitize_chunk_result(raw, chunk, text))
+        results = []
+        if not ai_available():
+            ai_failed = True
+        else:
+            try:
+                for chunk in selected:
+                    model, raw = _agent_json(_chunk_prompt(manuscript, chunk), max_tokens=650)
+                    models.append(model)
+                    results.append(_sanitize_chunk_result(raw, chunk, text))
+            except Exception:
+                ai_failed = True
 
-        profile = _aggregate_profile(
-            results,
-            total_chunks=len(all_chunks),
-            analyzed_chunks=len(selected),
-        )
-        semantic_findings = [item for result in results for item in result['findings']]
-        combined_findings = list(mechanical.findings or []) + semantic_findings
-        warning_count = sum(1 for item in combined_findings if item.get('status') == 'warning')
-        model = models[0] if models else ''
+        if ai_failed:
+            model = 'deterministic-fallback'
+            profile = {
+                'summary': 'Semantic analysis unavailable',
+                'topics': [],
+                'methods': [],
+                'contributions': [],
+                'limitations': [],
+                'evidence_points': [],
+                'coverage': {
+                    'total_chunks': len(all_chunks), 
+                    'analyzed_chunks': 0, 
+                    'complete': False,
+                    'chunks_analyzed': 0,
+                    'chunks_total': len(all_chunks),
+                    'coverage_percent': 0,
+                },
+            }
+            semantic_findings = []
+            combined_findings = list(mechanical.findings or [])
+            warning_count = sum(1 for item in combined_findings if item.get('status') == 'warning')
+        else:
+            profile = _aggregate_profile(
+                results,
+                total_chunks=len(all_chunks),
+                analyzed_chunks=len(selected),
+            )
+            semantic_findings = [item for result in results for item in result['findings']]
+            combined_findings = list(mechanical.findings or []) + semantic_findings
+            warning_count = sum(1 for item in combined_findings if item.get('status') == 'warning')
+            model = models[0] if models else ''
 
         summary = {
             'word_count': mechanical.summary.get('word_count', word_count(text)),
@@ -447,6 +474,9 @@ def run_semantic_readiness(manuscript):
             'semantic_advisory_only': True,
             'semantic_profile': profile,
             'coverage': profile['coverage'],
+            'chunks_analyzed': profile['coverage'].get('chunks_analyzed', 0),
+            'chunks_total': profile['coverage'].get('chunks_total', 0),
+            'coverage_percent': profile['coverage'].get('coverage_percent', 0),
             'mechanical_assessment_id': str(mechanical.id),
             'model': model,
             'note': (
@@ -718,6 +748,8 @@ def run_semantic_matching(manuscript, *, venue_ids=None):
             updated.append(match)
             continue
         try:
+            if not ai_available() or profile.get('summary') == 'Semantic analysis unavailable':
+                raise RuntimeError('AI unavailable')
             model, data = _agent_json(_match_prompt(manuscript, match, config), max_tokens=700)
             models.add(model)
             evidence_ids = set(_profile_evidence_map(manuscript))
@@ -725,18 +757,25 @@ def run_semantic_matching(manuscript, *, venue_ids=None):
             gaps = _sanitize_match_items(data.get('gaps'), evidence_ids)
             semantic_reason_text = [item['text'] for item in reasons]
             semantic_gap_text = [item['text'] for item in gaps]
-
-            # Preserve deterministic gate reasons/gaps; semantic output can explain, never override the gate.
-            match.fit_summary = _clean_text(data.get('fit_summary'), 1200)
-            match.reasons = _unique(list(match.reasons or []) + semantic_reason_text, 40)
-            match.gaps = _unique(list(match.gaps or []) + semantic_gap_text, 40)
-            match.evidence = _match_evidence(match, config, reasons, gaps)
-            match.venue_config = config
-            match.save(update_fields=['fit_summary', 'reasons', 'gaps', 'evidence', 'venue_config'])
-            updated.append(match)
+            
+            fit_summary = _clean_text(data.get('fit_summary'), 1200)
+            evidence = _match_evidence(match, config, reasons, gaps)
         except Exception as exc:
             errors.append({'venue_id': str(match.venue_id), 'detail': str(exc)})
-            updated.append(match)
+            models.add('deterministic-fallback')
+            fit_summary = 'Semantic analysis unavailable'
+            semantic_reason_text = []
+            semantic_gap_text = []
+            evidence = []
+
+        # Preserve deterministic gate reasons/gaps; semantic output can explain, never override the gate.
+        match.fit_summary = fit_summary
+        match.reasons = _unique(list(match.reasons or []) + semantic_reason_text, 40)
+        match.gaps = _unique(list(match.gaps or []) + semantic_gap_text, 40)
+        match.evidence = evidence
+        match.venue_config = config
+        match.save(update_fields=['fit_summary', 'reasons', 'gaps', 'evidence', 'venue_config'])
+        updated.append(match)
 
     return {
         'matches': updated,
@@ -811,18 +850,19 @@ DETERMINISTIC EXTERNAL REFERENCE CHECK
 
 Return JSON only:
 {{
-  "editor_summary": "concise brief for a human editor",
-  "outlet_fit": {{"summary": "...", "venue_fields": ["aims_scope"], "manuscript_evidence_ids": ["M001"]}},
-  "policy_compliance": {{"summary": "...", "venue_fields": ["policies"], "manuscript_evidence_ids": ["M001"]}},
-  "contribution": {{"summary": "...", "venue_fields": ["quality_threshold"], "manuscript_evidence_ids": ["M001"]}},
-  "methods": {{"summary": "...", "venue_fields": ["accepted_methods"], "manuscript_evidence_ids": ["M001"]}},
-  "citation_integrity": {{"summary": "...", "venue_fields": [], "manuscript_evidence_ids": ["M001"]}},
+  "editor_summary": "<concise brief for a human editor>",
+  "outlet_fit": {{"summary": "<evaluate how well the manuscript matches the venue aims and scope>", "venue_fields": ["aims_scope"], "manuscript_evidence_ids": ["M001"]}},
+  "policy_compliance": {{"summary": "<evaluate adherence to venue policies>", "venue_fields": ["policies"], "manuscript_evidence_ids": ["M001"]}},
+  "contribution": {{"summary": "<evaluate the novelty and significance>", "venue_fields": ["quality_threshold"], "manuscript_evidence_ids": ["M001"]}},
+  "methods": {{"summary": "<evaluate the methodology used>", "venue_fields": ["accepted_methods"], "manuscript_evidence_ids": ["M001"]}},
+  "citation_integrity": {{"summary": "<evaluate the references and citations>", "venue_fields": [], "manuscript_evidence_ids": ["M001"]}},
   "unresolved_risks": [
-    {{"risk": "...", "venue_fields": ["reporting_standards"], "manuscript_evidence_ids": ["M001"]}}
+    {{"risk": "<describe a specific risk or note none found>", "venue_fields": ["reporting_standards"], "manuscript_evidence_ids": ["M001"]}}
   ],
-  "reviewer_expertise": ["specific expertise"]
+  "reviewer_expertise": ["<specific expertise area>"]
 }}
 
+You MUST populate every section (outlet_fit, policy_compliance, contribution, methods, citation_integrity) with a meaningful summary replacing the <...> placeholders. If there are no issues, describe why it complies rather than leaving it empty. Unresolved risks must list any concerns; if none exist, you must still provide at least one item explaining that no major risks were found. Reviewer expertise must suggest 1-3 specific areas based on the manuscript.
 The Crossref check is deterministic input: summarize it accurately and do not upgrade "weak match" or
 "not found" to "verified". If a venue rule is not configured, say that it is not configured rather
 than inventing one. Editor feedback is outlet-specific guidance and must not be generalized to other venues.
@@ -946,9 +986,21 @@ def run_venue_assessment(submission):
     citations = _citation_checks(text, submission.manuscript.manuscript_sha256)
 
     try:
+        if not ai_available() or profile.get('summary') == 'Semantic analysis unavailable':
+            raise RuntimeError('AI unavailable')
         model, data = _agent_json(_assessment_prompt(submission, config, citations), max_tokens=1100, timeout=240)
     except Exception as exc:
-        raise AgentExecutionError(str(exc)) from exc
+        model = 'deterministic-fallback'
+        data = {
+            'editor_summary': 'Semantic analysis unavailable. The manuscript was processed with deterministic checks only.',
+            'outlet_fit': {'summary': 'Semantic analysis unavailable'},
+            'policy_compliance': {'summary': 'Semantic analysis unavailable'},
+            'contribution': {'summary': 'Semantic analysis unavailable'},
+            'methods': {'summary': 'Semantic analysis unavailable'},
+            'citation_integrity': {'summary': 'Semantic analysis unavailable'},
+            'unresolved_risks': [],
+            'reviewer_expertise': []
+        }
 
     valid_evidence_ids = set(_profile_evidence_map(submission.manuscript))
     brief = {
@@ -965,6 +1017,7 @@ def run_venue_assessment(submission):
         'unresolved_risks': [],
         'reviewer_expertise': _clean_string_list(data.get('reviewer_expertise'), limit=16, item_limit=180),
         'external_reference_check': citations,
+        'analysis_coverage': profile.get('coverage', {}),
         'human_decision_required': True,
     }
 

@@ -1,6 +1,31 @@
 import uuid
 from django.db import models
 
+class Author(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    email = models.EmailField(unique=True, db_index=True)
+    password_hash = models.CharField(max_length=200)
+    name = models.CharField(max_length=200)
+
+    class Meta:
+        ordering = ['-created_at']
+
+class EditorUser(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    email = models.EmailField(unique=True, db_index=True)
+    password_hash = models.CharField(max_length=200)
+    totp_secret = models.CharField(max_length=64, blank=True)
+    platform_superuser = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['email']
+
+    def __str__(self):
+        return self.email
 
 class Submission(models.Model):
     STATUS_CHOICES = [('processing', 'Processing'), ('completed', 'Completed'), ('failed', 'Failed')]
@@ -114,6 +139,29 @@ class Organization(models.Model):
         return self.name
 
 
+class Membership(models.Model):
+    ROLE_CHOICES = [
+        ('owner', 'Owner'),
+        ('editor', 'Editor'),
+        ('viewer', 'Viewer'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(EditorUser, on_delete=models.CASCADE, related_name='memberships')
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='memberships')
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['organization__name', 'user__email']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'organization'], name='review_unique_membership'),
+        ]
+
+    def __str__(self):
+        return f'{self.user.email} - {self.organization.name} ({self.role})'
+
+
 class Venue(models.Model):
     TYPE_CHOICES = [
         ('journal', 'Journal'),
@@ -194,6 +242,7 @@ class Manuscript(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
+    author_account = models.ForeignKey(Author, on_delete=models.CASCADE, related_name='manuscripts', null=True, blank=True)
     author_name = models.CharField(max_length=200)
     author_email = models.EmailField(max_length=320, blank=True, db_index=True)
     coauthors = models.TextField(blank=True)

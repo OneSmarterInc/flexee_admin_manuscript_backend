@@ -379,22 +379,16 @@ def admin_verify_password(request):
 
     username = str(data.get('username', '')).strip()
     password = str(data.get('password', ''))
-    expected_user = os.getenv('ADMIN_USERNAME', 'admin')
-    password_hash = os.getenv('ADMIN_PASSWORD_HASH', '')
-    totp_secret = os.getenv('ADMIN_TOTP_SECRET', '')
-    configured = bool(password_hash and totp_secret and os.getenv('ADMIN_SESSION_SECRET', ''))
 
-    ok = configured and username == expected_user and verify_password(password, password_hash)
+    from .models import EditorUser
+    user = EditorUser.objects.filter(email=username).first()
+    ok = bool(user and verify_password(password, user.password_hash) and os.getenv('ADMIN_SESSION_SECRET', ''))
 
     if not ok:
         AdminAuthEvent.objects.create(remote_hash=rh, success=False, detail={'username': username, 'reason': 'invalid_credentials'})
         return JsonResponse({'detail': 'Invalid username or password.'}, status=401)
 
-    issuer = urllib.parse.quote('Flexee Admin')
-    user = urllib.parse.quote(username)
-    totp_uri = f"otpauth://totp/{issuer}:{user}?secret={totp_secret}&issuer={issuer}"
-
-    return JsonResponse({'ok': True, 'totp_uri': totp_uri})
+    return JsonResponse({'ok': True})
 
 
 @csrf_exempt
@@ -414,11 +408,17 @@ def admin_login(request):
     username = str(data.get('username', '')).strip()
     password = str(data.get('password', ''))
     code = str(data.get('totp', '')).strip()
-    expected_user = os.getenv('ADMIN_USERNAME', 'admin')
-    password_hash = os.getenv('ADMIN_PASSWORD_HASH', '')
-    totp_secret = os.getenv('ADMIN_TOTP_SECRET', '')
-    configured = bool(password_hash and totp_secret and os.getenv('ADMIN_SESSION_SECRET', ''))
-    ok = configured and username == expected_user and verify_password(password, password_hash) and verify_totp(totp_secret, code)
+    
+    from .models import EditorUser
+    user = EditorUser.objects.filter(email=username).first()
+    
+    ok = bool(
+        user
+        and os.getenv('ADMIN_SESSION_SECRET', '')
+        and verify_password(password, user.password_hash)
+        and (not user.totp_secret or verify_totp(user.totp_secret, code))
+    )
+    
     AdminAuthEvent.objects.create(remote_hash=rh, success=ok, detail={'username': username, 'reason': 'ok' if ok else 'invalid_credentials'})
     if not ok:
         return JsonResponse({'detail': 'Invalid username, password, or authenticator code.'}, status=401)

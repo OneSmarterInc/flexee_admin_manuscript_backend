@@ -11,8 +11,9 @@ from review.auth import COOKIE_NAME, issue_session
 from review.models import (
     EditorFeedback,
     EvidenceFinding,
-    Manuscript,
     Organization,
+    EditorUser,
+    Manuscript,
     Venue,
     VenueAgentConfig,
     VenueSubmission,
@@ -36,6 +37,8 @@ class EditorWorkspaceApiTests(TestCase):
 
         token, _ = issue_session('admin')
         self.client.cookies[COOKIE_NAME] = token
+        
+        self.editor_user = EditorUser.objects.create(email='admin', platform_superuser=True)
 
         self.organization = Organization.objects.create(
             name='Editor Test Publisher',

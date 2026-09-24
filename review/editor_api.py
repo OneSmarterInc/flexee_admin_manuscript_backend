@@ -9,6 +9,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from .auth import require_admin
 from .models import EditorFeedback, Venue, VenueAgentConfig, VenueSubmission
+from .services.email_service import send_acceptance_email, send_rejection_email, _send
 from .author_api import _active_config, _json_body, _submission_payload, _venue_config_payload, _venue_payload
 
 
@@ -23,6 +24,17 @@ EDITOR_STATUSES = {
     'transferred',
 }
 DECISION_STATUSES = {'revision_requested', 'accepted', 'rejected'}
+
+def _check_org_access(user, organization_id, required_roles=None):
+    if user.platform_superuser:
+        return True
+    if not required_roles:
+        required_roles = ['owner', 'editor', 'viewer']
+    return user.memberships.filter(
+        organization_id=organization_id,
+        role__in=required_roles
+    ).exists()
+
 
 
 def _feedback_payload(item):
@@ -86,6 +98,10 @@ def admin_venue_detail(request, venue_id):
     except Venue.DoesNotExist:
         return JsonResponse({'detail': 'Venue not found'}, status=404)
 
+    required_roles = ['owner', 'editor', 'viewer'] if request.method == 'GET' else ['owner']
+    if not _check_org_access(request.editor_user, venue.organization_id, required_roles):
+        return JsonResponse({'detail': 'Forbidden'}, status=403)
+
     if request.method == 'GET':
         return JsonResponse({'venue': _venue_payload(venue)})
     if request.method not in {'PATCH', 'POST'}:
@@ -117,6 +133,12 @@ def admin_venue_configs(request, venue_id):
         venue = Venue.objects.get(id=venue_id)
     except Venue.DoesNotExist:
         return JsonResponse({'detail': 'Venue not found'}, status=404)
+    if not _check_org_access(request.editor_user, venue.organization_id, ['owner', 'editor', 'viewer']):
+        return JsonResponse({'detail': 'Forbidden'}, status=403)
+
+    required_roles = ['owner', 'editor', 'viewer'] if request.method == 'GET' else ['owner']
+    if not _check_org_access(request.editor_user, venue.organization_id, required_roles):
+        return JsonResponse({'detail': 'Forbidden'}, status=403)
     configs = venue.agent_configs.order_by('-version', '-created_at')
     return JsonResponse({
         'venue': _venue_payload(venue, include_config=False),
@@ -137,6 +159,9 @@ def admin_activate_venue_config(request, venue_id, config_id):
     except VenueAgentConfig.DoesNotExist:
         return JsonResponse({'detail': 'Venue configuration not found'}, status=404)
 
+    if not _check_org_access(request.editor_user, venue.organization_id, ['owner']):
+        return JsonResponse({'detail': 'Forbidden'}, status=403)
+
     venue.agent_configs.filter(active=True).exclude(id=config.id).update(active=False)
     if not config.active:
         config.active = True
@@ -153,6 +178,11 @@ def admin_venue_submissions(request):
     queryset = VenueSubmission.objects.select_related(
         'manuscript', 'venue', 'venue__organization', 'venue_config'
     ).all()
+
+    user = request.editor_user
+    if not user.platform_superuser:
+        org_ids = user.memberships.values_list('organization_id', flat=True)
+        queryset = queryset.filter(venue__organization_id__in=org_ids)
 
     venue_id = str(request.GET.get('venue_id', '')).strip()
     status = str(request.GET.get('status', '')).strip()
@@ -174,6 +204,8 @@ def admin_venue_submissions(request):
         )
 
     counts_base = VenueSubmission.objects.all()
+    if not user.platform_superuser:
+        counts_base = counts_base.filter(venue__organization_id__in=org_ids)
     if venue_id:
         counts_base = counts_base.filter(venue_id=venue_id)
     counts = {
@@ -201,6 +233,8 @@ def admin_venue_submission_detail(request, submission_id):
         ).prefetch_related('evidence_findings', 'editor_feedback').get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
+    if not _check_org_access(request.editor_user, item.venue.organization_id, ['owner', 'editor', 'viewer']):
+        return JsonResponse({'detail': 'Forbidden'}, status=403)
     return JsonResponse({'submission': _editor_submission_payload(item, detail=True)})
 
 
@@ -209,9 +243,12 @@ def admin_venue_submission_detail(request, submission_id):
 @require_admin
 def admin_start_venue_review(request, submission_id):
     try:
-        item = VenueSubmission.objects.get(id=submission_id)
+        item = VenueSubmission.objects.select_related('venue').get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
+
+    if not _check_org_access(request.editor_user, item.venue.organization_id, ['owner', 'editor']):
+        return JsonResponse({'detail': 'Forbidden'}, status=403)
 
     if item.status not in {'submitted', 'revision_requested', 'under_review'}:
         return JsonResponse(
@@ -232,6 +269,9 @@ def admin_venue_submission_decision(request, submission_id):
         item = VenueSubmission.objects.select_related('manuscript', 'venue').get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
+
+    if not _check_org_access(request.editor_user, item.venue.organization_id, ['owner', 'editor']):
+        return JsonResponse({'detail': 'Forbidden'}, status=403)
 
     data = _json_body(request)
     decision = str(data.get('decision', '')).strip()
@@ -259,6 +299,42 @@ def admin_venue_submission_decision(request, submission_id):
         'human_decision': True,
     }
     item.save(update_fields=['status', 'decision', 'updated_at'])
+
+    # ── Email notification to author ──────────────────────────────────────────
+    # Build a lightweight adapter so we can reuse the existing email service
+    # functions which expect an object with .author_name, .author_email, .title.
+    manuscript = item.manuscript
+    author_email = (manuscript.author_email or '').strip()
+    if author_email:
+        try:
+            class _VenueSubmissionAdapter:
+                """Bridges VenueSubmission → email_service interface."""
+                author_name = manuscript.author_name
+                author_email = manuscript.author_email
+                title = manuscript.title
+
+            adapter = _VenueSubmissionAdapter()
+            venue_name = item.venue.name if item.venue_id else 'the journal'
+
+            if decision == 'accepted':
+                send_acceptance_email(adapter, note)
+            elif decision == 'rejected':
+                send_rejection_email(adapter, note or 'No additional reason was provided.')
+            else:  # revision_requested
+                subject = f'Revision requested for your submission to {venue_name}'
+                body = (
+                    f'Dear {manuscript.author_name},\n\n'
+                    f'The editorial team at {venue_name} has reviewed your manuscript '
+                    f'"{manuscript.title}" and is requesting revisions before a final decision can be made.\n\n'
+                    f'Editor note:\n{note}\n\n'
+                    f'Please address the comments above and resubmit your manuscript.\n\n'
+                    f'Best regards,\nFlexee Editorial Team'
+                )
+                _send(author_email, subject, body)
+        except Exception:
+            # Email errors must never block the decision from being recorded.
+            pass
+
     return JsonResponse({'submission': _editor_submission_payload(item)})
 
 
@@ -266,9 +342,12 @@ def admin_venue_submission_decision(request, submission_id):
 @require_admin
 def admin_venue_submission_download(request, submission_id):
     try:
-        item = VenueSubmission.objects.select_related('manuscript').get(id=submission_id)
+        item = VenueSubmission.objects.select_related('manuscript', 'venue').get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
+
+    if not _check_org_access(request.editor_user, item.venue.organization_id, ['owner', 'editor', 'viewer']):
+        return JsonResponse({'detail': 'Forbidden'}, status=403)
 
     manuscript = item.manuscript
     try:

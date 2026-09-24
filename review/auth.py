@@ -10,7 +10,7 @@ from functools import wraps
 from django.http import JsonResponse
 
 COOKIE_NAME = 'flxee_admin_session'
-
+AUTHOR_COOKIE_NAME = 'flxee_author_session'
 
 def _b64u(data):
     return base64.urlsafe_b64encode(data).decode('ascii').rstrip('=')
@@ -103,7 +103,7 @@ def read_session(request):
         payload = json.loads(_b64u_decode(body).decode('utf-8'))
         if int(payload.get('exp', 0)) < int(time.time()):
             return None
-        if payload.get('u') != os.getenv('ADMIN_USERNAME', 'admin'):
+        if not payload.get('u'):
             return None
         return payload
     except Exception:
@@ -133,6 +133,68 @@ def require_admin(view):
         session = read_session(request)
         if not session:
             return JsonResponse({'detail': 'Admin authentication required'}, status=401)
+        
+        from .models import EditorUser
+        user = EditorUser.objects.filter(email=session.get('u')).first()
+        if not user:
+            return JsonResponse({'detail': 'User not found'}, status=401)
+            
         request.flexee_admin = session
+        request.editor_user = user
+        return view(request, *args, **kwargs)
+    return wrapped
+
+
+def issue_author_session(author_id):
+    secret = _session_secret()
+    if not secret:
+        raise RuntimeError('ADMIN_SESSION_SECRET is not configured')
+    now = int(time.time())
+    hours = 24 * 7  # 1 week for authors
+    payload = {'aid': str(author_id), 'iat': now, 'exp': now + hours * 3600, 'n': secrets.token_hex(8)}
+    body = _b64u(json.dumps(payload, separators=(',', ':')).encode('utf-8'))
+    sig = _b64u(hmac.new(secret, body.encode('ascii'), hashlib.sha256).digest())
+    return f'{body}.{sig}', hours * 3600
+
+def read_author_session(request):
+    token = request.COOKIES.get(AUTHOR_COOKIE_NAME, '')
+    if not token or '.' not in token or not _session_secret():
+        return None
+    try:
+        body, sig = token.split('.', 1)
+        expected = _b64u(hmac.new(_session_secret(), body.encode('ascii'), hashlib.sha256).digest())
+        if not hmac.compare_digest(sig, expected):
+            return None
+        payload = json.loads(_b64u_decode(body).decode('utf-8'))
+        if int(payload.get('exp', 0)) < int(time.time()):
+            return None
+        if not payload.get('aid'):
+            return None
+        return payload
+    except Exception:
+        return None
+
+def set_author_session_cookie(response, token, max_age):
+    secure = os.getenv('COOKIE_SECURE', 'false').lower() in {'1', 'true', 'yes', 'on'}
+    response.set_cookie(
+        AUTHOR_COOKIE_NAME,
+        token,
+        max_age=max_age,
+        httponly=True,
+        secure=secure,
+        samesite='Strict',
+        path='/',
+    )
+
+def clear_author_session_cookie(response):
+    response.delete_cookie(AUTHOR_COOKIE_NAME, path='/', samesite='Strict')
+
+def require_author(view):
+    @wraps(view)
+    def wrapped(request, *args, **kwargs):
+        session = read_author_session(request)
+        if not session:
+            return JsonResponse({'detail': 'Author authentication required'}, status=401)
+        request.flexee_author = session
         return view(request, *args, **kwargs)
     return wrapped

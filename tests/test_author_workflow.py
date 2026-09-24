@@ -9,11 +9,17 @@ from review.models import Manuscript, Organization, Venue, VenueAgentConfig, Ven
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(prefix='flexee-author-tests-'))
 class AuthorWorkflowApiTests(TestCase):
     def _create_manuscript(self):
+        from review.models import Author
+        from review.auth import issue_author_session
+        author = Author.objects.create(email='author@example.com', name='Test Author', email_verified=True)
+        token, _ = issue_author_session(author.id)
+        
         manuscript = SimpleUploadedFile(
             'paper.md',
             b'# Test manuscript\n\n## Abstract\nA short abstract.\n\n## Methods\nMethods here.\n\n## References\nOne reference.\n\n## Data Availability\nAvailable on request.',
             content_type='text/markdown',
         )
+        self.client.cookies['flexee_author_session'] = token
         response = self.client.post('/api/author/manuscripts/', {
             'title': 'A Test Manuscript',
             'author': 'Test Author',

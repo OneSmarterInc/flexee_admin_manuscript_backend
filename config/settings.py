@@ -32,7 +32,21 @@ if PRODUCTION:
 
 ALLOWED_HOSTS = [x.strip() for x in os.getenv('DJANGO_ALLOWED_HOSTS', '127.0.0.1,localhost').split(',') if x.strip()]
 
-INSTALLED_APPS = ['review']
+INSTALLED_APPS = ['review', 'django_q']
+
+Q_CLUSTER = {
+    'name': 'flexee_q',
+    'workers': 4,
+    'recycle': 500,
+    'timeout': 1800,  # 30 mins
+    'retry': 1860,
+    'compress': True,
+    'save_limit': 250,
+    'queue_limit': 500,
+    'cpu_affinity': 1,
+    'label': 'Django Q',
+    'orm': 'default'
+}
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',

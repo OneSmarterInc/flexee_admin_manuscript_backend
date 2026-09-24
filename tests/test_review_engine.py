@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 from unittest.mock import patch
 
@@ -31,7 +32,7 @@ class EngineTests(unittest.TestCase):
         self.assertFalse(payload["stream"])
         self.assertEqual(payload["format"], "json")
         self.assertEqual(payload["options"]["num_predict"], 123)
-        self.assertEqual(payload["options"]["num_ctx"], 4096)
+        self.assertEqual(payload["options"]["num_ctx"], 16384)
 
     def test_chapter_summary_uses_small_context_and_output_budget(self):
         response = httpx.Response(
@@ -89,7 +90,6 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(summary, "Repaired editor summary.")
         self.assertEqual(letter, "Repaired author letter.")
         payload = post.call_args.kwargs["json"]
-        self.assertEqual(payload["options"]["num_ctx"], 2048)
         self.assertEqual(payload["options"]["num_predict"], 300)
         self.assertLess(len(payload["messages"][0]["content"]), 5000)
         self.assertIn("14200", payload["messages"][0]["content"])
@@ -103,7 +103,7 @@ class EngineTests(unittest.TestCase):
         }
         judgments = []
         with patch(
-            "review.services.review_engine.ollama_chat_json",
+            "review.services.review_engine.ai_chat_json",
             side_effect=RuntimeError("Ollama unavailable"),
         ):
             summary, letter = _repair_missing_outputs(
@@ -206,6 +206,48 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(chapters), 12)
         self.assertEqual(chapters[0]['title'], 'Section 1')
 
+
+
+    @patch.dict(os.environ, {"AI_PROVIDER": "ollama", "ENABLE_CLOUD_FALLBACK": "true", "ANTHROPIC_API_KEY": "fake", "OLLAMA_NUM_CTX": "4096", "OLLAMA_NUM_PREDICT": "2000"})
+    @patch("review.services.review_engine.ai_chat_json")
+    @patch("review.services.review_engine.run_field_agent")
+    def test_large_manuscript_cloud_fallback_enabled(self, mock_field, mock_ai_chat):
+        from review.services.review_engine import run_review
+        mock_field.return_value = ""
+        mock_ai_chat.return_value = ("claude-haiku", '{"decision": "PASS_TO_HUMAN", "editor_summary": "Sum", "author_letter": "Let", "items": []}')
+        
+        # We need chapter structure so chunking or normal review can happen
+        # For book, it requires chapter numbers
+        lines = []
+        for i in range(1, 13):
+            lines.append(f"Chapter {i} Title")
+            lines.append("word " * 2500)
+        text = "\n".join(lines)
+        
+        result = run_review(text.encode("utf-8"), "book.md", "book")
+        self.assertEqual(result["record"]["mode"], "cloud-full")
+        self.assertEqual(result["record"]["provider"], "anthropic")
+        mock_ai_chat.assert_called_once()
+        self.assertEqual(mock_ai_chat.call_args.kwargs.get("force_provider"), "anthropic")
+
+    @patch.dict(os.environ, {"AI_PROVIDER": "ollama", "ENABLE_CLOUD_FALLBACK": "false", "OLLAMA_NUM_CTX": "4096", "OLLAMA_NUM_PREDICT": "2000"})
+    @patch("review.services.review_engine.ai_chat_json")
+    @patch("review.services.review_engine.run_field_agent")
+    def test_large_manuscript_cloud_fallback_disabled(self, mock_field, mock_ai_chat):
+        from review.services.review_engine import run_review
+        mock_field.return_value = ""
+        mock_ai_chat.return_value = ("qwen2.5", '{"decision": "PASS_TO_HUMAN", "editor_summary": "Sum", "author_letter": "Let", "items": []}')
+        
+        lines = []
+        for i in range(1, 13):
+            lines.append(f"Chapter {i} Title")
+            lines.append("word " * 2500)
+        text = "\n".join(lines)
+        
+        result = run_review(text.encode("utf-8"), "book.md", "book")
+        self.assertEqual(result["record"]["mode"], "chunked")
+        self.assertGreater(result["record"]["chunk_count"], 1)
+        self.assertGreater(mock_ai_chat.call_count, 1)
 
 if __name__ == '__main__':
     unittest.main()

@@ -8,6 +8,7 @@ class Author(models.Model):
     email = models.EmailField(unique=True, db_index=True)
     password_hash = models.CharField(max_length=200)
     name = models.CharField(max_length=200)
+    email_verified = models.BooleanField(default=False)
 
     class Meta:
         ordering = ['-created_at']
@@ -91,6 +92,16 @@ class ReviewEvent(models.Model):
 
 
 class AdminAuthEvent(models.Model):
+    occurred_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    remote_hash = models.CharField(max_length=64, db_index=True)
+    success = models.BooleanField()
+    detail = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-occurred_at']
+
+
+class AuthorAuthEvent(models.Model):
     occurred_at = models.DateTimeField(auto_now_add=True, db_index=True)
     remote_hash = models.CharField(max_length=64, db_index=True)
     success = models.BooleanField()
@@ -424,6 +435,26 @@ class SubmissionTransfer(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     reason = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+
+class ReviewJob(models.Model):
+    STATUS_CHOICES = [
+        ('queued', 'Queued'),
+        ('processing', 'Processing'),
+        ('completed', 'Completed'),
+        ('failed', 'Failed')
+    ]
+    job_type = models.CharField(max_length=50) # 'semantic_readiness', 'semantic_matches', 'venue_assessment'
+    reference_id = models.CharField(max_length=36, db_index=True) # UUID string
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='queued', db_index=True)
+    progress = models.IntegerField(default=0)
+    error_message = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-created_at']

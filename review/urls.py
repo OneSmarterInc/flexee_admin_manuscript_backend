@@ -9,6 +9,13 @@ urlpatterns = [
     path('submissions/', views.submit),
 
     # Author scholarly-network workflow.
+    path('author/register/', author_api.author_register),
+    path('author/verify-email/', author_api.author_verify_email),
+    path('author/login/', author_api.author_login),
+    path('author/logout/', author_api.author_logout),
+    path('author/session/', author_api.author_session),
+    path('author/jobs/<int:job_id>/', author_api.author_job_status),
+    path('author/manuscripts/list/', author_api.author_manuscripts_list),
     path('author/manuscripts/', author_api.author_manuscripts),
     path('author/manuscripts/<uuid:manuscript_id>/', author_api.author_manuscript_detail),
     path('author/manuscripts/<uuid:manuscript_id>/readiness/', author_api.author_readiness),

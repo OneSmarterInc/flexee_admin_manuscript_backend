@@ -176,6 +176,22 @@ def health(request):
 @csrf_exempt
 @require_POST
 def submit(request):
+    from django.utils import timezone
+    from datetime import timedelta
+    from .models import AuthorAuthEvent
+    from .auth import remote_hash
+    
+    rh = remote_hash(request)
+    window_minutes = int(os.getenv('PUBLIC_SUBMIT_WINDOW_MINUTES', '60'))
+    max_submissions = int(os.getenv('PUBLIC_SUBMIT_MAX_SUBMISSIONS', '3'))
+    recent_submissions = AuthorAuthEvent.objects.filter(
+        remote_hash=rh,
+        detail__action='public_submit',
+        occurred_at__gte=timezone.now() - timedelta(minutes=window_minutes)
+    ).count()
+    if recent_submissions >= max_submissions:
+        return JsonResponse({'detail': 'Too many public submissions. Try again later.', 'errors': ['Rate limited']}, status=429)
+
     max_bytes = int(os.getenv('MAX_MANUSCRIPT_BYTES', str(20 * 1024 * 1024)))
     kind = request.POST.get('type', '').strip()
     author = request.POST.get('author', '').strip()
@@ -214,6 +230,12 @@ def submit(request):
     if errors:
         return JsonResponse({'detail': errors[0], 'errors': errors}, status=400)
 
+    AuthorAuthEvent.objects.create(
+        remote_hash=rh,
+        success=True,
+        detail={'action': 'public_submit', 'email': author_email}
+    )
+
     content = upload.read()
     upload.seek(0)
     digest = hashlib.sha256(content).hexdigest()
@@ -226,12 +248,20 @@ def submit(request):
         try:
             from .services.review_engine import extract_text, word_count as wc_fn
             with zipfile.ZipFile(BytesIO(content)) as zf:
+                infolist = zf.infolist()
+                if len(infolist) > int(os.getenv('ZIP_MAX_FILES', '1000')):
+                    return JsonResponse({'detail': 'ZIP contains too many files', 'errors': ['ZIP contains too many files']}, status=400)
+                extracted_size = sum([i.file_size for i in infolist])
+                if extracted_size > int(os.getenv('ZIP_MAX_EXTRACTED_BYTES', str(100 * 1024 * 1024))):
+                    return JsonResponse({'detail': 'Extracted ZIP size exceeds limit', 'errors': ['Extracted ZIP size exceeds limit']}, status=400)
+
                 manuscript_entries = []
                 for name in zf.namelist():
                     if name.lower().endswith(('.docx', '.pdf', '.md')) and not name.startswith('__MACOSX') and not os.path.basename(name).startswith('.'):
                         manuscript_entries.append(name)
                 if not manuscript_entries:
                     return JsonResponse({'detail': 'No .docx, .pdf, or .md file found inside the ZIP archive', 'errors': ['No .docx, .pdf, or .md file found inside the ZIP archive']}, status=400)
+
 
                 zip_docs = []
                 docs_to_summarize = []
@@ -681,7 +711,6 @@ def admin_smtp_settings(request):
             'host': smtp.host,
             'port': smtp.port,
             'username': smtp.username,
-            'password': smtp.password,
             'use_tls': smtp.use_tls,
             'use_ssl': smtp.use_ssl,
             'admin_notification_emails': smtp.admin_notification_emails,

@@ -5,7 +5,8 @@ from io import BytesIO
 from docx import Document
 from pypdf import PdfReader
 
-from .local_llm import ollama_chat_json
+from .ai_provider import ai_chat_json
+from .local_llm import assert_prompt_fits_context, DEFAULT_OLLAMA_NUM_CTX, DEFAULT_OLLAMA_NUM_PREDICT
 
 BOOK_STRUCTURE = {
     'chapters_required': 12,
@@ -547,7 +548,7 @@ def _repair_missing_outputs(parsed, decision, measured, judgments, kind):
         f"Review data:\n{json.dumps(compact, ensure_ascii=False)}"
     )
     try:
-        _, output = ollama_chat_json(prompt, max_tokens=300, timeout=90, num_ctx=2048)
+        _, output = ai_chat_json(prompt, max_tokens=300, timeout=90)
         repaired = _parse_model_json(output)
         repaired_summary = repaired.get('editor_summary') if isinstance(repaired, dict) else None
         repaired_letter = repaired.get('author_letter') if isinstance(repaired, dict) else None
@@ -563,14 +564,101 @@ def _repair_missing_outputs(parsed, decision, measured, judgments, kind):
         )
 
 
+
+def _judge_chunked(text, declared_sim, rubric_items, kind, disclosure, measured, num_ctx, max_tokens):
+    available_tokens = num_ctx - max_tokens - 1000
+    max_chars = max(1000, available_tokens * 4)
+    chunks = []
+    current = 0
+    while current < len(text):
+        end = min(current + max_chars, len(text))
+        if end < len(text):
+            last_break = text.rfind('\n\n', current, end)
+            if last_break > current + max_chars // 2:
+                end = last_break + 2
+        chunks.append(text[current:end])
+        current = end
+        
+    all_judgments = []
+    models_used = set()
+    for chunk in chunks:
+        chunk_prompt = _build_prompt(chunk, declared_sim, rubric_items, kind, measured)
+        model, output = ai_chat_json(chunk_prompt, max_tokens=max_tokens)
+        models_used.add(model)
+        parsed = _parse_model_json(output)
+        if isinstance(parsed, dict):
+            by_id = {item.get('id'): item for item in parsed.get('items', []) if isinstance(item, dict)}
+            allowed = {'pass', 'needs_work', 'fail'}
+            items = []
+            for rubric in rubric_items:
+                got = by_id.get(rubric['id'], {})
+                verdict = got.get('verdict') if got.get('verdict') in allowed else 'needs_work'
+                if rubric.get('advisory') and verdict == 'fail':
+                    verdict = 'needs_work'
+                items.append({
+                    'id': rubric['id'],
+                    'verdict': verdict,
+                    'evidence': str(got.get('evidence', '')),
+                    'gap': str(got.get('gap', '')),
+                    'advisory': bool(rubric.get('advisory', False)),
+                })
+            all_judgments.append(items)
+            
+    verdict_rank = {'pass': 0, 'needs_work': 1, 'fail': 2}
+    final_items = []
+    for rubric in rubric_items:
+        worst_verdict = 'pass'
+        best_evidence = ''
+        best_gap = ''
+        for items in all_judgments:
+            for item in items:
+                if item['id'] == rubric['id']:
+                    if verdict_rank[item['verdict']] > verdict_rank[worst_verdict]:
+                        worst_verdict = item['verdict']
+                        best_evidence = item['evidence']
+                        best_gap = item['gap']
+                    elif verdict_rank[item['verdict']] == verdict_rank[worst_verdict] and not best_evidence:
+                        best_evidence = item['evidence']
+                        best_gap = item['gap']
+        final_items.append({
+            'id': rubric['id'],
+            'verdict': worst_verdict,
+            'evidence': best_evidence,
+            'gap': best_gap,
+            'advisory': bool(rubric.get('advisory', False)),
+        })
+        
+    decision = compute_decision(measured, final_items)
+    editor_summary = _format_editor_summary(measured, final_items, decision, "Chunked review combined.")
+    author_letter = _fallback_author_letter(decision, measured, final_items)
+    metadata = {"mode": "chunked", "chunk_count": len(chunks)}
+    return ",".join(models_used) or "unknown", final_items, decision, editor_summary, author_letter, metadata
+
 def judge_with_local_model(text, declared_sim, rubric_items, kind, disclosure, measured):
     if os.getenv('MOCK_AI_REVIEW', 'false').lower() in {'1', 'true', 'yes', 'on'}:
-        return _mock_judgment(rubric_items, disclosure, measured)
+        res = _mock_judgment(rubric_items, disclosure, measured)
+        return res[0], res[1], res[2], res[3], res[4], {"mode": "mock"}
 
-    model, output = ollama_chat_json(
-        _build_prompt(text, declared_sim, rubric_items, kind, measured),
-        max_tokens=int(os.getenv('OLLAMA_NUM_PREDICT', '4000')),
-    )
+    prompt = _build_prompt(text, declared_sim, rubric_items, kind, measured)
+    max_tokens = int(os.getenv('OLLAMA_NUM_PREDICT', '4000'))
+    num_ctx = int(os.getenv('OLLAMA_NUM_CTX', str(DEFAULT_OLLAMA_NUM_CTX)))
+    
+    force_provider = None
+    metadata = {"mode": "standard"}
+    
+    try:
+        assert_prompt_fits_context(prompt, num_ctx=num_ctx, num_predict=max_tokens)
+    except RuntimeError as exc:
+        if "too large" in str(exc).lower():
+            if os.getenv('ENABLE_CLOUD_FALLBACK', 'false').lower() in {'1', 'true', 'yes', 'on'}:
+                force_provider = 'anthropic'
+                metadata = {"mode": "cloud-full", "provider": "anthropic"}
+            else:
+                return _judge_chunked(text, declared_sim, rubric_items, kind, disclosure, measured, num_ctx, max_tokens)
+        else:
+            raise
+
+    model, output = ai_chat_json(prompt, max_tokens=max_tokens, force_provider=force_provider)
     parsed = _parse_model_json(output)
     if not isinstance(parsed, dict):
         raise RuntimeError("Local AI returned JSON, but the review payload was not an object.")
@@ -597,7 +685,7 @@ def judge_with_local_model(text, declared_sim, rubric_items, kind, disclosure, m
         parsed, decision, measured, items, kind
     )
     editor_summary = _format_editor_summary(measured, items, decision, editor_summary)
-    return model, items, decision, editor_summary, author_letter
+    return model, items, decision, editor_summary, author_letter, metadata
 
 
 
@@ -608,7 +696,7 @@ def run_review(content, filename, kind, declared_sim='', disclosure=''):
     measured = structural_checks(raw_text, kind)
     rubric_items = BOOK_JUDGMENT if kind == 'book' else ARTICLE_JUDGMENT
     
-    model, judgments, decision, editor_summary, author_letter = judge_with_local_model(
+    model, judgments, decision, editor_summary, author_letter, metadata = judge_with_local_model(
         f"{raw_text}\n\nAI-Use Disclosure (submitted with the manuscript):\n{disclosure}",
         declared_sim,
         rubric_items,
@@ -633,6 +721,7 @@ def run_review(content, filename, kind, declared_sim='', disclosure=''):
         'judgment': judgments,
         'declared_sim': declared_sim,
     }
+    record.update(metadata)
     return {
         'decision': decision,
         'model': model,

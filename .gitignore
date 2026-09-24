@@ -6,3 +6,4 @@ __pycache__/
 media/
 *.sqlite3
 *.sqlite3-journal
+manuscripts/

@@ -11,8 +11,20 @@ from django.utils.text import slugify
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from .auth import require_admin
+from .auth import (
+    require_admin,
+    require_author,
+    issue_author_session,
+    set_author_session_cookie,
+    clear_author_session_cookie,
+    read_author_session,
+    hash_password,
+    verify_password,
+    remote_hash
+)
 from .models import (
+    Author,
+    AuthorAuthEvent,
     EditorFeedback,
     EvidenceFinding,
     Manuscript,
@@ -23,7 +35,9 @@ from .models import (
     VenueAgentConfig,
     VenueMatch,
     VenueSubmission,
+    ReviewJob,
 )
+from django_q.tasks import async_task
 from .services.review_engine import word_count
 from .services.author_agents import (
     AgentExecutionError,
@@ -33,6 +47,7 @@ from .services.author_agents import (
     run_semantic_readiness,
     run_venue_assessment,
 )
+from .services.email_service import _send as _send_email
 
 
 ALLOWED_MANUSCRIPT_TYPES = {value for value, _ in Manuscript.TYPE_CHOICES}
@@ -44,10 +59,14 @@ def _hash_author_token(token):
 
 
 def _author_access_error(request, manuscript):
+    session = read_author_session(request)
+    if session and session.get('aid') == str(manuscript.author_account_id):
+        return None
+
     token = request.META.get('HTTP_X_MANUSCRIPT_TOKEN', '').strip()
     if not token:
         return JsonResponse(
-            {'detail': 'Author manuscript access token required', 'code': 'author_token_required'},
+            {'detail': 'Author authentication or token required', 'code': 'author_token_required'},
             status=401,
         )
     stored = str(manuscript.access_token_hash or '')
@@ -258,7 +277,21 @@ def author_manuscripts(request):
     digest = hashlib.sha256(content).hexdigest()
     access_token = secrets.token_urlsafe(32)
 
+    author = None
+    session = read_author_session(request)
+    if session and session.get('aid'):
+        try:
+            author = Author.objects.get(id=session['aid'])
+        except Author.DoesNotExist:
+            pass
+
+    if not author:
+        return JsonResponse({'detail': 'Author authentication required', 'code': 'author_token_required'}, status=401)
+    if not author.email_verified:
+        return JsonResponse({'detail': 'Email verification required before upload'}, status=403)
+
     item = Manuscript.objects.create(
+        author_account=author,
         author_name=author_name,
         author_email=author_email,
         coauthors=request.POST.get('coauthors', '').strip(),
@@ -279,6 +312,154 @@ def author_manuscripts(request):
         'manuscript': _manuscript_payload(item),
         'access_token': access_token,
     }, status=201)
+
+@csrf_exempt
+@require_POST
+def author_register(request):
+    data = _json_body(request)
+    email = str(data.get('email', '')).strip().lower()
+    name = str(data.get('name', '')).strip()
+    password = str(data.get('password', ''))
+
+    if not email or not name or not password:
+        return JsonResponse({'detail': 'Email, name, and password are required'}, status=400)
+    
+    if len(password) < 8:
+        return JsonResponse({'detail': 'Password must be at least 8 characters'}, status=400)
+
+    rh = remote_hash(request)
+    from datetime import timedelta
+    window_minutes = int(os.getenv('AUTHOR_REGISTER_WINDOW_MINUTES', '15'))
+    max_regs = int(os.getenv('AUTHOR_REGISTER_MAX', '3'))
+    recent_registrations = AuthorAuthEvent.objects.filter(
+        remote_hash=rh, success=True, detail__action='register', occurred_at__gte=timezone.now() - timedelta(minutes=window_minutes)
+    ).count()
+    if recent_registrations >= max_regs:
+        return JsonResponse({'detail': 'Too many registrations from this IP. Try again later.'}, status=429)
+
+    if Author.objects.filter(email=email).exists():
+        return JsonResponse({'detail': 'An account with this email already exists'}, status=409)
+
+    author = Author.objects.create(
+        email=email,
+        name=name,
+        password_hash=hash_password(password),
+        email_verified=False
+    )
+    AuthorAuthEvent.objects.create(remote_hash=rh, success=True, detail={'action': 'register', 'email': email})
+
+    from django.core.signing import dumps
+    token = dumps({'author_id': str(author.id)})
+    verify_url = request.build_absolute_uri(f'/api/author/verify-email?token={token}')
+    try:
+        _send_email(
+            to_email=email,
+            subject='Verify your author account',
+            body=f'Please verify your email by clicking: {verify_url}'
+        )
+    except Exception:
+        pass
+
+    token, max_age = issue_author_session(author.id)
+    response = JsonResponse({'id': str(author.id), 'email': author.email, 'name': author.name}, status=201)
+    set_author_session_cookie(response, token, max_age)
+    return response
+
+
+@csrf_exempt
+@require_POST
+def author_login(request):
+    data = _json_body(request)
+    email = str(data.get('email', '')).strip().lower()
+    password = str(data.get('password', ''))
+
+    if not email or not password:
+        return JsonResponse({'detail': 'Email and password are required'}, status=400)
+
+    rh = remote_hash(request)
+    from datetime import timedelta
+    window_minutes = int(os.getenv('AUTHOR_LOGIN_WINDOW_MINUTES', '15'))
+    max_failures = int(os.getenv('AUTHOR_LOGIN_MAX_FAILURES', '10'))
+    recent_failures = AuthorAuthEvent.objects.filter(
+        remote_hash=rh, success=False, occurred_at__gte=timezone.now() - timedelta(minutes=window_minutes)
+    ).count()
+    if recent_failures >= max_failures:
+        AuthorAuthEvent.objects.create(remote_hash=rh, success=False, detail={'reason': 'rate_limited', 'action': 'login'})
+        return JsonResponse({'detail': 'Too many failed login attempts. Try again later.'}, status=429)
+
+    try:
+        author = Author.objects.get(email=email)
+    except Author.DoesNotExist:
+        AuthorAuthEvent.objects.create(remote_hash=rh, success=False, detail={'email': email, 'reason': 'invalid_credentials', 'action': 'login'})
+        return JsonResponse({'detail': 'Invalid email or password'}, status=401)
+
+    if not verify_password(password, author.password_hash):
+        AuthorAuthEvent.objects.create(remote_hash=rh, success=False, detail={'email': email, 'reason': 'invalid_credentials', 'action': 'login'})
+        return JsonResponse({'detail': 'Invalid email or password'}, status=401)
+
+    AuthorAuthEvent.objects.create(remote_hash=rh, success=True, detail={'email': email, 'reason': 'ok', 'action': 'login'})
+
+    token, max_age = issue_author_session(author.id)
+    response = JsonResponse({'id': str(author.id), 'email': author.email, 'name': author.name})
+    set_author_session_cookie(response, token, max_age)
+    return response
+
+
+@csrf_exempt
+@require_POST
+def author_logout(request):
+    response = JsonResponse({'detail': 'Logged out'})
+    clear_author_session_cookie(response)
+    return response
+
+
+@require_GET
+def author_verify_email(request):
+    token = request.GET.get('token')
+    if not token:
+        return JsonResponse({'detail': 'Token missing'}, status=400)
+    
+    from django.core.signing import loads, SignatureExpired, BadSignature
+    try:
+        data = loads(token, max_age=86400 * 7)
+        author = Author.objects.get(id=data['author_id'])
+        author.email_verified = True
+        author.save(update_fields=['email_verified'])
+        return JsonResponse({'detail': 'Email verified successfully'})
+    except (SignatureExpired, BadSignature, Author.DoesNotExist):
+        return JsonResponse({'detail': 'Invalid or expired token'}, status=400)
+
+
+@require_GET
+def author_session(request):
+    session = read_author_session(request)
+    if not session:
+        return JsonResponse({'detail': 'Not logged in'}, status=401)
+    
+    try:
+        author = Author.objects.get(id=session['aid'])
+    except Author.DoesNotExist:
+        response = JsonResponse({'detail': 'Author not found'}, status=401)
+        clear_author_session_cookie(response)
+        return response
+
+    return JsonResponse({'id': str(author.id), 'email': author.email, 'name': author.name})
+
+@require_GET
+@require_author
+def author_manuscripts_list(request):
+    author_id = request.flexee_author['aid']
+    items = Manuscript.objects.filter(author_account_id=author_id).order_by('-created_at')
+    
+    result = []
+    for m in items:
+        sub = m.venue_submissions.order_by('-created_at').first()
+        payload = _manuscript_payload(m)
+        if sub:
+            payload['latest_submission'] = _submission_payload(sub)
+        result.append(payload)
+        
+    return JsonResponse({'manuscripts': result})
 
 
 @require_GET
@@ -398,17 +579,14 @@ def author_run_semantic_readiness(request, manuscript_id):
     if access_error:
         return access_error
 
-    try:
-        assessment = run_semantic_readiness(manuscript)
-    except AgentInputError as exc:
-        return JsonResponse({'detail': str(exc)}, status=409)
-    except AgentExecutionError as exc:
-        payload = {'detail': str(exc), 'code': 'semantic_readiness_failed'}
-        if exc.assessment_id:
-            payload['assessment_id'] = exc.assessment_id
-        return JsonResponse(payload, status=503)
+    job = ReviewJob.objects.create(
+        job_type='semantic_readiness',
+        reference_id=str(manuscript.id),
+        status='queued'
+    )
+    async_task('review.tasks.run_semantic_readiness_task', job.id, manuscript.id)
 
-    return JsonResponse({'readiness': _readiness_payload(assessment)}, status=201)
+    return JsonResponse({'job_id': str(job.id), 'status': 'queued'}, status=202)
 
 
 @require_GET
@@ -547,18 +725,14 @@ def author_run_semantic_matches(request, manuscript_id):
     if venue_ids is not None and not isinstance(venue_ids, list):
         return JsonResponse({'detail': 'venue_ids must be a JSON list when provided'}, status=400)
 
-    try:
-        result = run_semantic_matching(manuscript, venue_ids=venue_ids)
-    except AgentInputError as exc:
-        return JsonResponse({'detail': str(exc)}, status=409)
+    job = ReviewJob.objects.create(
+        job_type='semantic_matches',
+        reference_id=str(manuscript.id),
+        status='queued'
+    )
+    async_task('review.tasks.run_semantic_matching_task', job.id, manuscript.id, venue_ids)
 
-    return JsonResponse({
-        'matches': [_match_payload(item) for item in result['matches']],
-        'agent_version': result['agent_version'],
-        'models': result['models'],
-        'errors': result['errors'],
-        'note': 'Semantic matching explains each venue independently; it does not rank venues or choose a destination.',
-    }, status=201)
+    return JsonResponse({'job_id': str(job.id), 'status': 'queued'}, status=202)
 
 
 @require_GET
@@ -626,17 +800,14 @@ def author_run_venue_assessment(request, submission_id):
     if access_error:
         return access_error
 
-    try:
-        submission = run_venue_assessment(submission)
-    except AgentInputError as exc:
-        return JsonResponse({'detail': str(exc)}, status=409)
-    except AgentExecutionError as exc:
-        return JsonResponse({'detail': str(exc), 'code': 'venue_assessment_failed'}, status=503)
+    job = ReviewJob.objects.create(
+        job_type='venue_assessment',
+        reference_id=str(submission.id),
+        status='queued'
+    )
+    async_task('review.tasks.run_venue_assessment_task', job.id, submission.id)
 
-    submission = VenueSubmission.objects.select_related(
-        'venue', 'venue__organization', 'venue_config'
-    ).prefetch_related('evidence_findings').get(id=submission.id)
-    return JsonResponse({'submission': _submission_payload(submission)}, status=201)
+    return JsonResponse({'job_id': str(job.id), 'status': 'queued'}, status=202)
 
 
 @require_GET
@@ -657,7 +828,7 @@ def author_submission_detail(request, submission_id):
 @require_POST
 def author_submit_packet(request, submission_id):
     try:
-        item = VenueSubmission.objects.get(id=submission_id)
+        item = VenueSubmission.objects.select_related('manuscript', 'venue').get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
     access_error = _author_access_error(request, item.manuscript)
@@ -673,6 +844,30 @@ def author_submit_packet(request, submission_id):
     item.status = 'submitted'
     item.submitted_at = timezone.now()
     item.save(update_fields=['status', 'submitted_at', 'updated_at'])
+
+    # ── Confirmation email to author ────────────────────────────────────────────
+    manuscript = item.manuscript
+    author_email = (manuscript.author_email or '').strip()
+    if author_email:
+        try:
+            venue_name = item.venue.name if item.venue_id else 'the selected journal'
+            subject = f'Submission Received – {manuscript.title}'
+            body = (
+                f'Dear {manuscript.author_name},\n\n'
+                f'We have received your manuscript submission "{manuscript.title}" '
+                f'to {venue_name}.\n\n'
+                f'Your submission is now in the editorial queue. The editorial team will '
+                f'review your work and get back to you with a decision. You can check the '
+                f'status of your submission at any time by logging into the Author Workspace.\n\n'
+                f'Submission reference: {submission_id}\n\n'
+                f'Thank you for submitting to {venue_name}.\n\n'
+                f'Best regards,\nFlexee Editorial Team'
+            )
+            _send_email(author_email, subject, body)
+        except Exception:
+            # Email errors must never block the submission from being recorded.
+            pass
+
     return JsonResponse({'submission': _submission_payload(item)})
 
 
@@ -866,3 +1061,36 @@ def admin_editor_feedback(request, venue_id):
             'created_at': feedback.created_at.isoformat(),
         }
     }, status=201)
+
+
+@require_GET
+def author_job_status(request, job_id):
+    try:
+        job = ReviewJob.objects.get(id=job_id)
+    except ReviewJob.DoesNotExist:
+        return JsonResponse({'detail': 'Job not found'}, status=404)
+        
+    if job.job_type in ('semantic_readiness', 'semantic_matches'):
+        try:
+            item = Manuscript.objects.get(id=job.reference_id)
+            access_error = _author_access_error(request, item)
+            if access_error:
+                return access_error
+        except Manuscript.DoesNotExist:
+            pass
+    elif job.job_type == 'venue_assessment':
+        try:
+            item = VenueSubmission.objects.get(id=job.reference_id)
+            access_error = _author_access_error(request, item.manuscript)
+            if access_error:
+                return access_error
+        except VenueSubmission.DoesNotExist:
+            pass
+
+    return JsonResponse({
+        'id': str(job.id),
+        'status': job.status,
+        'progress': job.progress,
+        'result_reference': job.reference_id,
+        'error': job.error_message
+    })

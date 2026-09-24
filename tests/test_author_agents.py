@@ -11,6 +11,11 @@ from review.models import EvidenceFinding, Manuscript, Organization, Venue, Venu
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(prefix='flexee-author-agent-tests-'))
 class AuthorAgentApiTests(TestCase):
     def _create_manuscript(self):
+        from review.models import Author
+        from review.auth import issue_author_session
+        author = Author.objects.create(email='author@example.com', name='Test Author', email_verified=True)
+        token, _ = issue_author_session(author.id)
+        
         upload = SimpleUploadedFile(
             'agent-paper.md',
             (
@@ -24,6 +29,7 @@ class AuthorAgentApiTests(TestCase):
             ),
             content_type='text/markdown',
         )
+        self.client.cookies['flexee_author_session'] = token
         response = self.client.post('/api/author/manuscripts/', {
             'title': 'Agentic Operations',
             'author': 'Test Author',

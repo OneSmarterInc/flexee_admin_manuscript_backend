@@ -69,8 +69,14 @@ def verify_totp(secret, code, timestamp=None, window=1):
 
 
 def remote_hash(request):
-    forwarded = request.META.get('HTTP_X_FORWARDED_FOR', '')
-    remote = (forwarded.split(',')[0].strip() if forwarded else request.META.get('REMOTE_ADDR', 'unknown')) or 'unknown'
+    remote = request.META.get('REMOTE_ADDR', 'unknown')
+    trusted_proxies = [p.strip() for p in os.getenv('TRUSTED_PROXIES', '').split(',') if p.strip()]
+    
+    if remote in trusted_proxies or '*' in trusted_proxies:
+        forwarded = request.META.get('HTTP_X_FORWARDED_FOR', '')
+        if forwarded:
+            remote = forwarded.split(',')[0].strip() or remote
+
     key = os.getenv('ADMIN_SESSION_SECRET', 'dev-session-key').encode('utf-8')
     return hmac.new(key, remote.encode('utf-8'), hashlib.sha256).hexdigest()
 
@@ -130,6 +136,12 @@ def clear_session_cookie(response):
 def require_admin(view):
     @wraps(view)
     def wrapped(request, *args, **kwargs):
+        if request.method == 'POST':
+            origin = request.headers.get('Origin')
+            allowed = [o.strip() for o in os.getenv('ADMIN_ALLOWED_ORIGINS', 'http://localhost:5173').split(',') if o.strip()]
+            if origin not in allowed:
+                return JsonResponse({'detail': 'Untrusted Origin'}, status=403)
+
         session = read_session(request)
         if not session:
             return JsonResponse({'detail': 'Admin authentication required'}, status=401)

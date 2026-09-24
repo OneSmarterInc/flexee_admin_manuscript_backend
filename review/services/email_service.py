@@ -4,9 +4,12 @@ from django.core.mail import EmailMultiAlternatives, get_connection
 from django.utils import timezone
 from ..models import SMTPSettings
 
+import html
 
 def build_html_email(subject, body):
-    paragraphs = "".join([f'<p style="margin: 0 0 16px 0;">{p.strip()}</p>' for p in body.split('\n\n') if p.strip()])
+    safe_subject = html.escape(subject)
+    safe_body = html.escape(body)
+    paragraphs = "".join([f'<p style="margin: 0 0 16px 0;">{p.strip()}</p>' for p in safe_body.split('\n\n') if p.strip()])
     return f"""<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"></head>
@@ -16,7 +19,7 @@ def build_html_email(subject, body):
       <h1 style="color: #ffffff; font-size: 28px; font-weight: normal; margin: 0; font-family: Georgia, serif;">Flexee <span style="color: #d97757;">Editorial</span></h1>
     </div>
     <div style="padding: 30px; line-height: 1.6; font-size: 16px;">
-      <h2 style="margin-top: 0; font-size: 20px; font-family: Georgia, serif; color: #1c1917;">{subject}</h2>
+      <h2 style="margin-top: 0; font-size: 20px; font-family: Georgia, serif; color: #1c1917;">{safe_subject}</h2>
       {paragraphs}
     </div>
     <div style="background-color: #1c1917; padding: 20px; text-align: center; color: #a8a29e; font-size: 13px;">

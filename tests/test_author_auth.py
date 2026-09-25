@@ -37,7 +37,7 @@ class AuthorAuthTests(TestCase):
         
         self.assertEqual(response.status_code, 200)
         self.assertTrue(AuthorAuthEvent.objects.filter(detail__action='login', success=True).exists())
-        self.assertIn('flexee_author_session', response.cookies)
+        self.assertIn('flxee_author_session', response.cookies)
 
     @patch('review.author_api.verify_password')
     def test_author_login_lockout(self, mock_verify):
@@ -59,9 +59,11 @@ class AuthorAuthTests(TestCase):
 
     def test_author_upload_requires_verified_email(self):
         from review.auth import issue_author_session
+        from django.core.files.uploadedfile import SimpleUploadedFile
         token, _ = issue_author_session(self.author.id)
-        self.client.cookies['flexee_author_session'] = token
+        self.client.cookies['flxee_author_session'] = token
         
+        upload = SimpleUploadedFile("test.docx", b"dummy content")
         response = self.client.post('/api/author/manuscripts/', {
             'title': 'Test',
             'author': 'Test Author',
@@ -69,6 +71,29 @@ class AuthorAuthTests(TestCase):
             'manuscript_type': 'research_article',
             'disclosure': 'Test',
             'attestation': 'true',
+            'manuscript': upload,
         })
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()['detail'], 'Email verification required before upload')
+
+    def test_author_upload_verified_success(self):
+        from review.auth import issue_author_session
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        self.author.email_verified = True
+        self.author.save()
+        token, _ = issue_author_session(self.author.id)
+        self.client.cookies['flxee_author_session'] = token
+        
+        upload = SimpleUploadedFile("test.docx", b"dummy content")
+        response = self.client.post('/api/author/manuscripts/', {
+            'title': 'Test',
+            'author': 'Test Author',
+            'email': 'test@example.com',
+            'manuscript_type': 'research_article',
+            'disclosure': 'Test',
+            'attestation': 'true',
+            'manuscript': upload,
+        })
+        self.assertEqual(response.status_code, 201)
+        self.assertIn('manuscript', response.json())
+

@@ -7,12 +7,17 @@ on:
 jobs:
   django-checks:
     runs-on: ubuntu-latest
+    env:
+      AI_PROVIDER: mock
+      DJANGO_SECRET_KEY: test
+      ADMIN_SESSION_SECRET: testsecret
+      ADMIN_TOTP_SECRET: JBSWY3DPEHPK3PXP
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt -r requirements-dev.txt
       - run: python manage.py check
       - run: python manage.py makemigrations --check --dry-run
-      - run: python manage.py test
+      - run: pytest -q tests

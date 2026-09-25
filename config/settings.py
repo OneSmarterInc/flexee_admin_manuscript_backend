@@ -59,7 +59,10 @@ TEMPLATES = []
 WSGI_APPLICATION = 'config.wsgi.application'
 ASGI_APPLICATION = 'config.asgi.application'
 
-if os.getenv('DATABASE_URL'):
+import sys
+TESTING = 'pytest' in sys.modules or 'test' in sys.argv
+
+if os.getenv('DATABASE_URL') and not TESTING:
     import dj_database_url
     DATABASES = {'default': dj_database_url.config(conn_max_age=600, ssl_require=PRODUCTION)}
 elif PRODUCTION:
@@ -99,13 +102,16 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = DATA_UPLOAD_MAX_MEMORY_SIZE
 MEDIA_ROOT = BASE_DIR / 'media'
 MEDIA_URL = '/media/'
 
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 if os.getenv('SMTP_HOST', '').strip():
+    EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
     EMAIL_HOST = os.getenv('SMTP_HOST', '')
     EMAIL_PORT = int(os.getenv('SMTP_PORT', '587'))
     EMAIL_HOST_USER = os.getenv('SMTP_USERNAME', '')
     EMAIL_HOST_PASSWORD = os.getenv('SMTP_PASSWORD', '')
     EMAIL_USE_TLS = os.getenv('SMTP_USE_TLS', 'true').lower() in {'1', 'true', 'yes', 'on'}
     EMAIL_USE_SSL = os.getenv('SMTP_USE_SSL', 'false').lower() in {'1', 'true', 'yes', 'on'}
+else:
+    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+
 
 DEFAULT_FROM_EMAIL = os.getenv('NOTIFY_FROM_EMAIL', 'editor@flexee.org')

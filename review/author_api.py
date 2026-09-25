@@ -240,6 +240,19 @@ def _submission_payload(item):
 @csrf_exempt
 @require_POST
 def author_manuscripts(request):
+    author = None
+    session = read_author_session(request)
+    if session and session.get('aid'):
+        try:
+            author = Author.objects.get(id=session['aid'])
+        except Author.DoesNotExist:
+            pass
+
+    if not author:
+        return JsonResponse({'detail': 'Author authentication required', 'code': 'author_token_required'}, status=401)
+    if not author.email_verified:
+        return JsonResponse({'detail': 'Email verification required before upload'}, status=403)
+
     max_bytes = int(os.getenv('MAX_MANUSCRIPT_BYTES', str(20 * 1024 * 1024)))
     upload = request.FILES.get('manuscript')
     title = request.POST.get('title', '').strip()
@@ -276,19 +289,6 @@ def author_manuscripts(request):
     upload.seek(0)
     digest = hashlib.sha256(content).hexdigest()
     access_token = secrets.token_urlsafe(32)
-
-    author = None
-    session = read_author_session(request)
-    if session and session.get('aid'):
-        try:
-            author = Author.objects.get(id=session['aid'])
-        except Author.DoesNotExist:
-            pass
-
-    if not author:
-        return JsonResponse({'detail': 'Author authentication required', 'code': 'author_token_required'}, status=401)
-    if not author.email_verified:
-        return JsonResponse({'detail': 'Email verification required before upload'}, status=403)
 
     item = Manuscript.objects.create(
         author_account=author,
@@ -353,12 +353,12 @@ def author_register(request):
     verify_url = request.build_absolute_uri(f'/api/author/verify-email?token={token}')
     try:
         _send_email(
-            to_email=email,
+            to=email,
             subject='Verify your author account',
             body=f'Please verify your email by clicking: {verify_url}'
         )
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Failed to send verification email to {email}: {e}")
 
     token, max_age = issue_author_session(author.id)
     response = JsonResponse({'id': str(author.id), 'email': author.email, 'name': author.name}, status=201)
@@ -799,6 +799,20 @@ def author_run_venue_assessment(request, submission_id):
     access_error = _author_access_error(request, submission.manuscript)
     if access_error:
         return access_error
+
+    try:
+        import json
+        from django.utils import timezone
+        data = json.loads(request.body)
+        override = data.get('override_anonymization', False)
+        if override:
+            packet = dict(submission.packet or {})
+            packet['anonymization_override'] = True
+            packet['anonymization_override_time'] = timezone.now().isoformat()
+            submission.packet = packet
+            submission.save(update_fields=['packet'])
+    except Exception:
+        pass
 
     job = ReviewJob.objects.create(
         job_type='venue_assessment',

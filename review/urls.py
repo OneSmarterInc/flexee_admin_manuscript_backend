@@ -7,6 +7,7 @@ from .api_summary import admin_submission_api_summary
 urlpatterns = [
     path('health/', views.health),
     path('submissions/', views.submit),
+    path('submissions/<uuid:submission_id>/status/', views.submission_status),
 
     # Author scholarly-network workflow.
     path('author/register/', author_api.author_register),
@@ -36,6 +37,7 @@ urlpatterns = [
     path('admin/logout/', views.admin_logout),
     path('admin/session/', views.admin_session),
     path('admin/submissions/', views.admin_submissions),
+    path('admin/queue-health/', views.admin_queue_health),
     path('admin/submissions/<uuid:submission_id>/', views.admin_submission_detail),
     path('admin/submissions/<uuid:submission_id>/accept/', views.admin_submission_accept),
     path('admin/submissions/<uuid:submission_id>/reject/', views.admin_submission_reject),

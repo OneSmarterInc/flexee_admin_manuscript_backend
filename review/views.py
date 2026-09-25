@@ -239,14 +239,10 @@ def submit(request):
     content = upload.read()
     upload.seek(0)
     digest = hashlib.sha256(content).hexdigest()
-
-    review_content = content
-    review_filename = upload.name
-    zip_contents = None
-    zip_overall_source = None
     if upload.name.lower().endswith('.zip'):
+        import zipfile
+        from io import BytesIO
         try:
-            from .services.review_engine import extract_text, word_count as wc_fn
             with zipfile.ZipFile(BytesIO(content)) as zf:
                 infolist = zf.infolist()
                 if len(infolist) > int(os.getenv('ZIP_MAX_FILES', '1000')):
@@ -254,86 +250,6 @@ def submit(request):
                 extracted_size = sum([i.file_size for i in infolist])
                 if extracted_size > int(os.getenv('ZIP_MAX_EXTRACTED_BYTES', str(100 * 1024 * 1024))):
                     return JsonResponse({'detail': 'Extracted ZIP size exceeds limit', 'errors': ['Extracted ZIP size exceeds limit']}, status=400)
-
-                manuscript_entries = []
-                for name in zf.namelist():
-                    if name.lower().endswith(('.docx', '.pdf', '.md')) and not name.startswith('__MACOSX') and not os.path.basename(name).startswith('.'):
-                        manuscript_entries.append(name)
-                if not manuscript_entries:
-                    return JsonResponse({'detail': 'No .docx, .pdf, or .md file found inside the ZIP archive', 'errors': ['No .docx, .pdf, or .md file found inside the ZIP archive']}, status=400)
-
-
-                zip_docs = []
-                docs_to_summarize = []
-                combined_parts = []
-                for index, entry_name in enumerate(manuscript_entries, start=1):
-                    entry_bytes = zf.read(entry_name)
-                    base_name = os.path.basename(entry_name)
-                    try:
-                        doc_text = extract_text(entry_bytes, base_name)
-                        doc_words = wc_fn(doc_text)
-                    except Exception:
-                        doc_text = ''
-                        doc_words = 0
-
-                    docs_to_summarize.append((base_name, entry_name, doc_words, doc_text))
-                    if doc_text.strip():
-                        combined_parts.append(
-                            f"# ZIP Document {index}: {base_name}\n"
-                            f"Source path: {entry_name}\n"
-                            f"Word count: {doc_words}\n\n"
-                            f"{doc_text.strip()}"
-                        )
-
-                if not combined_parts:
-                    return JsonResponse({'detail': 'No extractable text found inside the ZIP archive', 'errors': ['No extractable text found inside the ZIP archive']}, status=400)
-
-                # Keep concurrency low so CPU/RAM contention does not make local
-                # Qwen2.5 slower on an 8 GB machine. Ollama reuses the loaded model.
-                max_workers = max(1, min(int(os.getenv('OLLAMA_CHAPTER_WORKERS', '2')), 2))
-                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {
-                        executor.submit(_generate_chapter_summary, d[3], d[0], d[2]): d
-                        for d in docs_to_summarize
-                    }
-                    results_map = {}
-                    for future in concurrent.futures.as_completed(futures):
-                        d = futures[future]
-                        try:
-                            results_map[d[1]] = future.result()
-                        except Exception:
-                            results_map[d[1]] = _format_chapter_editor_summary(
-                                d[0],
-                                d[2],
-                                _chapter_figure_count(d[3]),
-                                model_summary='Chapter/PDF summary generation failed.',
-                                key_gaps='The chapter-level summary call failed for this document.',
-                                conclusion='A human editor should inspect this chapter/PDF directly.',
-                            )
-
-                for d in docs_to_summarize:
-                    base_name, entry_name, doc_words, doc_text = d
-                    zip_docs.append({
-                        'filename': base_name,
-                        'path': entry_name,
-                        'word_count': doc_words,
-                        'preview': results_map.get(entry_name, "(error)"),
-                    })
-
-                zip_contents = zip_docs
-
-                # Generate the main editor summary from all extracted ZIP documents,
-                # not only the first chapter/file. The per-file chapter summaries
-                # remain available separately in zip_contents.
-                combined_text = "\n\n---\n\n".join(combined_parts)
-                review_content = combined_text.encode('utf-8')
-                review_filename = f"{os.path.splitext(os.path.basename(upload.name))[0]}_combined.md"
-                zip_overall_source = {
-                    'type': 'combined_zip_text',
-                    'document_count': len(zip_docs),
-                    'filename': review_filename,
-                }
-
         except zipfile.BadZipFile:
             return JsonResponse({'detail': 'The uploaded file is not a valid ZIP archive', 'errors': ['The uploaded file is not a valid ZIP archive']}, status=400)
 
@@ -346,51 +262,70 @@ def submit(request):
     )
     ReviewEvent.objects.create(submission=submission, event_type='accepted', detail={'filename': upload.name, 'bytes': len(content)})
 
+    from .models import ReviewJob
+    from django_q.tasks import async_task
+    
+    job = ReviewJob.objects.create(
+        job_type='public_review',
+        reference_id=str(submission.id),
+        status='queued'
+    )
+    
+    async_task('review.tasks.run_public_review_task', job.id, submission.id)
+    
+    return JsonResponse({
+        'id': str(submission.id),
+        'job_id': job.id,
+        'status': 'queued'
+    }, status=202)
+
+
+@require_GET
+def submission_status(request, submission_id):
+    from django.utils import timezone
+    from datetime import timedelta
+    from .models import AuthorAuthEvent, Submission
+    from .auth import remote_hash
+    
+    rh = remote_hash(request)
+    window_minutes = int(os.getenv('PUBLIC_SUBMIT_WINDOW_MINUTES', '60'))
+    max_submissions = int(os.getenv('PUBLIC_SUBMIT_MAX_SUBMISSIONS', '3'))
+    
+    recent_submissions = AuthorAuthEvent.objects.filter(
+        remote_hash=rh,
+        detail__action='public_submit',
+        occurred_at__gte=timezone.now() - timedelta(minutes=window_minutes)
+    ).count()
+    if recent_submissions > max_submissions:
+        return JsonResponse({'detail': 'Too many public submissions. Try again later.', 'errors': ['Rate limited']}, status=429)
+
     try:
-        result = run_review(review_content, review_filename, kind, declared_sim, disclosure)
-        submission.status = 'completed'
-        submission.completed_at = timezone.now()
-        submission.decision = result['decision']
-        submission.model = result['model']
-        submission.total_words = result['total_words']
-        review_record = result['record']
-        if zip_contents:
-            review_record['zip_contents'] = zip_contents
-        if zip_overall_source:
-            review_record['zip_overall_summary_source'] = zip_overall_source
-        submission.review_record = review_record
-        submission.editor_summary = result['editor_summary']
-        submission.author_letter = result['author_letter']
-        submission.notification_status = 'pending'
-        submission.save()
-        ReviewEvent.objects.create(submission=submission, event_type='review_completed', detail={'decision': result['decision'], 'model': result['model']})
-        email_warning = None
-        try:
-            delivery = send_review_emails(submission, result)
-            submission.notification_status = delivery['status']
-            submission.notification_detail = delivery['detail']
-            submission.notified_at = delivery['notified_at']
-            submission.save(update_fields=['notification_status', 'notification_detail', 'notified_at', 'updated_at'])
-            ReviewEvent.objects.create(submission=submission, event_type='notification_sent', detail=delivery['detail'])
-        except Exception as email_error:
-            email_warning = str(email_error)
-            submission.notification_status = 'error'
-            submission.notification_detail = {'error': email_warning}
-            submission.save(update_fields=['notification_status', 'notification_detail', 'updated_at'])
-            ReviewEvent.objects.create(submission=submission, event_type='notification_error', detail={'error': email_warning})
+        submission = Submission.objects.get(id=submission_id)
+    except Submission.DoesNotExist:
+        return JsonResponse({'detail': 'Submission not found'}, status=404)
+
+    if submission.status in ['queued', 'processing']:
         return JsonResponse({
-            'id': str(submission.id), 'status': submission.status, 'decision': submission.decision,
-            'total_words': submission.total_words, 'model': submission.model,
-            'editor_summary': submission.editor_summary, 'author_letter': submission.author_letter,
-            'notification_status': submission.notification_status, 'email_warning': email_warning,
+            'status': submission.status,
+            'progress': 'Review is running...'
         })
-    except Exception as error:
-        submission.status = 'failed'
-        submission.completed_at = timezone.now()
-        submission.error = {'type': error.__class__.__name__, 'message': str(error)}
-        submission.save(update_fields=['status', 'completed_at', 'error', 'updated_at'])
-        ReviewEvent.objects.create(submission=submission, event_type='review_failed', detail=submission.error)
-        return JsonResponse({'id': str(submission.id), 'status': 'failed', 'detail': str(error)}, status=503)
+    elif submission.status == 'completed':
+        email_warning = None
+        if submission.notification_status == 'error' and isinstance(submission.notification_detail, dict):
+            email_warning = submission.notification_detail.get('error')
+            
+        return JsonResponse({
+            'status': submission.status,
+            'decision': submission.decision,
+            'total_words': submission.total_words,
+            'author_letter': submission.author_letter,
+            'email_warning': email_warning
+        })
+    else:
+        return JsonResponse({
+            'status': submission.status,
+            'error': submission.error
+        })
 
 
 @csrf_exempt
@@ -418,7 +353,25 @@ def admin_verify_password(request):
         AdminAuthEvent.objects.create(remote_hash=rh, success=False, detail={'username': username, 'reason': 'invalid_credentials'})
         return JsonResponse({'detail': 'Invalid username or password.'}, status=401)
 
-    return JsonResponse({'ok': True})
+    requires_totp = user.memberships.filter(role__in=['owner', 'editor']).exists() or user.platform_superuser
+    totp_setup_uri = None
+
+    if requires_totp and not user.totp_secret:
+        import base64
+        import secrets
+        from urllib.parse import quote
+        user.totp_secret = base64.b32encode(secrets.token_bytes(20)).decode('ascii').rstrip('=')
+        user.save(update_fields=['totp_secret'])
+        
+        label = quote(f'Flexee Admin:{user.email}')
+        issuer = quote('Flexee Manuscript Admin')
+        totp_setup_uri = f'otpauth://totp/{label}?secret={user.totp_secret}&issuer={issuer}&algorithm=SHA1&digits=6&period=30'
+
+    resp = {'ok': True}
+    if totp_setup_uri:
+        resp['totp_setup_uri'] = totp_setup_uri
+
+    return JsonResponse(resp)
 
 
 @csrf_exempt
@@ -442,13 +395,24 @@ def admin_login(request):
     from .models import EditorUser
     user = EditorUser.objects.filter(email=username).first()
     
-    ok = bool(
-        user
-        and os.getenv('ADMIN_SESSION_SECRET', '')
-        and verify_password(password, user.password_hash)
-        and (not user.totp_secret or verify_totp(user.totp_secret, code))
-    )
+    ok = False
+    totp_missing_error = False
     
+    if user and os.getenv('ADMIN_SESSION_SECRET', '') and verify_password(password, user.password_hash):
+        requires_totp = user.memberships.filter(role__in=['owner', 'editor']).exists() or user.platform_superuser
+        if requires_totp:
+            if not user.totp_secret:
+                totp_missing_error = True
+            elif verify_totp(user.totp_secret, code):
+                ok = True
+        else:
+            if not user.totp_secret or verify_totp(user.totp_secret, code):
+                ok = True
+                
+    if totp_missing_error:
+        AdminAuthEvent.objects.create(remote_hash=rh, success=False, detail={'username': username, 'reason': 'totp_required'})
+        return JsonResponse({'detail': 'Two-factor authentication is required for this account, but no authenticator has been configured.'}, status=403)
+        
     AdminAuthEvent.objects.create(remote_hash=rh, success=ok, detail={'username': username, 'reason': 'ok' if ok else 'invalid_credentials'})
     if not ok:
         return JsonResponse({'detail': 'Invalid username, password, or authenticator code.'}, status=401)
@@ -508,6 +472,28 @@ def admin_submissions(request):
         failed=Count('id', filter=Q(status='failed')),
     )
     response = JsonResponse({'counts': counts, 'items': [_submission_summary(item) for item in items]})
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
+@require_GET
+@require_admin
+def admin_queue_health(request):
+    from django_q.models import OrmQ
+    from django.utils import timezone
+    
+    jobs = OrmQ.objects.all().order_by('lock')
+    count = jobs.count()
+    oldest_age_seconds = 0
+    
+    if count > 0:
+        oldest = jobs.first()
+        oldest_age_seconds = max(0, (timezone.now() - oldest.lock).total_seconds())
+        
+    response = JsonResponse({
+        'queued_job_count': count,
+        'oldest_queued_job_age_seconds': int(oldest_age_seconds)
+    })
     response['Cache-Control'] = 'no-store'
     return response
 

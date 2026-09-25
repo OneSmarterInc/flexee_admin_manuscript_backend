@@ -32,3 +32,12 @@ python manage.py seed_flexee_venues --refresh
 ```
 
 Editors can then maintain venue metadata, create new configuration versions, reactivate older versions, review venue-specific submissions, record venue-scoped feedback, and make human editorial decisions from the protected admin workspace.
+
+## Production
+
+Production deployment requires two processes sharing the same `DATABASE_URL` (or using the same SQLite database file):
+
+1. The Gunicorn/API process serving HTTP requests
+2. The Django-Q worker process running `python manage.py qcluster`
+
+See `flexee-qcluster.service` for an example systemd unit configuration for the worker process.

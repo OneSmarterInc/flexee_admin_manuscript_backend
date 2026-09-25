@@ -972,6 +972,32 @@ def _persist_assessment_evidence(submission, config, brief, citation_checks, mod
     return created
 
 
+def _anonymization_prompt(text):
+    return f"""You are an editorial assistant checking a manuscript for double-blind review compliance.
+Analyze the text for ANY identifying information. Look specifically for:
+1. Author names
+2. Author emails
+3. Affiliations (universities, companies, labs)
+4. Self-referential statements/citations (e.g., 'In our previous work (Smith et al. 2023)')
+
+Return a JSON object with:
+{{
+  "status": "passed|blocked",
+  "issues": [
+    {{
+      "type": "name|email|affiliation|self_citation",
+      "location": "...",
+      "evidence": "..."
+    }}
+  ]
+}}
+If you find ANY identifying information, status MUST be 'blocked'. Otherwise 'passed'.
+
+MANUSCRIPT TEXT:
+{text[:12000]}
+"""
+
+
 def run_venue_assessment(submission):
     if submission.status not in {'draft', 'packet_ready'}:
         raise AgentInputError(f'Venue assessment cannot run from status {submission.status}.')
@@ -983,6 +1009,25 @@ def run_venue_assessment(submission):
         raise AgentInputError('Run semantic readiness before the venue-specific assessment.')
 
     text = load_manuscript_text(submission.manuscript)
+
+    policies = config.policies or {}
+    if policies.get('blind_review', False) and not (submission.packet or {}).get('anonymization_override', False):
+        if ai_available() and profile.get('summary') != 'Semantic analysis unavailable':
+            model_anon, data_anon = _agent_json(_anonymization_prompt(text), max_tokens=1000, timeout=120)
+            status_anon = data_anon.get('status', 'passed')
+            if status_anon == 'blocked':
+                packet = dict(submission.packet or {})
+                packet['anonymization'] = data_anon
+                packet['editorial_brief_ready'] = False
+                submission.packet = packet
+                submission.save(update_fields=['packet'])
+                return submission
+            else:
+                packet = dict(submission.packet or {})
+                packet['anonymization'] = {"status": "passed", "issues": []}
+                submission.packet = packet
+                submission.save(update_fields=['packet'])
+
     citations = _citation_checks(text, submission.manuscript.manuscript_sha256)
 
     try:

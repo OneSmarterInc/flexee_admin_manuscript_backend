@@ -19,9 +19,6 @@ import re
 from .local_llm import ollama_chat_json
 
 
-AI_PROVIDER = os.getenv('AI_PROVIDER', 'auto').strip().lower()
-
-
 # ---------------------------------------------------------------------------
 # Anthropic provider
 # ---------------------------------------------------------------------------
@@ -95,7 +92,7 @@ def ai_chat_json(prompt: str, *, max_tokens: int = 1100, timeout: float = 240.0,
 
     Raises RuntimeError if all configured providers fail.
     """
-    provider = force_provider or AI_PROVIDER
+    provider = force_provider or os.getenv('AI_PROVIDER', 'auto').strip().lower()
 
     if provider == 'mock':
         return 'mock', '{}'
@@ -129,7 +126,7 @@ def ai_chat_json(prompt: str, *, max_tokens: int = 1100, timeout: float = 240.0,
 
 def ai_available() -> bool:
     """Return True if at least one AI provider is likely reachable."""
-    provider = AI_PROVIDER
+    provider = os.getenv('AI_PROVIDER', 'auto').strip().lower()
     if provider == 'mock':
         return True
     if provider == 'anthropic':

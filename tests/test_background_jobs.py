@@ -1,6 +1,7 @@
 import pytest
 from django.test import Client
-from review.models import Manuscript, Organization, Venue, VenueSubmission, ReviewJob
+from review.models import Author, Manuscript, Organization, Venue, VenueSubmission, ReviewJob
+from review.auth import issue_author_session
 from review.tasks import run_semantic_readiness_task, run_semantic_matching_task, run_venue_assessment_task, sweep_stuck_jobs_task
 from django.utils import timezone
 from datetime import timedelta
@@ -9,11 +10,17 @@ from datetime import timedelta
 class TestBackgroundJobs:
     def setup_method(self):
         self.client = Client()
+        self.author = Author.objects.create(
+            email='bg-jobs@example.com', name='BG Author', email_verified=True
+        )
+        token, _ = issue_author_session(self.author.id)
+        self.client.cookies['flxee_author_session'] = token
+
         self.org = Organization.objects.create(name='Test Org')
         self.manuscript = Manuscript.objects.create(
             title='Test Background Job',
             manuscript_filename='test.pdf',
-            word_count=1000
+            author_account=self.author,
         )
         self.venue = Venue.objects.create(name='Test Venue', slug='test-venue', organization=self.org)
         self.submission = VenueSubmission.objects.create(

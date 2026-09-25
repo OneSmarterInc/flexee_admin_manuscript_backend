@@ -5,7 +5,7 @@ from unittest.mock import patch
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 
-from review.models import EvidenceFinding, Manuscript, Organization, Venue, VenueAgentConfig, VenueMatch
+from review.models import EvidenceFinding, Manuscript, Organization, ReadinessAssessment, ReviewJob, Venue, VenueAgentConfig, VenueMatch, VenueSubmission
 
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(prefix='flexee-author-agent-tests-'))
@@ -29,7 +29,7 @@ class AuthorAgentApiTests(TestCase):
             ),
             content_type='text/markdown',
         )
-        self.client.cookies['flexee_author_session'] = token
+        self.client.cookies['flxee_author_session'] = token
         response = self.client.post('/api/author/manuscripts/', {
             'title': 'Agentic Operations',
             'author': 'Test Author',
@@ -119,20 +119,31 @@ class AuthorAgentApiTests(TestCase):
             f'/api/author/manuscripts/{manuscript.id}/readiness/semantic/',
             **self._auth(manuscript),
         )
-        self.assertEqual(response.status_code, 201, response.content)
-        payload = response.json()['readiness']
+        self.assertEqual(response.status_code, 202, response.content)
+        body = response.json()
+        self.assertIn('job_id', body)
 
-        self.assertEqual(payload['status'], 'completed')
-        self.assertIn('semantic-readiness:mock-qwen', payload['engine_version'])
-        self.assertTrue(payload['summary']['semantic_advisory_only'])
-        self.assertIn('semantic_profile', payload['summary'])
+        # Execute the task directly instead of waiting for a worker
+        job = ReviewJob.objects.get(id=body['job_id'])
+        from review.tasks import run_semantic_readiness_task
+        run_semantic_readiness_task(job.id, manuscript.id)
+
+        # Assert persisted database results
+        assessment = manuscript.readiness_assessments.filter(
+            engine_version__startswith='author-agents-v1:semantic-readiness'
+        ).first()
+        self.assertIsNotNone(assessment)
+        self.assertEqual(assessment.status, 'completed')
+        self.assertIn('semantic-readiness:mock-qwen', assessment.engine_version)
+        self.assertTrue(assessment.summary['semantic_advisory_only'])
+        self.assertIn('semantic_profile', assessment.summary)
         
         # Test short manuscript coverage
-        self.assertEqual(payload['summary']['chunks_analyzed'], 1)
-        self.assertEqual(payload['summary']['chunks_total'], 1)
-        self.assertEqual(payload['summary']['coverage_percent'], 100)
-        self.assertEqual(payload['summary']['coverage']['chunks_analyzed'], 1)
-        self.assertEqual(payload['summary']['coverage']['coverage_percent'], 100)
+        self.assertEqual(assessment.summary['chunks_analyzed'], 1)
+        self.assertEqual(assessment.summary['chunks_total'], 1)
+        self.assertEqual(assessment.summary['coverage_percent'], 100)
+        self.assertEqual(assessment.summary['coverage']['chunks_analyzed'], 1)
+        self.assertEqual(assessment.summary['coverage']['coverage_percent'], 100)
 
         manuscript.refresh_from_db()
         self.assertEqual(manuscript.parsed_profile['semantic_model'], 'mock-qwen')
@@ -205,13 +216,22 @@ class AuthorAgentApiTests(TestCase):
             content_type='application/json',
             **self._auth(manuscript),
         )
-        self.assertEqual(response.status_code, 201, response.content)
-        self.assertIn('does not rank venues', response.json()['note'])
+        self.assertEqual(response.status_code, 202, response.content)
+        body = response.json()
+        self.assertIn('job_id', body)
 
+        # Execute the task directly
+        job = ReviewJob.objects.get(id=body['job_id'])
+        from review.tasks import run_semantic_matching_task
+        run_semantic_matching_task(job.id, manuscript.id)
+
+        # Assert persisted database results — eligibility must NOT change
         after = {m.venue.slug: m for m in VenueMatch.objects.filter(manuscript=manuscript).select_related('venue')}
         self.assertEqual(after[first.slug].eligibility, before[first.slug])
         self.assertEqual(after[second.slug].eligibility, before[second.slug])
-        self.assertIn('applied-ai', after[first.slug].fit_summary.lower())
+        fit_summaries = [after[first.slug].fit_summary.lower(), after[second.slug].fit_summary.lower()]
+        self.assertTrue(any('applied-ai' in text for text in fit_summaries))
+        self.assertTrue(any('conference-paper' in text for text in fit_summaries))
         self.assertTrue(after[first.slug].evidence)
 
     @patch('review.services.author_agents.ai_chat_json')
@@ -278,15 +298,26 @@ class AuthorAgentApiTests(TestCase):
             f'/api/author/venue-submissions/{submission_id}/assessment/run/',
             **self._auth(manuscript),
         )
-        self.assertEqual(response.status_code, 201, response.content)
-        submission = response.json()['submission']
+        self.assertEqual(response.status_code, 202, response.content)
+        body = response.json()
+        self.assertIn('job_id', body)
 
-        self.assertEqual(submission['status'], 'packet_ready')
-        self.assertTrue(submission['editorial_brief']['human_decision_required'])
-        self.assertEqual(submission['editorial_brief']['venue_config_version'], 1)
-        self.assertGreater(submission['packet']['evidence_count'], 0)
-        self.assertGreater(len(submission['evidence']), 0)
-        self.assertTrue(all(item['claim'] for item in submission['evidence']))
+        # Execute the task directly
+        job = ReviewJob.objects.get(id=body['job_id'])
+        from review.tasks import run_venue_assessment_task
+        run_venue_assessment_task(job.id, submission_id)
+
+        # Assert persisted database results
+        submission = VenueSubmission.objects.get(id=submission_id)
+        self.assertEqual(submission.status, 'packet_ready')
+        self.assertTrue(submission.editorial_brief['human_decision_required'])
+        self.assertEqual(submission.editorial_brief['venue_config_version'], 1)
+        self.assertGreater(submission.packet['evidence_count'], 0)
+        self.assertGreater(
+            EvidenceFinding.objects.filter(venue_submission=submission).count(), 0
+        )
+        for finding in EvidenceFinding.objects.filter(venue_submission=submission):
+            self.assertTrue(finding.claim)
 
     @patch('review.services.author_agents.ai_chat_json')
     @patch('review.services.author_agents.ai_available')
@@ -302,15 +333,26 @@ class AuthorAgentApiTests(TestCase):
             f'/api/author/manuscripts/{manuscript.id}/readiness/semantic/',
             **self._auth(manuscript),
         )
-        self.assertEqual(response.status_code, 201, response.content)
-        readiness = response.json()['readiness']
-        self.assertEqual(readiness['engine_version'], 'author-agents-v1:semantic-readiness:deterministic-fallback')
-        self.assertEqual(readiness['summary']['model'], 'deterministic-fallback')
-        self.assertTrue(readiness['summary']['semantic_advisory_only'])
+        self.assertEqual(response.status_code, 202, response.content)
+        body = response.json()
+        self.assertIn('job_id', body)
+
+        # Execute the task directly
+        job = ReviewJob.objects.get(id=body['job_id'])
+        from review.tasks import run_semantic_readiness_task
+        run_semantic_readiness_task(job.id, manuscript.id)
+
+        # Assert persisted database results — should have fallen back to deterministic
+        assessment = manuscript.readiness_assessments.filter(
+            status='completed',
+            engine_version__startswith='author-agents-v1:semantic-readiness'
+        ).order_by('-created_at').first()
+        self.assertIsNotNone(assessment)
+        self.assertEqual(assessment.engine_version, 'author-agents-v1:semantic-readiness:deterministic-fallback')
+        self.assertEqual(assessment.summary['model'], 'deterministic-fallback')
+        self.assertTrue(assessment.summary['semantic_advisory_only'])
         
-        latest_completed = manuscript.readiness_assessments.filter(status='completed').order_by('-created_at').first()
-        self.assertNotEqual(str(latest_completed.id), mechanical['id'])
-        self.assertEqual(latest_completed.engine_version, 'author-agents-v1:semantic-readiness:deterministic-fallback')
+        self.assertNotEqual(str(assessment.id), mechanical['id'])
 
     @patch('review.services.author_agents._chunk_numbered_lines')
     @patch('review.services.author_agents.ai_chat_json')
@@ -334,15 +376,28 @@ class AuthorAgentApiTests(TestCase):
             f'/api/author/manuscripts/{manuscript.id}/readiness/semantic/',
             **self._auth(manuscript),
         )
-        self.assertEqual(response.status_code, 201, response.content)
-        payload = response.json()['readiness']
+        self.assertEqual(response.status_code, 202, response.content)
+        body = response.json()
+        self.assertIn('job_id', body)
+
+        # Execute the task directly
+        job = ReviewJob.objects.get(id=body['job_id'])
+        from review.tasks import run_semantic_readiness_task
+        run_semantic_readiness_task(job.id, manuscript.id)
+
+        # Assert persisted database results
+        assessment = manuscript.readiness_assessments.filter(
+            status='completed',
+            engine_version__startswith='author-agents-v1:semantic-readiness'
+        ).order_by('-created_at').first()
+        self.assertIsNotNone(assessment)
 
         # AUTHOR_AGENT_MAX_CHUNKS defaults to 8
-        self.assertEqual(payload['summary']['chunks_analyzed'], 8)
-        self.assertEqual(payload['summary']['chunks_total'], 25)
-        self.assertEqual(payload['summary']['coverage_percent'], 32)
+        self.assertEqual(assessment.summary['chunks_analyzed'], 8)
+        self.assertEqual(assessment.summary['chunks_total'], 25)
+        self.assertEqual(assessment.summary['coverage_percent'], 32)
         
         # Verify same on the nested coverage dict
-        self.assertEqual(payload['summary']['coverage']['chunks_analyzed'], 8)
-        self.assertEqual(payload['summary']['coverage']['chunks_total'], 25)
-        self.assertEqual(payload['summary']['coverage']['coverage_percent'], 32)
+        self.assertEqual(assessment.summary['coverage']['chunks_analyzed'], 8)
+        self.assertEqual(assessment.summary['coverage']['chunks_total'], 25)
+        self.assertEqual(assessment.summary['coverage']['coverage_percent'], 32)

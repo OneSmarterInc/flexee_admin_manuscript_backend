@@ -19,7 +19,7 @@ class AuthorWorkflowApiTests(TestCase):
             b'# Test manuscript\n\n## Abstract\nA short abstract.\n\n## Methods\nMethods here.\n\n## References\nOne reference.\n\n## Data Availability\nAvailable on request.',
             content_type='text/markdown',
         )
-        self.client.cookies['flexee_author_session'] = token
+        self.client.cookies['flxee_author_session'] = token
         response = self.client.post('/api/author/manuscripts/', {
             'title': 'A Test Manuscript',
             'author': 'Test Author',
@@ -182,11 +182,13 @@ class AuthorWorkflowApiTests(TestCase):
         manuscript = self._create_manuscript()
         path = f"/api/author/manuscripts/{manuscript['id']}/"
 
-        missing = self.client.get(path)
+        from django.test import Client as FreshClient
+        fresh = FreshClient()
+        missing = fresh.get(path)
         self.assertEqual(missing.status_code, 401)
         self.assertEqual(missing.json()['code'], 'author_token_required')
 
-        invalid = self.client.get(path, HTTP_X_MANUSCRIPT_TOKEN='not-the-token')
+        invalid = fresh.get(path, HTTP_X_MANUSCRIPT_TOKEN='not-the-token')
         self.assertEqual(invalid.status_code, 403)
         self.assertEqual(invalid.json()['code'], 'author_token_invalid')
 

@@ -3,11 +3,14 @@ from django.test import Client, RequestFactory
 from django.core.files.uploadedfile import SimpleUploadedFile
 import zipfile
 import io
+import os
+from unittest.mock import patch
 from review.models import EditorUser, SMTPSettings
 from review.auth import issue_session, remote_hash
 from review.services.email_service import build_html_email
 
 @pytest.mark.django_db
+@patch.dict(os.environ, {"AI_PROVIDER": "mock"})
 class TestV1Security:
     def setup_method(self):
         self.client = Client()
@@ -34,6 +37,7 @@ class TestV1Security:
         assert '&lt;script&gt;alert(1)&lt;/script&gt;' in html
         assert '&lt;img src=x onerror=alert(1)&gt;' in html
         
+    @patch.dict(os.environ, {"TEST_BYPASS_ORIGIN": "0"})
     def test_admin_post_origin_protection(self):
         # Valid origin
         response = self.client.post(
@@ -69,7 +73,7 @@ class TestV1Security:
             req_data = data.copy()
             req_data['manuscript'] = upload
             resp = self.client.post('/api/submissions/', data=req_data)
-            assert resp.status_code == 200 or resp.status_code == 201
+            assert resp.status_code in [200, 201, 202]
 
         # 4th should fail
         upload = SimpleUploadedFile("test.md", b"test content")
@@ -90,9 +94,13 @@ class TestV1Security:
             'disclosure': 'Test',
             'attestation': 'human-authored-with-ai-assistance',
         }
-        upload = SimpleUploadedFile("test.md", b"test content")
         req_data = data.copy()
-        req_data['manuscript'] = upload
+        for _ in range(3):
+            req_data['manuscript'] = SimpleUploadedFile("test.md", b"test content")
+            self.client.post('/api/submissions/', data=req_data)
+        
+        # Now try with spoofed IP
+        req_data['manuscript'] = SimpleUploadedFile("test.md", b"test content")
         resp = self.client.post('/api/submissions/', data=req_data, HTTP_X_FORWARDED_FOR='9.9.9.9')
         assert resp.status_code == 429
         

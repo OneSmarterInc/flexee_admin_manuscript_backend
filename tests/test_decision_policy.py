@@ -127,7 +127,7 @@ class DecisionPolicyTests(unittest.TestCase):
             })}},
         )
 
-        with patch.dict(os.environ, {'MOCK_AI_REVIEW': 'false', 'OLLAMA_NUM_CTX': '8192', 'OLLAMA_NUM_PREDICT': '900'}), \
+        with patch.dict(os.environ, {'MOCK_AI_REVIEW': 'false', 'OLLAMA_NUM_CTX': '8192', 'OLLAMA_NUM_PREDICT': '900', 'AI_PROVIDER': 'ollama'}), \
              patch('review.services.local_llm.httpx.post', return_value=response):
             _model, _items, decision, editor_summary, _author_letter, _metadata = judge_with_local_model(
                 'Article text.\n\nAI-Use Disclosure: AI was used for editing only.',

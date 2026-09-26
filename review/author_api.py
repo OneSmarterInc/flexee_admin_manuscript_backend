@@ -1101,6 +1101,16 @@ def author_create_submission(request, manuscript_id):
     except (Venue.DoesNotExist, ValueError):
         return JsonResponse({'detail': 'Active venue not found'}, status=404)
 
+    match = manuscript.venue_matches.filter(venue=venue).first()
+    if match and match.eligibility == 'ineligible':
+        return JsonResponse(
+            {
+                'detail': 'This venue is not eligible for the current manuscript under its deterministic routing rules',
+                'reasons': match.gaps,
+            },
+            status=409,
+        )
+
     config = _active_config(venue)
     item = VenueSubmission.objects.create(
         manuscript=manuscript,
@@ -1409,10 +1419,27 @@ def author_transfer_submission(request, submission_id):
             status=409,
         )
 
+    target_config = _active_config(target_venue)
+    latest_readiness = source.manuscript.readiness_assessments.filter(status='completed').first()
+    if target_config:
+        violations = _structured_desk_rule_violations(
+            source.manuscript,
+            target_config,
+            latest_readiness,
+        )
+        if violations:
+            return JsonResponse(
+                {
+                    'detail': 'The target venue has deterministic desk-rejection rules that this manuscript does not satisfy',
+                    'violations': violations,
+                },
+                status=409,
+            )
+
     target = VenueSubmission.objects.create(
         manuscript=source.manuscript,
         venue=target_venue,
-        venue_config=_active_config(target_venue),
+        venue_config=target_config,
         status='draft',
         packet={
             'manuscript_filename': source.manuscript.manuscript_filename,

@@ -68,7 +68,7 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             '--pg-restore-bin',
-            default=os.getenv('PG_RESTORE_BIN', 'pg_restore'),
+            default=(os.getenv('PG_RESTORE_BIN', '').strip() or 'pg_restore'),
         )
 
     def handle(self, *args, **options):

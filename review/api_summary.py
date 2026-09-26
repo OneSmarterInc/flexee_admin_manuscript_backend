@@ -6,7 +6,6 @@ from io import BytesIO
 import httpx
 from django.http import JsonResponse
 from django.utils import timezone
-from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
 from .auth import require_platform_superuser
@@ -126,7 +125,6 @@ Manuscript text:
     return editor_summary, author_letter, truncated
 
 
-@csrf_exempt
 @require_POST
 @require_platform_superuser
 def admin_submission_api_summary(request, submission_id):

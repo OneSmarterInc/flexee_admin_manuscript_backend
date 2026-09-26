@@ -97,7 +97,20 @@ Q_CLUSTER = {
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'review.middleware.CorsMiddleware',
+    'django.middleware.csrf.CsrfViewMiddleware',
     'django.middleware.common.CommonMiddleware',
+    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+]
+
+# Browser clients use cookie-backed sessions, so unsafe cross-origin requests
+# must carry a Django CSRF token in addition to passing our Origin checks.
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        'FRONTEND_ORIGINS',
+        'http://localhost:5173,http://127.0.0.1:5173',
+    ).split(',')
+    if origin.strip()
 ]
 
 ROOT_URLCONF = 'config.urls'

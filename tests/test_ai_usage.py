@@ -6,6 +6,7 @@ from django.test import Client
 
 from review.ai_usage import (
     AIBudgetExceeded,
+    AIUsageConfigurationError,
     ai_usage_snapshot,
     complete_ai_call,
     reserve_ai_call,
@@ -158,6 +159,26 @@ def test_completed_reservation_releases_worst_case_to_actual_usage(monkeypatch):
     assert snapshot['today']['calls'] == 1
     assert snapshot['today']['cost_usd'] == '0.000400'
     assert snapshot['active_reservations']['count'] == 0
+    assert snapshot['by_operation'][0]['operation'] == 'semantic_matching'
+    assert snapshot['by_operation'][0]['cost_usd'] == '0.000400'
+
+
+@pytest.mark.django_db
+def test_cloud_cost_enforcement_rejects_partial_pricing(monkeypatch):
+    monkeypatch.setenv('AI_COST_ENFORCEMENT_ENABLED', 'true')
+    monkeypatch.setenv('AI_DAILY_COST_LIMIT_USD', '5')
+    monkeypatch.setenv('AI_MONTHLY_COST_LIMIT_USD', '100')
+    monkeypatch.setenv('AI_ANTHROPIC_INPUT_USD_PER_MILLION', '2')
+    monkeypatch.setenv('AI_ANTHROPIC_OUTPUT_USD_PER_MILLION', '0')
+
+    with pytest.raises(AIUsageConfigurationError, match='no pricing is configured'):
+        reserve_ai_call(
+            provider='anthropic',
+            model='partial-price-model',
+            operation='manuscript_review',
+            estimated_input_tokens=100,
+            max_output_tokens=100,
+        )
 
 
 @pytest.mark.django_db

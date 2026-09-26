@@ -9,7 +9,6 @@ from datetime import timedelta
 from django.db.models import Q, Count
 from django.http import JsonResponse
 from django.utils import timezone
-from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 from .auth import (
     clear_session_cookie, issue_session, read_session, remote_hash, require_admin,
@@ -183,7 +182,6 @@ def health(request):
     return JsonResponse({'ok': True, 'service': 'flexee-manuscript-django-sqlite'})
 
 
-@csrf_exempt
 @require_POST
 def submit(request):
     from django.utils import timezone
@@ -341,7 +339,6 @@ def submission_status(request, submission_id):
         })
 
 
-@csrf_exempt
 @require_POST
 def admin_verify_password(request):
     data = _json_body(request)
@@ -387,7 +384,6 @@ def admin_verify_password(request):
     return JsonResponse(resp)
 
 
-@csrf_exempt
 @require_POST
 def admin_login(request):
     data = _json_body(request)
@@ -436,7 +432,6 @@ def admin_login(request):
     return response
 
 
-@csrf_exempt
 @require_POST
 def admin_logout(request):
     response = JsonResponse({'ok': True})
@@ -565,7 +560,6 @@ def admin_submission_detail(request, submission_id):
     return response
 
 
-@csrf_exempt
 @require_POST
 @require_platform_superuser
 def admin_submission_accept(request, submission_id):
@@ -616,7 +610,6 @@ def admin_submission_accept(request, submission_id):
     return JsonResponse({'ok': True, 'admin_decision': submission.admin_decision, 'email_warning': email_warning})
 
 
-@csrf_exempt
 @require_POST
 @require_platform_superuser
 def admin_submission_reject(request, submission_id):
@@ -669,7 +662,6 @@ def admin_submission_reject(request, submission_id):
     return JsonResponse({'ok': True, 'admin_decision': submission.admin_decision, 'email_warning': email_warning})
 
 
-@csrf_exempt
 @require_POST
 @require_platform_superuser
 def admin_submission_delete(request, submission_id):
@@ -687,7 +679,6 @@ def admin_submission_delete(request, submission_id):
     except Submission.DoesNotExist:
         return JsonResponse({'detail': 'Submission not found'}, status=404)
 
-@csrf_exempt
 @require_POST
 @require_platform_superuser
 def admin_submission_send_email(request, submission_id):
@@ -768,7 +759,6 @@ def admin_submission_download(request, submission_id):
     except Submission.DoesNotExist:
         return JsonResponse({'detail': 'Submission not found'}, status=404)
 
-@csrf_exempt
 @require_platform_superuser
 def admin_smtp_settings(request):
     smtp, _ = SMTPSettings.objects.get_or_create(id=1)
@@ -816,7 +806,6 @@ def admin_smtp_settings(request):
             return JsonResponse({'error': str(e)}, status=400)
     return JsonResponse({'error': 'Method not allowed'}, status=405)
 
-@csrf_exempt
 @require_platform_superuser
 def admin_smtp_test(request):
     if request.method != 'POST':

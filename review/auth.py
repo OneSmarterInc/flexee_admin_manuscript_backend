@@ -14,19 +14,20 @@ AUTHOR_COOKIE_NAME = 'flxee_author_session'
 UNSAFE_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}
 
 
-def allowed_admin_origins():
-    """Return the configured browser origins allowed to make unsafe admin requests.
+def allowed_frontend_origins():
+    """Return browser origins accepted by both CORS and unsafe admin checks.
 
-    ADMIN_ALLOWED_ORIGINS remains supported for existing deployments. When it is
-    not set, use the same FRONTEND_ORIGINS value as the CORS middleware so a
-    split frontend/backend deployment cannot be configured inconsistently.
+    FRONTEND_ORIGINS is the canonical setting. ADMIN_ALLOWED_ORIGINS is merged
+    for backward compatibility with older deployments so the two protections
+    cannot silently disagree.
     """
-    configured = os.getenv('ADMIN_ALLOWED_ORIGINS', '').strip()
-    raw = configured or os.getenv(
+    raw_frontend = os.getenv(
         'FRONTEND_ORIGINS',
         'http://localhost:5173,http://127.0.0.1:5173',
     )
-    return {origin.strip() for origin in raw.split(',') if origin.strip()}
+    raw_legacy_admin = os.getenv('ADMIN_ALLOWED_ORIGINS', '')
+    values = f'{raw_frontend},{raw_legacy_admin}'
+    return {origin.strip() for origin in values.split(',') if origin.strip()}
 
 def _b64u(data):
     return base64.urlsafe_b64encode(data).decode('ascii').rstrip('=')
@@ -154,7 +155,7 @@ def require_admin(view):
     def wrapped(request, *args, **kwargs):
         if request.method in UNSAFE_METHODS:
             origin = request.headers.get('Origin')
-            if origin not in allowed_admin_origins() and os.getenv('TEST_BYPASS_ORIGIN') != '1':
+            if origin not in allowed_frontend_origins() and os.getenv('TEST_BYPASS_ORIGIN') != '1':
                 return JsonResponse({'detail': 'Untrusted Origin'}, status=403)
 
         session = read_session(request)

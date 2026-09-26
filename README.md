@@ -560,3 +560,129 @@ The response includes today's, current month's, and all-time calls/tokens/cost; 
 
 A budget-block event also emits the privacy-safe Sentry operation `component=ai_cost`, `operation=budget_block` when Sentry is configured.
 
+## Private manuscript storage and production security hardening
+
+Production manuscript and submission-item uploads are treated as private application data. They are not intended to be served by Django static/media routes, Nginx aliases, a public S3 bucket, or any other unauthenticated file URL.
+
+### Production startup requirements
+
+When `DJANGO_ENV=production`, startup now fails if any of these conditions are unsafe:
+
+- `DJANGO_ALLOWED_HOSTS` is missing or contains `*`
+- `FRONTEND_ORIGINS` is missing or contains a non-HTTPS origin
+- `ADMIN_SESSION_SECRET` is missing
+- `SECURE_SSL_REDIRECT=false`
+- `TRUSTED_PROXIES=*`
+- `PRIVATE_MEDIA_ROOT` is missing
+- `PRIVATE_MEDIA_ROOT` resolves inside the application source tree
+
+Production also forces secure application cookies, HSTS, `X-Content-Type-Options: nosniff`, and a same-origin referrer policy.
+
+A typical filesystem deployment should use a private directory outside `/var/www`, for example:
+
+```bash
+sudo install -d -m 0750 -o www-data -g www-data /var/lib/flexee-private-media
+```
+
+Then configure:
+
+```env
+DJANGO_ENV=production
+DJANGO_ALLOWED_HOSTS=api.example.com
+FRONTEND_ORIGINS=https://app.example.com
+ADMIN_SESSION_SECRET=<strong-random-secret>
+PRIVATE_MEDIA_ROOT=/var/lib/flexee-private-media
+SECURE_SSL_REDIRECT=true
+```
+
+If TLS terminates at Nginx and Nginx proxies plain HTTP to Django, configure Nginx to set the original scheme:
+
+```nginx
+proxy_set_header X-Forwarded-Proto $scheme;
+```
+
+and enable:
+
+```env
+TRUST_X_FORWARDED_PROTO=true
+TRUSTED_PROXIES=127.0.0.1
+```
+
+Only list actual trusted proxy addresses. Production rejects `TRUSTED_PROXIES=*` because trusting arbitrary `X-Forwarded-For` values would weaken rate limiting and audit-address hashing.
+
+### Do not expose the upload directory
+
+There is intentionally no Django URL pattern for `MEDIA_ROOT`. The configured `MEDIA_URL` is a private placeholder, not a public route.
+
+Do **not** add Nginx configuration such as:
+
+```nginx
+location /media/ {
+    alias /var/lib/flexee-private-media/;
+}
+```
+
+For defense in depth, a reverse proxy can explicitly deny conventional media paths:
+
+```nginx
+location ^~ /media/ {
+    return 404;
+}
+
+location ^~ /__private_media__/ {
+    return 404;
+}
+```
+
+Editors download files only through authenticated API endpoints. Those responses are forced to attachments and include `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and a sandbox CSP.
+
+If private object storage is introduced later, use a private bucket/storage backend and preserve these authenticated application download controls or equivalent short-lived signed access. Do not make the manuscript bucket public.
+
+### Upload and archive limits
+
+Top-level manuscript and requirement-file limits remain enforced server-side:
+
+```env
+MAX_MANUSCRIPT_BYTES=20971520
+MAX_SUBMISSION_ITEM_BYTES=10485760
+```
+
+Manuscript ZIPs also have centralized validation before persistence and again before worker extraction:
+
+```env
+MANUSCRIPT_ZIP_MAX_FILES=40
+MANUSCRIPT_ZIP_MAX_UNCOMPRESSED_BYTES=52428800
+MANUSCRIPT_ZIP_MAX_COMPRESSION_RATIO=200
+```
+
+ZIP validation rejects:
+
+- too many archive entries
+- excessive total uncompressed size
+- suspicious compression ratios
+- absolute or parent-traversal member paths
+- Windows drive-style member paths
+- symlink/special-file entries
+- encrypted entries
+- archives without at least one supported `.docx`, `.pdf`, or `.md` manuscript file
+
+Original upload names are reduced to safe basenames before they are stored or placed in download headers.
+
+### Deployment verification
+
+After deploying with the production environment:
+
+```bash
+python manage.py check
+python manage.py check --deploy
+```
+
+Confirm the service starts with the private media directory configured, then verify the public URLs are not exposed:
+
+```bash
+curl -I https://api.example.com/media/test.pdf
+curl -I https://api.example.com/__private_media__/test.pdf
+```
+
+Both should return `404` rather than manuscript content. Then verify a legitimate editor download through the authenticated application UI still succeeds.
+

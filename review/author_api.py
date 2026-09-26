@@ -32,6 +32,7 @@ from .models import (
     Organization,
     ReadinessAssessment,
     SubmissionTransfer,
+    SubmissionRequirementFile,
     Venue,
     VenueAgentConfig,
     VenueMatch,
@@ -53,6 +54,12 @@ from .services.email_service import _send as _send_email
 
 ALLOWED_MANUSCRIPT_TYPES = {value for value, _ in Manuscript.TYPE_CHOICES}
 ALLOWED_VENUE_TYPES = {value for value, _ in Venue.TYPE_CHOICES}
+ALLOWED_REQUIREMENT_TYPES = {'text', 'textarea', 'url', 'checkbox', 'file'}
+STRUCTURED_DESK_RULE_OPERATORS = {
+    'word_count': {'>', '>=', '<', '<=', '==', '!='},
+    'manuscript_type': {'==', '!=', 'in', 'not_in'},
+    'disclosure': {'contains', 'not_contains', 'empty', 'not_empty'},
+}
 
 
 def _queue_unique_job(job_type, reference_id, task_path, *task_args):
@@ -138,6 +145,212 @@ def _json_list(value):
     return []
 
 
+def _normalise_required_submission_items(value):
+    items = _json_list(value)
+    if len(items) > 30:
+        raise ValueError('required_submission_items supports at most 30 items')
+
+    normalised = []
+    seen = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ValueError(f'required_submission_items[{index}] must be an object')
+        label = str(item.get('label', '')).strip()
+        if not label:
+            raise ValueError(f'required_submission_items[{index}].label is required')
+        key = str(item.get('key', '')).strip() or slugify(label).replace('-', '_')
+        key = re.sub(r'[^a-zA-Z0-9_-]+', '_', key).strip('_')[:120]
+        if not key:
+            raise ValueError(f'required_submission_items[{index}].key is invalid')
+        if key in seen:
+            raise ValueError(f'duplicate required submission item key: {key}')
+        seen.add(key)
+
+        item_type = str(item.get('type', 'text')).strip().lower()
+        if item_type not in ALLOWED_REQUIREMENT_TYPES:
+            raise ValueError(
+                f'required_submission_items[{index}].type must be one of '
+                + ', '.join(sorted(ALLOWED_REQUIREMENT_TYPES))
+            )
+
+        try:
+            max_length = int(item.get('max_length', 4000))
+        except (TypeError, ValueError):
+            raise ValueError(f'required_submission_items[{index}].max_length must be an integer')
+        max_length = max(1, min(max_length, 20000))
+
+        normalised.append({
+            'key': key,
+            'label': label[:240],
+            'type': item_type,
+            'required': bool(item.get('required', True)),
+            'help_text': str(item.get('help_text', '')).strip()[:500],
+            'max_length': max_length,
+        })
+    return normalised
+
+
+def _normalise_structured_desk_rules(value):
+    rules = _json_list(value)
+    if len(rules) > 30:
+        raise ValueError('structured_desk_rejection_rules supports at most 30 rules')
+
+    normalised = []
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            raise ValueError(f'structured_desk_rejection_rules[{index}] must be an object')
+        field = str(rule.get('field', '')).strip()
+        operator = str(rule.get('operator', '')).strip()
+        if field not in STRUCTURED_DESK_RULE_OPERATORS:
+            raise ValueError(
+                f'structured_desk_rejection_rules[{index}].field must be one of '
+                + ', '.join(sorted(STRUCTURED_DESK_RULE_OPERATORS))
+            )
+        if operator not in STRUCTURED_DESK_RULE_OPERATORS[field]:
+            raise ValueError(
+                f'operator {operator!r} is not supported for structured desk rule field {field!r}'
+            )
+        value_required = operator not in {'empty', 'not_empty'}
+        rule_value = rule.get('value')
+        if value_required and rule_value is None:
+            raise ValueError(f'structured_desk_rejection_rules[{index}].value is required')
+        if field == 'word_count' and value_required:
+            try:
+                rule_value = int(rule_value)
+            except (TypeError, ValueError):
+                raise ValueError(f'structured_desk_rejection_rules[{index}].value must be an integer')
+        if operator in {'in', 'not_in'}:
+            if not isinstance(rule_value, list) or not rule_value:
+                raise ValueError(f'structured_desk_rejection_rules[{index}].value must be a non-empty list')
+            rule_value = [str(item).strip() for item in rule_value if str(item).strip()]
+
+        message = str(rule.get('message', '')).strip()
+        if not message:
+            raise ValueError(f'structured_desk_rejection_rules[{index}].message is required')
+        normalised.append({
+            'field': field,
+            'operator': operator,
+            'value': rule_value,
+            'message': message[:500],
+        })
+    return normalised
+
+
+def _structured_desk_rule_violations(manuscript, config, readiness):
+    rules = config.structured_desk_rejection_rules or []
+    if not rules:
+        return []
+
+    word_total = None
+    if readiness and isinstance(readiness.summary, dict):
+        word_total = readiness.summary.get('word_count')
+
+    violations = []
+    for rule in rules:
+        field = rule.get('field')
+        operator = rule.get('operator')
+        expected = rule.get('value')
+        triggered = False
+        actual = None
+
+        if field == 'word_count':
+            actual = word_total
+            if actual is None:
+                continue
+            actual = int(actual)
+            expected = int(expected)
+            triggered = {
+                '>': actual > expected,
+                '>=': actual >= expected,
+                '<': actual < expected,
+                '<=': actual <= expected,
+                '==': actual == expected,
+                '!=': actual != expected,
+            }.get(operator, False)
+        elif field == 'manuscript_type':
+            actual = manuscript.manuscript_type
+            if operator == '==':
+                triggered = actual == str(expected)
+            elif operator == '!=':
+                triggered = actual != str(expected)
+            elif operator == 'in':
+                triggered = actual in {str(item) for item in expected or []}
+            elif operator == 'not_in':
+                triggered = actual not in {str(item) for item in expected or []}
+        elif field == 'disclosure':
+            actual = str(manuscript.disclosure or '')
+            if operator == 'contains':
+                triggered = str(expected).lower() in actual.lower()
+            elif operator == 'not_contains':
+                triggered = str(expected).lower() not in actual.lower()
+            elif operator == 'empty':
+                triggered = not actual.strip()
+            elif operator == 'not_empty':
+                triggered = bool(actual.strip())
+
+        if triggered:
+            violations.append({
+                'field': field,
+                'operator': operator,
+                'value': expected,
+                'actual': actual,
+                'message': str(rule.get('message', '')).strip(),
+            })
+    return violations
+
+
+def _submission_requirements_payload(item):
+    config = item.venue_config
+    specs = list((config.required_submission_items if config else []) or [])
+    packet = item.packet if isinstance(item.packet, dict) else {}
+    responses = packet.get('requirement_responses')
+    if not isinstance(responses, dict):
+        responses = {}
+    file_map = {
+        row.requirement_key: row
+        for row in item.requirement_files.all()
+    }
+
+    output = []
+    required_complete = True
+    for spec in specs:
+        key = str(spec.get('key', '')).strip()
+        item_type = spec.get('type', 'text')
+        value = responses.get(key)
+        file_row = file_map.get(key)
+
+        if item_type == 'file':
+            completed = bool(file_row and file_row.file)
+            display_value = None
+        elif item_type == 'checkbox':
+            completed = value is True
+            display_value = bool(value)
+        else:
+            display_value = str(value or '').strip()
+            completed = bool(display_value)
+
+        required = bool(spec.get('required', True))
+        if required and not completed:
+            required_complete = False
+        output.append({
+            **spec,
+            'value': display_value,
+            'completed': completed,
+            'file': {
+                'name': file_row.original_filename,
+                'bytes': file_row.file_bytes,
+                'sha256': file_row.file_sha256,
+                'uploaded_at': file_row.uploaded_at.isoformat(),
+            } if file_row else None,
+        })
+
+    return {
+        'configured': bool(specs),
+        'complete': required_complete,
+        'items': output,
+    }
+
+
 def _clean_keywords(value):
     return [str(item).strip() for item in _json_list(value) if str(item).strip()][:50]
 
@@ -183,6 +396,8 @@ def _venue_config_payload(config):
         'disclosures': config.disclosures,
         'reporting_standards': config.reporting_standards,
         'desk_rejection_rules': config.desk_rejection_rules,
+        'structured_desk_rejection_rules': config.structured_desk_rejection_rules,
+        'required_submission_items': config.required_submission_items,
         'deadlines': config.deadlines,
         'submission_capacity': config.submission_capacity,
         'current_demand': config.current_demand,
@@ -255,6 +470,7 @@ def _submission_payload(item):
         'packet': item.packet,
         'editorial_brief': item.editorial_brief,
         'decision': item.decision,
+        'requirements': _submission_requirements_payload(item),
         'evidence': [
             {
                 'id': str(e.id),
@@ -782,6 +998,22 @@ def author_generate_matches(request, manuscript_id):
             else:
                 gaps.append('Aims and scope are not yet configured.')
 
+            desk_violations = _structured_desk_rule_violations(
+                manuscript,
+                config,
+                latest_readiness,
+            )
+            if desk_violations:
+                eligibility = 'ineligible'
+                for violation in desk_violations:
+                    gaps.append(violation['message'])
+                    evidence.append({
+                        'source_type': 'venue_policy',
+                        'source_locator': f'venue config v{config.version} · structured_desk_rejection_rules',
+                        'claim': violation['message'],
+                        'rule': violation,
+                    })
+
         fit_summary = (
             'Passes the currently configured deterministic routing checks. Semantic scope fit still requires the matching agent.'
             if eligibility == 'eligible'
@@ -869,7 +1101,32 @@ def author_create_submission(request, manuscript_id):
     except (Venue.DoesNotExist, ValueError):
         return JsonResponse({'detail': 'Active venue not found'}, status=404)
 
+    match = manuscript.venue_matches.filter(venue=venue).first()
+    if match and match.eligibility == 'ineligible':
+        return JsonResponse(
+            {
+                'detail': 'This venue is not eligible for the current manuscript under its deterministic routing rules',
+                'reasons': match.gaps,
+            },
+            status=409,
+        )
+
     config = _active_config(venue)
+    latest_readiness = manuscript.readiness_assessments.filter(status='completed').first()
+    if config:
+        violations = _structured_desk_rule_violations(
+            manuscript,
+            config,
+            latest_readiness,
+        )
+        if violations:
+            return JsonResponse(
+                {
+                    'detail': 'This venue has deterministic desk-rejection rules that the manuscript does not satisfy',
+                    'violations': violations,
+                },
+                status=409,
+            )
     item = VenueSubmission.objects.create(
         manuscript=manuscript,
         venue=venue,
@@ -930,7 +1187,7 @@ def author_submission_detail(request, submission_id):
     try:
         item = VenueSubmission.objects.select_related(
             'venue', 'venue__organization', 'venue_config'
-        ).prefetch_related('evidence_findings').get(id=submission_id)
+        ).prefetch_related('evidence_findings', 'requirement_files').get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
     access_error = _author_access_error(request, item.manuscript)
@@ -941,9 +1198,162 @@ def author_submission_detail(request, submission_id):
 
 @csrf_exempt
 @require_POST
+def author_save_submission_requirements(request, submission_id):
+    try:
+        item = VenueSubmission.objects.select_related(
+            'manuscript', 'venue', 'venue_config'
+        ).prefetch_related('requirement_files').get(id=submission_id)
+    except VenueSubmission.DoesNotExist:
+        return JsonResponse({'detail': 'Venue submission not found'}, status=404)
+    access_error = _author_access_error(request, item.manuscript)
+    if access_error:
+        return access_error
+    if item.status not in {'draft', 'packet_ready'}:
+        return JsonResponse(
+            {'detail': 'Submission requirements can only be changed before formal submission'},
+            status=409,
+        )
+
+    state = _submission_requirements_payload(item)
+    specs = {spec['key']: spec for spec in state['items']}
+    data = _json_body(request)
+    incoming = data.get('responses')
+    if not isinstance(incoming, dict):
+        return JsonResponse({'detail': 'responses must be a JSON object'}, status=400)
+
+    packet = dict(item.packet or {})
+    responses = packet.get('requirement_responses')
+    if not isinstance(responses, dict):
+        responses = {}
+
+    for key, raw_value in incoming.items():
+        spec = specs.get(str(key))
+        if not spec:
+            return JsonResponse({'detail': f'Unknown submission requirement: {key}'}, status=400)
+        if spec['type'] == 'file':
+            return JsonResponse(
+                {'detail': f'{spec["label"]} must be uploaded as a file'},
+                status=400,
+            )
+        if spec['type'] == 'checkbox':
+            if not isinstance(raw_value, bool):
+                return JsonResponse(
+                    {'detail': f'{spec["label"]} must be true or false'},
+                    status=400,
+                )
+            responses[spec['key']] = raw_value
+        else:
+            value = str(raw_value or '').strip()
+            if len(value) > int(spec.get('max_length', 4000)):
+                return JsonResponse(
+                    {'detail': f'{spec["label"]} exceeds the configured maximum length'},
+                    status=400,
+                )
+            responses[spec['key']] = value
+
+    packet['requirement_responses'] = responses
+    item.packet = packet
+    item.save(update_fields=['packet', 'updated_at'])
+    item = VenueSubmission.objects.select_related(
+        'manuscript', 'venue', 'venue_config'
+    ).prefetch_related('requirement_files').get(id=item.id)
+    return JsonResponse({'requirements': _submission_requirements_payload(item)})
+
+
+@csrf_exempt
+@require_POST
+def author_upload_submission_requirement(request, submission_id, requirement_key):
+    try:
+        item = VenueSubmission.objects.select_related(
+            'manuscript', 'venue', 'venue_config'
+        ).prefetch_related('requirement_files').get(id=submission_id)
+    except VenueSubmission.DoesNotExist:
+        return JsonResponse({'detail': 'Venue submission not found'}, status=404)
+    access_error = _author_access_error(request, item.manuscript)
+    if access_error:
+        return access_error
+    if item.status not in {'draft', 'packet_ready'}:
+        return JsonResponse(
+            {'detail': 'Submission requirement files can only be changed before formal submission'},
+            status=409,
+        )
+
+    state = _submission_requirements_payload(item)
+    spec = next(
+        (row for row in state['items'] if row.get('key') == requirement_key),
+        None,
+    )
+    if not spec:
+        return JsonResponse({'detail': 'Submission requirement not found'}, status=404)
+    if spec.get('type') != 'file':
+        return JsonResponse({'detail': 'This requirement does not accept a file'}, status=400)
+
+    uploaded = request.FILES.get('file')
+    if not uploaded:
+        return JsonResponse({'detail': 'file is required'}, status=400)
+
+    max_bytes = int(os.getenv('MAX_SUBMISSION_ITEM_BYTES', str(10 * 1024 * 1024)))
+    if uploaded.size > max_bytes:
+        return JsonResponse(
+            {'detail': f'Requirement file exceeds the {max_bytes}-byte upload limit'},
+            status=413,
+        )
+
+    original_filename = os.path.basename(str(uploaded.name or 'attachment'))
+    extension = os.path.splitext(original_filename)[1].lower()
+    allowed_extensions = {
+        '.pdf', '.doc', '.docx', '.txt', '.rtf',
+        '.csv', '.xls', '.xlsx', '.png', '.jpg', '.jpeg',
+    }
+    if extension not in allowed_extensions:
+        return JsonResponse(
+            {'detail': 'Requirement files must be PDF, Office document, text, CSV, or image files'},
+            status=400,
+        )
+
+    digest = hashlib.sha256()
+    for chunk in uploaded.chunks():
+        digest.update(chunk)
+    uploaded.seek(0)
+
+    existing = SubmissionRequirementFile.objects.filter(
+        venue_submission=item,
+        requirement_key=requirement_key,
+    ).first()
+    if existing and existing.file:
+        existing.file.delete(save=False)
+
+    row, _ = SubmissionRequirementFile.objects.update_or_create(
+        venue_submission=item,
+        requirement_key=requirement_key,
+        defaults={
+            'original_filename': original_filename[:500],
+            'file': uploaded,
+            'file_bytes': uploaded.size,
+            'file_sha256': digest.hexdigest(),
+        },
+    )
+
+    item = VenueSubmission.objects.select_related(
+        'manuscript', 'venue', 'venue_config'
+    ).prefetch_related('requirement_files').get(id=item.id)
+    return JsonResponse({
+        'file': {
+            'name': row.original_filename,
+            'bytes': row.file_bytes,
+            'sha256': row.file_sha256,
+        },
+        'requirements': _submission_requirements_payload(item),
+    })
+
+
+@csrf_exempt
+@require_POST
 def author_submit_packet(request, submission_id):
     try:
-        item = VenueSubmission.objects.select_related('manuscript', 'venue').get(id=submission_id)
+        item = VenueSubmission.objects.select_related(
+            'manuscript', 'venue', 'venue_config'
+        ).prefetch_related('requirement_files').get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
     access_error = _author_access_error(request, item.manuscript)
@@ -953,6 +1363,16 @@ def author_submit_packet(request, submission_id):
     if item.status != 'packet_ready':
         return JsonResponse(
             {'detail': 'Complete the venue assessment and prepare the packet before submission'},
+            status=409,
+        )
+
+    requirements = _submission_requirements_payload(item)
+    if not requirements['complete']:
+        return JsonResponse(
+            {
+                'detail': 'Complete all required venue submission items before submission',
+                'requirements': requirements,
+            },
             status=409,
         )
 
@@ -1014,10 +1434,27 @@ def author_transfer_submission(request, submission_id):
             status=409,
         )
 
+    target_config = _active_config(target_venue)
+    latest_readiness = source.manuscript.readiness_assessments.filter(status='completed').first()
+    if target_config:
+        violations = _structured_desk_rule_violations(
+            source.manuscript,
+            target_config,
+            latest_readiness,
+        )
+        if violations:
+            return JsonResponse(
+                {
+                    'detail': 'The target venue has deterministic desk-rejection rules that this manuscript does not satisfy',
+                    'violations': violations,
+                },
+                status=409,
+            )
+
     target = VenueSubmission.objects.create(
         manuscript=source.manuscript,
         venue=target_venue,
-        venue_config=_active_config(target_venue),
+        venue_config=target_config,
         status='draft',
         packet={
             'manuscript_filename': source.manuscript.manuscript_filename,
@@ -1122,6 +1559,16 @@ def admin_venue_config(request, venue_id):
         return JsonResponse({'detail': 'Forbidden'}, status=403)
 
     data = _json_body(request)
+    try:
+        required_submission_items = _normalise_required_submission_items(
+            data.get('required_submission_items', [])
+        )
+        structured_desk_rejection_rules = _normalise_structured_desk_rules(
+            data.get('structured_desk_rejection_rules', [])
+        )
+    except ValueError as exc:
+        return JsonResponse({'detail': str(exc)}, status=400)
+
     with transaction.atomic():
         venue = Venue.objects.select_for_update().get(id=venue.id)
         current = venue.agent_configs.order_by('-version').first()
@@ -1139,6 +1586,8 @@ def admin_venue_config(request, venue_id):
             disclosures=_json_list(data.get('disclosures')),
             reporting_standards=_json_list(data.get('reporting_standards')),
             desk_rejection_rules=_json_list(data.get('desk_rejection_rules')),
+            structured_desk_rejection_rules=structured_desk_rejection_rules,
+            required_submission_items=required_submission_items,
             deadlines=data.get('deadlines') if isinstance(data.get('deadlines'), dict) else {},
             submission_capacity=data.get('submission_capacity') if isinstance(data.get('submission_capacity'), dict) else {},
             current_demand=data.get('current_demand') if isinstance(data.get('current_demand'), dict) else {},

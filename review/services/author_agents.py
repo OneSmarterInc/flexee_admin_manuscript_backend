@@ -577,6 +577,8 @@ def _config_context(config):
         'disclosures': config.disclosures,
         'reporting_standards': config.reporting_standards,
         'desk_rejection_rules': config.desk_rejection_rules,
+        'structured_desk_rejection_rules': config.structured_desk_rejection_rules,
+        'required_submission_items': config.required_submission_items,
         'deadlines': config.deadlines,
         'submission_capacity': config.submission_capacity,
         'current_demand': config.current_demand,
@@ -623,6 +625,8 @@ def _compact_config_context(config):
         'disclosures': _clean_string_list(raw['disclosures'], limit=15, item_limit=180),
         'reporting_standards': _clean_string_list(raw['reporting_standards'], limit=15, item_limit=180),
         'desk_rejection_rules': _clean_string_list(raw['desk_rejection_rules'], limit=15, item_limit=180),
+        'structured_desk_rejection_rules': _bounded(raw['structured_desk_rejection_rules']),
+        'required_submission_items': _bounded(raw['required_submission_items']),
         'deadlines': _bounded(raw['deadlines']),
         'submission_capacity': _bounded(raw['submission_capacity']),
         'current_demand': _bounded(raw['current_demand']),
@@ -711,7 +715,8 @@ def _sanitize_match_items(value, valid_evidence_ids):
 def _config_field_excerpt(config, field):
     allowed = {
         'aims_scope', 'article_types', 'accepted_methods', 'quality_threshold', 'reviewer_criteria',
-        'policies', 'disclosures', 'reporting_standards', 'desk_rejection_rules', 'deadlines',
+        'policies', 'disclosures', 'reporting_standards', 'desk_rejection_rules',
+        'structured_desk_rejection_rules', 'required_submission_items', 'deadlines',
         'submission_capacity', 'current_demand',
     }
     if field not in allowed:

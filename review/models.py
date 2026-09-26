@@ -221,6 +221,8 @@ class VenueAgentConfig(models.Model):
     disclosures = models.JSONField(default=list, blank=True)
     reporting_standards = models.JSONField(default=list, blank=True)
     desk_rejection_rules = models.JSONField(default=list, blank=True)
+    structured_desk_rejection_rules = models.JSONField(default=list, blank=True)
+    required_submission_items = models.JSONField(default=list, blank=True)
     deadlines = models.JSONField(default=dict, blank=True)
     submission_capacity = models.JSONField(default=dict, blank=True)
     current_demand = models.JSONField(default=dict, blank=True)
@@ -418,6 +420,30 @@ class EditorFeedback(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+
+
+class SubmissionRequirementFile(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    venue_submission = models.ForeignKey(
+        VenueSubmission,
+        on_delete=models.CASCADE,
+        related_name='requirement_files',
+    )
+    requirement_key = models.SlugField(max_length=120)
+    original_filename = models.CharField(max_length=500)
+    file = models.FileField(upload_to='venue_requirement_files/')
+    file_bytes = models.BigIntegerField(default=0)
+    file_sha256 = models.CharField(max_length=64)
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['requirement_key']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['venue_submission', 'requirement_key'],
+                name='review_unique_requirement_file',
+            ),
+        ]
 
 
 class SubmissionTransfer(models.Model):

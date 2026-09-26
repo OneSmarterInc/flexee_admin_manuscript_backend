@@ -88,8 +88,178 @@ def _anthropic_chat_json(
 
 
 def _strip_fences(text: str) -> str:
-    text = re.sub(r'^\`\`\`(?:json)?\\s*', '', text.strip(), flags=re.I)
-    text = re.sub(r'\\s*\`\`\`\\s*$', '', text)
+    text = re.sub(r'^```(?:json)?\s*', '', text.strip(), flags=re.I)
+    text = re.sub(r'\s*```\s*    return text.strip()
+
+
+def _model_hint(provider: str) -> str:
+    if provider == 'anthropic':
+        return os.getenv('ANTHROPIC_MODEL', 'claude-haiku-4-5-20251001').strip()
+    if provider == 'ollama':
+        return os.getenv('OLLAMA_MODEL', 'qwen2.5:0.5b-instruct').strip()
+    if provider == 'mock':
+        return 'mock'
+    return 'unknown'
+
+
+def _normalise_result(result, prompt):
+    if not isinstance(result, tuple) or len(result) not in {2, 3}:
+        raise RuntimeError('AI provider returned an invalid result shape.')
+    model, raw = result[0], result[1]
+    if len(result) == 3 and isinstance(result[2], dict):
+        usage = result[2]
+        input_tokens = int(usage.get('input_tokens') or 0)
+        output_tokens = int(usage.get('output_tokens') or 0)
+        usage_estimated = bool(usage.get('usage_estimated', False))
+        if not input_tokens:
+            input_tokens = estimate_prompt_tokens(prompt)
+            usage_estimated = True
+        if not output_tokens:
+            output_tokens = estimate_prompt_tokens(raw)
+            usage_estimated = True
+    else:
+        input_tokens = estimate_prompt_tokens(prompt)
+        output_tokens = estimate_prompt_tokens(raw)
+        usage_estimated = True
+    return str(model), str(raw), input_tokens, output_tokens, usage_estimated
+
+
+def _tracked_call(provider, prompt, *, max_tokens, timeout, operation):
+    model_hint = _model_hint(provider)
+    prompt_for_estimate = (
+        ANTHROPIC_SYSTEM + '\n' + prompt if provider == 'anthropic' else prompt
+    )
+    estimated_input_tokens = estimate_prompt_tokens(prompt_for_estimate)
+    event = reserve_ai_call(
+        provider=provider,
+        model=model_hint,
+        operation=operation,
+        estimated_input_tokens=estimated_input_tokens,
+        max_output_tokens=max_tokens,
+    )
+
+    try:
+        if provider == 'anthropic':
+            result = _anthropic_chat_json(
+                prompt,
+                max_tokens=max_tokens,
+                timeout=timeout,
+                return_usage=True,
+            )
+        elif provider == 'ollama':
+            result = ollama_chat_json(
+                prompt,
+                max_tokens=max_tokens,
+                timeout=timeout,
+                return_usage=True,
+            )
+        else:
+            result = ('mock', '{}', {
+                'input_tokens': estimate_prompt_tokens(prompt),
+                'output_tokens': 1,
+                'usage_estimated': True,
+            })
+
+        model, raw, input_tokens, output_tokens, usage_estimated = _normalise_result(
+            result, prompt_for_estimate
+        )
+        complete_ai_call(
+            event,
+            provider=provider,
+            model=model,
+            operation=operation,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            usage_estimated=usage_estimated,
+        )
+        return model, raw
+    except Exception as exc:
+        fail_ai_call(event, exc)
+        raise
+
+
+def ai_chat_json(
+    prompt: str,
+    *,
+    max_tokens: int = 1100,
+    timeout: float = 240.0,
+    force_provider: str = None,
+    operation: str = 'ai_chat',
+) -> tuple[str, str]:
+    """
+    Dispatch to the configured provider while recording usage and applying
+    transactional cost reservations before billable cloud calls.
+    """
+    provider = (force_provider or os.getenv('AI_PROVIDER', 'auto')).strip().lower()
+
+    if provider == 'mock':
+        return _tracked_call(
+            'mock', prompt, max_tokens=max_tokens, timeout=timeout, operation=operation
+        )
+
+    if provider == 'anthropic':
+        return _tracked_call(
+            'anthropic', prompt, max_tokens=max_tokens, timeout=timeout, operation=operation
+        )
+
+    if provider == 'ollama':
+        return _tracked_call(
+            'ollama', prompt, max_tokens=max_tokens, timeout=timeout, operation=operation
+        )
+
+    errors: list[str] = []
+    api_key = os.getenv('ANTHROPIC_API_KEY', '').strip()
+    if api_key:
+        try:
+            return _tracked_call(
+                'anthropic',
+                prompt,
+                max_tokens=max_tokens,
+                timeout=timeout,
+                operation=operation,
+            )
+        except (AIBudgetExceeded, AIUsageConfigurationError) as exc:
+            # "auto" remains available by falling back to the local model once
+            # the cloud budget is exhausted or deliberately unpriced.
+            errors.append(f'Anthropic budget: {exc}')
+        except Exception as exc:
+            errors.append(f'Anthropic: {exc}')
+
+    try:
+        return _tracked_call(
+            'ollama', prompt, max_tokens=max_tokens, timeout=timeout, operation=operation
+        )
+    except Exception as exc:
+        errors.append(f'Ollama: {exc}')
+
+    raise RuntimeError('All AI providers failed. ' + ' | '.join(errors))
+
+
+def ai_available() -> bool:
+    """Return True if at least one AI provider is likely reachable."""
+    provider = os.getenv('AI_PROVIDER', 'auto').strip().lower()
+    if provider == 'mock':
+        return True
+    if provider == 'anthropic':
+        return bool(os.getenv('ANTHROPIC_API_KEY', '').strip())
+    if provider == 'ollama':
+        try:
+            import httpx
+            base = os.getenv('OLLAMA_BASE_URL', 'http://127.0.0.1:11434').rstrip('/')
+            r = httpx.get(f'{base}/api/tags', timeout=3.0)
+            return r.status_code == 200
+        except Exception:
+            return False
+    if os.getenv('ANTHROPIC_API_KEY', '').strip():
+        return True
+    try:
+        import httpx
+        base = os.getenv('OLLAMA_BASE_URL', 'http://127.0.0.1:11434').rstrip('/')
+        r = httpx.get(f'{base}/api/tags', timeout=3.0)
+        return r.status_code == 200
+    except Exception:
+        return False
+, '', text)
     return text.strip()
 
 

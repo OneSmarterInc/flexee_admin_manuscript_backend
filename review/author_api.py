@@ -1206,19 +1206,23 @@ def author_job_status(request, job_id):
     if job.job_type in ('semantic_readiness', 'semantic_matches'):
         try:
             item = Manuscript.objects.get(id=job.reference_id)
-            access_error = _author_access_error(request, item)
-            if access_error:
-                return access_error
         except Manuscript.DoesNotExist:
-            pass
+            return JsonResponse({'detail': 'Job not found'}, status=404)
+        access_error = _author_access_error(request, item)
+        if access_error:
+            return access_error
     elif job.job_type == 'venue_assessment':
         try:
-            item = VenueSubmission.objects.get(id=job.reference_id)
-            access_error = _author_access_error(request, item.manuscript)
-            if access_error:
-                return access_error
+            item = VenueSubmission.objects.select_related('manuscript').get(id=job.reference_id)
         except VenueSubmission.DoesNotExist:
-            pass
+            return JsonResponse({'detail': 'Job not found'}, status=404)
+        access_error = _author_access_error(request, item.manuscript)
+        if access_error:
+            return access_error
+    else:
+        # Public-review jobs have their own UUID-based status endpoint and must
+        # not be exposed through the author job-number endpoint.
+        return JsonResponse({'detail': 'Job not found'}, status=404)
 
     public_error = None
     if job.status == 'failed':

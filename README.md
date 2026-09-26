@@ -371,3 +371,97 @@ Repository code sends the events; alert routing is configured in the Sentry proj
 
 Performance tracing is intentionally off by default. If it is later needed, set `SENTRY_TRACES_SAMPLE_RATE` to a small value such as `0.05` only after reviewing the resulting event payloads in a non-production environment.
 
+## Production queue health monitoring and alerts
+
+The protected endpoint `GET /api/admin/queue-health/` now reports more than queue depth. Platform superusers can inspect:
+
+- overall status: `healthy`, `degraded`, or `critical`
+- queued and processing job counts
+- age of the oldest queued job
+- age of the oldest processing job
+- recent completed and failed jobs
+- active queue counts grouped by job type
+- the thresholds currently in effect
+- structured issue codes explaining why the queue is degraded or critical
+
+The original `queued_jobs` and `oldest_job_age_seconds` fields remain in the response for backward compatibility.
+
+Default thresholds are designed to warn before the existing stuck-job sweeper marks work failed:
+
+```env
+QUEUE_HEALTH_WARNING_QUEUED_JOBS=10
+QUEUE_HEALTH_CRITICAL_QUEUED_JOBS=25
+QUEUE_HEALTH_WARNING_OLDEST_QUEUED_SECONDS=300
+QUEUE_HEALTH_CRITICAL_OLDEST_QUEUED_SECONDS=600
+QUEUE_HEALTH_WARNING_OLDEST_PROCESSING_SECONDS=1350
+QUEUE_HEALTH_CRITICAL_OLDEST_PROCESSING_SECONDS=1800
+QUEUE_HEALTH_FAILURE_WINDOW_MINUTES=60
+QUEUE_HEALTH_WARNING_RECENT_FAILURES=3
+QUEUE_HEALTH_CRITICAL_RECENT_FAILURES=10
+QUEUE_HEALTH_ALERT_COOLDOWN_MINUTES=30
+```
+
+The queued/processing age defaults correspond to the existing 10-minute queue timeout and 30-minute processing timeout. Tune queue-depth and failure thresholds after observing normal production traffic rather than raising them simply to suppress alerts.
+
+### Manual queue check
+
+Run:
+
+```bash
+python manage.py check_queue_health
+```
+
+Example healthy output:
+
+```text
+Queue status: healthy
+Queued=0 Processing=0 RecentFailed=0 RecentCompleted=0
+OldestQueuedSeconds=None OldestProcessingSeconds=None
+No queue health issues detected.
+```
+
+For the full machine-readable snapshot:
+
+```bash
+python manage.py check_queue_health --json
+```
+
+To send a deduplicated monitoring alert when the queue is unhealthy:
+
+```bash
+python manage.py check_queue_health --alert
+```
+
+Alerts are written to the production audit trail and, when `SENTRY_DSN` is configured, emit a privacy-safe Sentry signal. Identical unhealthy states are suppressed for `QUEUE_HEALTH_ALERT_COOLDOWN_MINUTES`; severity/issue changes alert immediately. The first healthy check after an active alert emits one recovery event.
+
+### Independent production monitor
+
+Do not schedule the queue-health check inside Django-Q: if qcluster itself stops, a Django-Q scheduled monitor would stop too. The repository therefore includes an independent systemd monitor:
+
+- `flexee-queue-health.service`
+- `flexee-queue-health.timer`
+
+The timer invokes the health command every five minutes outside qcluster. An unhealthy queue emits the alert and returns a non-zero status so the failure is also visible in systemd/journal logs.
+
+Install it after confirming the deployment paths and service account:
+
+```bash
+sudo cp flexee-queue-health.service /etc/systemd/system/
+sudo cp flexee-queue-health.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now flexee-queue-health.timer
+sudo systemctl list-timers flexee-queue-health.timer
+```
+
+Test it immediately:
+
+```bash
+sudo systemctl start flexee-queue-health.service
+sudo systemctl status flexee-queue-health.service --no-pager
+sudo journalctl -u flexee-queue-health.service -n 100 --no-pager
+```
+
+A healthy queue exits successfully. A degraded/critical queue intentionally makes the one-shot service exit non-zero after recording/emitting the alert; the timer continues checking on subsequent intervals.
+
+For production notification delivery, configure the Sentry alert rule created during the error-monitoring readiness step to route `component=django_q`, `operation=queue_health_alert` events to the team notification channel.
+

@@ -226,12 +226,10 @@ def run_venue_assessment_task(job_id, submission_id):
 
 def sweep_stuck_jobs_task():
     now = timezone.now()
-    processing_cutoff = now - timedelta(
-        minutes=int(os.getenv('REVIEW_JOB_PROCESSING_TIMEOUT_MINUTES', '30'))
-    )
-    queued_cutoff = now - timedelta(
-        minutes=int(os.getenv('REVIEW_JOB_QUEUE_TIMEOUT_MINUTES', '10'))
-    )
+    processing_timeout_minutes = int(os.getenv('REVIEW_JOB_PROCESSING_TIMEOUT_MINUTES', '30'))
+    queue_timeout_minutes = int(os.getenv('REVIEW_JOB_QUEUE_TIMEOUT_MINUTES', '10'))
+    processing_cutoff = now - timedelta(minutes=processing_timeout_minutes)
+    queued_cutoff = now - timedelta(minutes=queue_timeout_minutes)
 
     candidates = list(
         ReviewJob.objects.filter(status='processing', updated_at__lt=processing_cutoff)
@@ -243,9 +241,9 @@ def sweep_stuck_jobs_task():
     for job in candidates:
         previous_status = job.status
         if previous_status == 'queued':
-            message = 'Job did not start within the queue timeout.'
+            message = f'Job did not start within the {queue_timeout_minutes}-minute queue timeout.'
         else:
-            message = 'Job timed out while processing.'
+            message = f'Job timed out after {processing_timeout_minutes} minutes.'
 
         # Do not overwrite a job that completed or changed state after the
         # candidate query. This makes the sweeper safe against worker races.

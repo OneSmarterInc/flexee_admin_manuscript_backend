@@ -21,6 +21,7 @@ from .models import AdminAuthEvent, ReviewEvent, Submission, SMTPSettings
 from .services.email_service import send_review_emails, send_acceptance_email, send_rejection_email
 from .services.review_engine import run_review
 from .audit import record_audit_event
+from .monitoring import capture_exception
 
 
 def _clean_summary_text(value, limit=700):
@@ -601,6 +602,12 @@ def admin_submission_accept(request, submission_id):
         submission.save(update_fields=['notification_status', 'notification_detail', 'notified_at', 'updated_at'])
         ReviewEvent.objects.create(submission=submission, event_type='acceptance_email_sent', detail=delivery['detail'])
     except Exception as email_error:
+        capture_exception(
+            email_error,
+            component='email',
+            operation='legacy_acceptance_notification',
+            tags={'submission_flow': 'legacy'},
+        )
         email_warning = str(email_error)
         submission.notification_status = 'error'
         submission.notification_detail = {'error': email_warning}
@@ -648,6 +655,12 @@ def admin_submission_reject(request, submission_id):
         submission.save(update_fields=['notification_status', 'notification_detail', 'notified_at', 'updated_at'])
         ReviewEvent.objects.create(submission=submission, event_type='rejection_email_sent', detail=delivery['detail'])
     except Exception as email_error:
+        capture_exception(
+            email_error,
+            component='email',
+            operation='legacy_rejection_notification',
+            tags={'submission_flow': 'legacy'},
+        )
         email_warning = str(email_error)
         submission.notification_status = 'error'
         submission.notification_detail = {'error': email_warning}
@@ -701,6 +714,12 @@ def admin_submission_send_email(request, submission_id):
         submission.save(update_fields=['notification_status', 'notification_detail', 'notified_at', 'updated_at'])
         ReviewEvent.objects.create(submission=submission, event_type='custom_email_sent', detail=delivery['detail'])
     except Exception as email_error:
+        capture_exception(
+            email_error,
+            component='email',
+            operation='legacy_custom_notification',
+            tags={'submission_flow': 'legacy'},
+        )
         email_warning = str(email_error)
         submission.notification_status = 'error'
         submission.notification_detail = {'error': email_warning}
@@ -849,4 +868,10 @@ def admin_smtp_test(request):
             return JsonResponse({'error': 'Failed to send test email for unknown reasons.'}, status=400)
 
     except Exception as e:
+        capture_exception(
+            e,
+            component='email',
+            operation='smtp_test',
+            tags={'source': 'admin_smtp_test'},
+        )
         return JsonResponse({'error': str(e)}, status=400)

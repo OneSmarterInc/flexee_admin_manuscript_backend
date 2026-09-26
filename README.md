@@ -289,3 +289,85 @@ python manage.py restore_production_backup `
 
 Never treat an untested backup as production-ready. Keep at least one recent restore-test result with the backup evidence for the production checklist.
 
+## Production error monitoring (Sentry)
+
+The backend supports opt-in Sentry monitoring for Django HTTP failures, handled Django-Q job failures/timeouts, email-delivery failures, and backup/restore failures.
+
+Monitoring is disabled unless `SENTRY_DSN` is configured. The integration is intentionally privacy-first for manuscript handling:
+
+- request bodies are never sent
+- request query strings, headers, cookies, and attached user data are removed
+- stack-frame local variables are disabled
+- exception messages are redacted before transmission
+- breadcrumb message/data payloads are removed
+- manual worker events attach only operational tags such as job type, component, operation, and decision state
+- performance tracing is disabled by default
+
+The application does not put manuscript text, prompts, author email addresses, SMTP credentials, passwords, TOTP secrets, session tokens, or API tokens into custom Sentry context.
+
+Install dependencies after pulling the feature:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+Create a Sentry Python/Django project, copy its DSN into the production environment, and tag the deployed release:
+
+```env
+DJANGO_ENV=production
+SENTRY_DSN=https://PUBLIC_KEY@YOUR_SENTRY_HOST/PROJECT_ID
+SENTRY_ENVIRONMENT=production
+SENTRY_RELEASE=<deployed-git-sha>
+SENTRY_TRACES_SAMPLE_RATE=0
+```
+
+`SENTRY_RELEASE` falls back to `RELEASE_SHA` when it is blank. Do not commit a real DSN to the repository.
+
+Restart both long-running application processes after changing the environment because the SDK is initialized when Django loads:
+
+```bash
+sudo systemctl restart flexee-gunicorn
+sudo systemctl restart flexee-qcluster
+```
+
+Use the built-in command to confirm configuration without emitting an event:
+
+```bash
+python manage.py verify_error_monitoring
+```
+
+Expected production output includes:
+
+```text
+Sentry enabled: True
+Environment: production
+Privacy mode: request bodies/query strings/cookies/user data/local variables redacted
+```
+
+Then send exactly one synthetic verification event:
+
+```bash
+python manage.py verify_error_monitoring --send-event
+```
+
+The command flushes the SDK before exiting and prints the Sentry event ID. Confirm that the event appears in the configured Sentry project with the `component=operations` and `operation=sentry_verification` tags.
+
+### What is monitored
+
+Unhandled Django 5xx exceptions are captured by the Sentry Django integration. The application also explicitly captures failures that are intentionally handled in code and therefore would otherwise disappear from exception monitoring:
+
+- public-review, semantic-readiness, semantic-matching, and venue-assessment Django-Q job failures
+- unexpected crashes in scheduled Django-Q sweeper/retention tasks
+- queue/processing timeout signals from the stuck-job sweeper
+- author verification/submission-confirmation email failures
+- editor decision and legacy submission email failures
+- production backup and restore command failures
+
+Expected client validation errors and normal deterministic/AI fallbacks are not deliberately reported as production errors.
+
+### Production alert rule
+
+Repository code sends the events; alert routing is configured in the Sentry project itself. For production, create an issue alert for new/regressed error-level issues and route it to the team notification channel (email, Slack, or the incident system in use). Keep the Sentry project's server-side data scrubbing enabled as a second layer in addition to the application's outbound redaction.
+
+Performance tracing is intentionally off by default. If it is later needed, set `SENTRY_TRACES_SAMPLE_RATE` to a small value such as `0.05` only after reviewing the resulting event payloads in a non-production environment.
+

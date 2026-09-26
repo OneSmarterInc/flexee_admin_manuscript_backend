@@ -52,6 +52,7 @@ from .services.author_agents import (
 )
 from .services.email_service import _send as _send_email
 from .audit import record_audit_event
+from .monitoring import capture_exception
 
 
 ALLOWED_MANUSCRIPT_TYPES = {value for value, _ in Manuscript.TYPE_CHOICES}
@@ -625,7 +626,12 @@ def author_register(request):
     verification_email_sent = True
     try:
         _send_author_verification(request, author)
-    except Exception:
+    except Exception as email_error:
+        capture_exception(
+            email_error,
+            component='email',
+            operation='author_registration_verification',
+        )
         verification_email_sent = False
 
     token, max_age = issue_author_session(author.id)
@@ -739,7 +745,12 @@ def author_resend_verification(request):
 
     try:
         _send_author_verification(request, author)
-    except Exception:
+    except Exception as email_error:
+        capture_exception(
+            email_error,
+            component='email',
+            operation='author_resend_verification',
+        )
         AuthorAuthEvent.objects.create(
             remote_hash=rh,
             success=False,
@@ -1420,9 +1431,13 @@ def author_submit_packet(request, submission_id):
                 f'Best regards,\nFlexee Editorial Team'
             )
             _send_email(author_email, subject, body)
-        except Exception:
+        except Exception as email_error:
             # Email errors must never block the submission from being recorded.
-            pass
+            capture_exception(
+                email_error,
+                component='email',
+                operation='author_submission_confirmation',
+            )
 
     return JsonResponse({'submission': _submission_payload(item)})
 

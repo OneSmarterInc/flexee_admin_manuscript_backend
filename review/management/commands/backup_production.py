@@ -11,6 +11,7 @@ from review.backup_utils import (
     database_vendor,
 )
 from review.models import AuditEvent
+from review.monitoring import capture_exception
 
 
 class Command(BaseCommand):
@@ -104,6 +105,12 @@ class Command(BaseCommand):
                 )
             )
         except Exception as exc:
+            capture_exception(
+                exc,
+                component='operations',
+                operation='production_backup',
+                tags={'database_vendor': vendor},
+            )
             try:
                 append_attempt_log(
                     backup_root,

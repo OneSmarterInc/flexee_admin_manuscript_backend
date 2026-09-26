@@ -11,6 +11,7 @@ from .auth import check_org_access, require_admin
 from .models import AuditEvent, EditorFeedback, SubmissionRequirementFile, Venue, VenueAgentConfig, VenueSubmission
 from .services.email_service import send_acceptance_email, send_rejection_email, _send
 from .audit import audit_event_payload, record_audit_event
+from .monitoring import capture_exception
 from .author_api import _active_config, _json_body, _submission_payload, _venue_config_payload, _venue_payload
 
 
@@ -378,9 +379,15 @@ def admin_venue_submission_decision(request, submission_id):
                     f'Best regards,\nFlexee Editorial Team'
                 )
                 _send(author_email, subject, body)
-        except Exception:
-            # Email errors must never block the decision from being recorded.
-            pass
+        except Exception as email_error:
+            # Email errors must never block the decision from being recorded,
+            # but production monitoring must still surface the delivery failure.
+            capture_exception(
+                email_error,
+                component='email',
+                operation='venue_editor_decision_notification',
+                tags={'decision': decision},
+            )
 
     return JsonResponse({'submission': _editor_submission_payload(item)})
 

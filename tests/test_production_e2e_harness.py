@@ -1,3 +1,4 @@
+from datetime import timedelta
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -73,7 +74,7 @@ def test_production_e2e_cost_report_uses_persisted_ai_usage():
         usage_estimated=False,
     )
 
-    report = Command()._ai_cost_report(timezone.now() - timezone.timedelta(minutes=1))
+    report = Command()._ai_cost_report(timezone.now() - timedelta(minutes=1))
 
     assert report['status'] == 'instrumented'
     assert report['completed_calls'] == 1

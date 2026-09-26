@@ -53,6 +53,12 @@ from .services.author_agents import (
 from .services.email_service import _send as _send_email
 from .audit import record_audit_event
 from .monitoring import capture_exception
+from .storage_security import (
+    UploadSecurityError,
+    sanitize_original_filename,
+    validate_manuscript_filename,
+    validate_manuscript_zip,
+)
 
 
 ALLOWED_MANUSCRIPT_TYPES = {value for value, _ in Manuscript.TYPE_CHOICES}
@@ -542,14 +548,25 @@ def author_manuscripts(request):
         errors.append('manuscript is empty')
     elif upload.size > max_bytes:
         errors.append(f'manuscript exceeds the {max_bytes // 1024 // 1024} MB upload limit')
-    elif not upload.name.lower().endswith(('.docx', '.pdf', '.md', '.zip')):
-        errors.append('manuscript must be a .docx, .pdf, .md, or .zip file')
+    else:
+        try:
+            safe_upload_name = validate_manuscript_filename(upload.name)
+        except UploadSecurityError as exc:
+            errors.append(str(exc))
 
     if errors:
         return JsonResponse({'detail': errors[0], 'errors': errors}, status=400)
 
     content = upload.read()
     upload.seek(0)
+    safe_upload_name = sanitize_original_filename(upload.name, default='manuscript')
+    upload.name = safe_upload_name
+    if safe_upload_name.lower().endswith('.zip'):
+        try:
+            validate_manuscript_zip(content)
+        except UploadSecurityError as exc:
+            return JsonResponse({'detail': str(exc), 'errors': [str(exc)]}, status=400)
+
     digest = hashlib.sha256(content).hexdigest()
     access_token = secrets.token_urlsafe(32)
 
@@ -565,7 +582,7 @@ def author_manuscripts(request):
         disclosure=disclosure,
         notes=request.POST.get('notes', '').strip(),
         attestation=True,
-        manuscript_filename=upload.name,
+        manuscript_filename=safe_upload_name,
         manuscript_file=upload,
         manuscript_bytes=len(content),
         manuscript_sha256=digest,
@@ -1324,7 +1341,8 @@ def author_upload_submission_requirement(request, submission_id, requirement_key
             status=413,
         )
 
-    original_filename = os.path.basename(str(uploaded.name or 'attachment'))
+    original_filename = sanitize_original_filename(uploaded.name, default='attachment')
+    uploaded.name = original_filename
     extension = os.path.splitext(original_filename)[1].lower()
     allowed_extensions = {
         '.pdf', '.doc', '.docx', '.txt', '.rtf',

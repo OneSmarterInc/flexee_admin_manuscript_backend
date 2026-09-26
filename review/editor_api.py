@@ -2,7 +2,7 @@ import json
 
 from django.db import transaction
 from django.db.models import Q
-from django.http import FileResponse, JsonResponse
+from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
@@ -12,6 +12,7 @@ from .models import AuditEvent, EditorFeedback, SubmissionRequirementFile, Venue
 from .services.email_service import send_acceptance_email, send_rejection_email, _send
 from .audit import audit_event_payload, record_audit_event
 from .monitoring import capture_exception
+from .storage_security import secure_download_response
 from .author_api import _active_config, _json_body, _submission_payload, _venue_config_payload, _venue_payload
 
 
@@ -426,9 +427,8 @@ def admin_submission_requirement_download(request, submission_id, requirement_ke
             manuscript_id=item.manuscript_id,
             detail={'requirement_key': requirement_key, 'filename': row.original_filename},
         )
-        return FileResponse(
+        return secure_download_response(
             row.file,
-            as_attachment=True,
             filename=row.original_filename,
         )
     except (FileNotFoundError, OSError):
@@ -464,12 +464,10 @@ def admin_venue_submission_download(request, submission_id):
             manuscript_id=manuscript.id,
             detail={'filename': manuscript.manuscript_filename},
         )
-        response = FileResponse(
+        return secure_download_response(
             manuscript.manuscript_file,
-            as_attachment=True,
             filename=manuscript.manuscript_filename,
         )
-        return response
     except (FileNotFoundError, OSError):
         return JsonResponse({'detail': 'Manuscript file is unavailable'}, status=404)
 

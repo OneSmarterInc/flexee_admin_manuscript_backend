@@ -17,6 +17,7 @@ from .services.review_engine import run_review, extract_text, word_count as wc_f
 from .services.email_service import send_review_emails
 from .views import _generate_chapter_summary, _format_chapter_editor_summary, _chapter_figure_count
 from .monitoring import capture_exception, capture_message, monitor_background_task
+from .storage_security import validate_manuscript_zip
 
 @monitor_background_task('e2e_worker_probe')
 def run_e2e_worker_probe_task(job_id):
@@ -46,14 +47,8 @@ def run_public_review_task(job_id, submission_id):
         zip_overall_source = None
         
         if review_filename.lower().endswith('.zip'):
+            validate_manuscript_zip(content)
             with zipfile.ZipFile(BytesIO(content)) as zf:
-                infolist = zf.infolist()
-                if len(infolist) > int(os.getenv('ZIP_MAX_FILES', '1000')):
-                    raise ValueError('ZIP contains too many files')
-                extracted_size = sum([i.file_size for i in infolist])
-                if extracted_size > int(os.getenv('ZIP_MAX_EXTRACTED_BYTES', str(100 * 1024 * 1024))):
-                    raise ValueError('Extracted ZIP size exceeds limit')
-
                 manuscript_entries = []
                 for name in zf.namelist():
                     if name.lower().endswith(('.docx', '.pdf', '.md')) and not name.startswith('__MACOSX') and not os.path.basename(name).startswith('.'):

@@ -102,7 +102,7 @@ def validate_manuscript_zip(content: bytes):
         entries = archive.infolist()
         if len(entries) > max_files:
             raise UploadSecurityError(
-                f'ZIP contains too many entries; limit is {max_files}'
+                f'ZIP contains too many files or entries; limit is {max_files}'
             )
 
         for info in entries:

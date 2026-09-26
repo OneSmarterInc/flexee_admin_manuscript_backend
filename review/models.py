@@ -91,6 +91,32 @@ class ReviewEvent(models.Model):
         ordering = ['created_at', 'id']
 
 
+
+
+class AuditEvent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    occurred_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    actor_id = models.UUIDField(null=True, blank=True, db_index=True)
+    actor_email = models.EmailField(max_length=320, blank=True, db_index=True)
+    actor_role = models.CharField(max_length=40, blank=True)
+    action = models.CharField(max_length=120, db_index=True)
+    resource_type = models.CharField(max_length=80, blank=True, db_index=True)
+    resource_id = models.CharField(max_length=100, blank=True, db_index=True)
+    organization_id = models.UUIDField(null=True, blank=True, db_index=True)
+    venue_id = models.UUIDField(null=True, blank=True, db_index=True)
+    venue_submission_id = models.UUIDField(null=True, blank=True, db_index=True)
+    manuscript_id = models.UUIDField(null=True, blank=True, db_index=True)
+    remote_hash = models.CharField(max_length=64, blank=True)
+    detail = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-occurred_at', '-id']
+        indexes = [
+            models.Index(fields=['organization_id', '-occurred_at'], name='review_audit_org_time_idx'),
+            models.Index(fields=['venue_id', '-occurred_at'], name='review_audit_venue_time_idx'),
+            models.Index(fields=['venue_submission_id', '-occurred_at'], name='review_audit_sub_time_idx'),
+        ]
+
 class AdminAuthEvent(models.Model):
     occurred_at = models.DateTimeField(auto_now_add=True, db_index=True)
     remote_hash = models.CharField(max_length=64, db_index=True)

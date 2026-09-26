@@ -343,6 +343,18 @@ def author_manuscripts(request):
         'access_token': access_token,
     }, status=201)
 
+def _send_author_verification(request, author):
+    from django.core.signing import dumps
+
+    token = dumps({'author_id': str(author.id)})
+    verify_url = request.build_absolute_uri(f'/api/author/verify-email/?token={token}')
+    _send_email(
+        to=author.email,
+        subject='Verify your author account',
+        body=f'Please verify your email by clicking: {verify_url}',
+    )
+
+
 @csrf_exempt
 @require_POST
 def author_register(request):
@@ -378,20 +390,24 @@ def author_register(request):
     )
     AuthorAuthEvent.objects.create(remote_hash=rh, success=True, detail={'action': 'register', 'email': email})
 
-    from django.core.signing import dumps
-    token = dumps({'author_id': str(author.id)})
-    verify_url = request.build_absolute_uri(f'/api/author/verify-email?token={token}')
+    verification_email_sent = True
     try:
-        _send_email(
-            to=email,
-            subject='Verify your author account',
-            body=f'Please verify your email by clicking: {verify_url}'
-        )
-    except Exception as e:
-        print(f"Failed to send verification email to {email}: {e}")
+        _send_author_verification(request, author)
+    except Exception:
+        verification_email_sent = False
 
     token, max_age = issue_author_session(author.id)
-    response = JsonResponse({'id': str(author.id), 'email': author.email, 'name': author.name}, status=201)
+    response = JsonResponse({
+        'id': str(author.id),
+        'email': author.email,
+        'name': author.name,
+        'email_verified': author.email_verified,
+        'verification_email_sent': verification_email_sent,
+        'verification_warning': (
+            None if verification_email_sent
+            else 'Your account was created, but the verification email could not be sent. You can resend it from your author workspace.'
+        ),
+    }, status=201)
     set_author_session_cookie(response, token, max_age)
     return response
 
@@ -430,7 +446,12 @@ def author_login(request):
     AuthorAuthEvent.objects.create(remote_hash=rh, success=True, detail={'email': email, 'reason': 'ok', 'action': 'login'})
 
     token, max_age = issue_author_session(author.id)
-    response = JsonResponse({'id': str(author.id), 'email': author.email, 'name': author.name})
+    response = JsonResponse({
+        'id': str(author.id),
+        'email': author.email,
+        'name': author.name,
+        'email_verified': author.email_verified,
+    })
     set_author_session_cookie(response, token, max_age)
     return response
 
@@ -460,6 +481,48 @@ def author_verify_email(request):
         return JsonResponse({'detail': 'Invalid or expired token'}, status=400)
 
 
+@csrf_exempt
+@require_POST
+@require_author
+def author_resend_verification(request):
+    try:
+        author = Author.objects.get(id=request.flexee_author['aid'])
+    except Author.DoesNotExist:
+        return JsonResponse({'detail': 'Author not found'}, status=404)
+
+    if author.email_verified:
+        return JsonResponse({'ok': True, 'email_verified': True, 'detail': 'Email is already verified.'})
+
+    from datetime import timedelta
+    rh = remote_hash(request)
+    window_minutes = int(os.getenv('AUTHOR_VERIFY_RESEND_WINDOW_MINUTES', '15'))
+    max_attempts = int(os.getenv('AUTHOR_VERIFY_RESEND_MAX', '3'))
+    recent = AuthorAuthEvent.objects.filter(
+        remote_hash=rh,
+        detail__action='resend_verification',
+        occurred_at__gte=timezone.now() - timedelta(minutes=window_minutes),
+    ).count()
+    if recent >= max_attempts:
+        return JsonResponse({'detail': 'Too many verification email requests. Try again later.'}, status=429)
+
+    try:
+        _send_author_verification(request, author)
+    except Exception:
+        AuthorAuthEvent.objects.create(
+            remote_hash=rh,
+            success=False,
+            detail={'action': 'resend_verification', 'author_id': str(author.id)},
+        )
+        return JsonResponse({'detail': 'Verification email could not be sent. Please try again later.'}, status=503)
+
+    AuthorAuthEvent.objects.create(
+        remote_hash=rh,
+        success=True,
+        detail={'action': 'resend_verification', 'author_id': str(author.id)},
+    )
+    return JsonResponse({'ok': True, 'email_verified': False, 'detail': 'Verification email sent.'})
+
+
 @require_GET
 def author_session(request):
     session = read_author_session(request)
@@ -473,7 +536,12 @@ def author_session(request):
         clear_author_session_cookie(response)
         return response
 
-    return JsonResponse({'id': str(author.id), 'email': author.email, 'name': author.name})
+    return JsonResponse({
+        'id': str(author.id),
+        'email': author.email,
+        'name': author.name,
+        'email_verified': author.email_verified,
+    })
 
 @require_GET
 @require_author

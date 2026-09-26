@@ -1,10 +1,12 @@
 import json
 import tempfile
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client, override_settings
+from django.utils import timezone
 
 from review.auth import COOKIE_NAME, issue_session
 from review.models import (
@@ -18,6 +20,7 @@ from review.models import (
     VenueAgentConfig,
     VenueSubmission,
 )
+from review.tasks import sweep_retention_task
 
 
 @pytest.fixture(autouse=True)
@@ -302,3 +305,27 @@ def test_platform_legacy_submission_view_download_and_decision_are_audited():
         'legacy_submission.manuscript_downloaded',
         'legacy_submission.decision_recorded',
     }.issubset(actions)
+
+@pytest.mark.django_db
+@override_settings(MEDIA_ROOT=tempfile.mkdtemp(prefix='flexee-audit-retention-tests-'))
+def test_retention_purge_is_recorded_as_system_audit_event():
+    org, venue, config, manuscript, submission = make_venue_submission(
+        org_name='Audit Retention Org',
+        slug='audit-retention-venue',
+    )
+    config.retention_days = 1
+    config.save(update_fields=['retention_days'])
+    submission.retention_expires_at = timezone.now() - timedelta(minutes=1)
+    submission.save(update_fields=['retention_expires_at'])
+
+    sweep_retention_task()
+
+    event = AuditEvent.objects.get(
+        action='venue_submission.retention_purged',
+        venue_submission_id=submission.id,
+    )
+    assert event.actor_role == 'system'
+    assert event.organization_id == org.id
+    assert event.venue_id == venue.id
+    assert event.manuscript_id == manuscript.id
+

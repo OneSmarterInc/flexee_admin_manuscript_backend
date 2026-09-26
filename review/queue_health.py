@@ -267,36 +267,38 @@ def emit_queue_health_alert(snapshot: dict, *, force=False) -> dict:
     """
     now = timezone.now()
     status = snapshot.get('status', 'healthy')
-    latest_transition = (
-        AuditEvent.objects.filter(
-            action__in=['system.queue_health_alert', 'system.queue_health_recovered']
-        )
-        .order_by('-occurred_at')
-        .first()
-    )
-
     if status == 'healthy':
-        if latest_transition and latest_transition.action == 'system.queue_health_alert':
-            capture_message(
-                'Queue health recovered',
-                component='django_q',
-                operation='queue_health_recovered',
-                level='info',
-                tags={'queue_health_status': 'healthy'},
-            )
-            AuditEvent.objects.create(
-                actor_role='system',
+        latest_alert = (
+            AuditEvent.objects.filter(action='system.queue_health_alert')
+            .order_by('-occurred_at')
+            .first()
+        )
+        if latest_alert:
+            recovery_already_recorded = AuditEvent.objects.filter(
                 action='system.queue_health_recovered',
-                resource_type='queue_health',
-                resource_id='healthy',
-                detail={
-                    'status': 'healthy',
-                    'queued_jobs': snapshot.get('queued_jobs', 0),
-                    'processing_jobs': snapshot.get('processing_jobs', 0),
-                    'recent_failed_jobs': snapshot.get('recent_failed_jobs', 0),
-                },
-            )
-            return {'emitted': True, 'reason': 'recovered'}
+                occurred_at__gte=latest_alert.occurred_at,
+            ).exists()
+            if not recovery_already_recorded:
+                capture_message(
+                    'Queue health recovered',
+                    component='django_q',
+                    operation='queue_health_recovered',
+                    level='info',
+                    tags={'queue_health_status': 'healthy'},
+                )
+                AuditEvent.objects.create(
+                    actor_role='system',
+                    action='system.queue_health_recovered',
+                    resource_type='queue_health',
+                    resource_id='healthy',
+                    detail={
+                        'status': 'healthy',
+                        'queued_jobs': snapshot.get('queued_jobs', 0),
+                        'processing_jobs': snapshot.get('processing_jobs', 0),
+                        'recent_failed_jobs': snapshot.get('recent_failed_jobs', 0),
+                    },
+                )
+                return {'emitted': True, 'reason': 'recovered'}
         return {'emitted': False, 'reason': 'healthy'}
 
     fingerprint = _alert_fingerprint(snapshot)

@@ -88,9 +88,9 @@ def _anthropic_chat_json(
 
 
 def _strip_fences(text: str) -> str:
-    text = re.sub(r'^```(?:json)?\s*', '', text.strip(), flags=re.I)
-    text = re.sub(r'\s*```\s*    return text.strip()
-
+    text = re.sub(r'^```(?:json)?\\s*', '', text.strip(), flags=re.I)
+    text = re.sub(r'\\s*```\\s*$', '', text)
+    return text.strip()
 
 def _model_hint(provider: str) -> str:
     if provider == 'anthropic':

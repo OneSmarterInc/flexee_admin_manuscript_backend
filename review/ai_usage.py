@@ -109,7 +109,9 @@ def pricing_for(provider: str, model: str) -> dict:
     return {
         'input_usd_per_million': input_rate,
         'output_usd_per_million': output_rate,
-        'priced': input_rate > 0 or output_rate > 0,
+        # A hard ceiling needs both sides of the provider tariff. Treat a
+        # partial price as unpriced rather than underestimating spend.
+        'priced': input_rate > 0 and output_rate > 0,
     }
 
 

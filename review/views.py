@@ -15,7 +15,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 from .auth import (
     clear_session_cookie, issue_session, read_session, remote_hash, require_admin,
-    set_session_cookie, verify_password, verify_totp,
+    set_session_cookie, verify_password, verify_totp, require_platform_superuser,
 )
 from .models import AdminAuthEvent, ReviewEvent, Submission, SMTPSettings
 from .services.email_service import send_review_emails, send_acceptance_email, send_rejection_email
@@ -441,13 +441,29 @@ def admin_logout(request):
 @require_GET
 def admin_session(request):
     session = read_session(request)
-    response = JsonResponse({'authenticated': bool(session), 'username': session.get('u') if session else None})
+    user = None
+    memberships = []
+    if session:
+        from .models import EditorUser
+        user = EditorUser.objects.filter(email=session.get('u')).first()
+        if user:
+            memberships = list(
+                user.memberships.select_related('organization')
+                .values('organization_id', 'organization__name', 'role')
+            )
+
+    response = JsonResponse({
+        'authenticated': bool(session and user),
+        'username': user.email if user else None,
+        'platform_superuser': bool(user and user.platform_superuser),
+        'memberships': memberships,
+    })
     response['Cache-Control'] = 'no-store'
     return response
 
 
 @require_GET
-@require_admin
+@require_platform_superuser
 def admin_submissions(request):
     qs = Submission.objects.all()
     q = request.GET.get('q', '').strip()
@@ -483,7 +499,7 @@ def admin_submissions(request):
 
 
 @require_GET
-@require_admin
+@require_platform_superuser
 def admin_queue_health(request):
     from .models import ReviewJob
     from django.utils import timezone
@@ -505,7 +521,7 @@ def admin_queue_health(request):
 
 
 @require_GET
-@require_admin
+@require_platform_superuser
 def admin_submission_detail(request, submission_id):
     try:
         item = Submission.objects.prefetch_related('events').get(id=submission_id)
@@ -543,7 +559,7 @@ def admin_submission_detail(request, submission_id):
 
 @csrf_exempt
 @require_POST
-@require_admin
+@require_platform_superuser
 def admin_submission_accept(request, submission_id):
     try:
         submission = Submission.objects.get(id=submission_id)
@@ -581,7 +597,7 @@ def admin_submission_accept(request, submission_id):
 
 @csrf_exempt
 @require_POST
-@require_admin
+@require_platform_superuser
 def admin_submission_reject(request, submission_id):
     try:
         submission = Submission.objects.get(id=submission_id)
@@ -621,7 +637,7 @@ def admin_submission_reject(request, submission_id):
 
 @csrf_exempt
 @require_POST
-@require_admin
+@require_platform_superuser
 def admin_submission_delete(request, submission_id):
     try:
         submission = Submission.objects.get(id=submission_id)
@@ -632,7 +648,7 @@ def admin_submission_delete(request, submission_id):
 
 @csrf_exempt
 @require_POST
-@require_admin
+@require_platform_superuser
 def admin_submission_send_email(request, submission_id):
     try:
         submission = Submission.objects.get(id=submission_id)
@@ -666,7 +682,7 @@ def admin_submission_send_email(request, submission_id):
 
 
 @require_GET
-@require_admin
+@require_platform_superuser
 def admin_submission_download(request, submission_id):
     try:
         submission = Submission.objects.get(id=submission_id)
@@ -692,7 +708,7 @@ def admin_submission_download(request, submission_id):
         return JsonResponse({'detail': 'Submission not found'}, status=404)
 
 @csrf_exempt
-@require_admin
+@require_platform_superuser
 def admin_smtp_settings(request):
     smtp, _ = SMTPSettings.objects.get_or_create(id=1)
     if request.method == 'GET':
@@ -728,7 +744,7 @@ def admin_smtp_settings(request):
     return JsonResponse({'error': 'Method not allowed'}, status=405)
 
 @csrf_exempt
-@require_admin
+@require_platform_superuser
 def admin_smtp_test(request):
     if request.method != 'POST':
         return JsonResponse({'error': 'Method not allowed'}, status=405)

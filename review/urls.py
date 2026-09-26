@@ -3,8 +3,10 @@ from . import views
 from . import author_api
 from . import editor_api
 from .api_summary import admin_submission_api_summary
+from .security_api import csrf_token
 
 urlpatterns = [
+    path('csrf/', csrf_token),
     path('health/', views.health),
     path('submissions/', views.submit),
     path('submissions/<uuid:submission_id>/status/', views.submission_status),

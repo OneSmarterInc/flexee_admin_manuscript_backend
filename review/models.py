@@ -526,6 +526,16 @@ class ReviewJob(models.Model):
             ),
         ]
 
+class StorageQuotaState(models.Model):
+    """Singleton lock row used to serialize storage-quota checks."""
+    key = models.CharField(max_length=32, primary_key=True, default='global', editable=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'storage quota state'
+        verbose_name_plural = 'storage quota state'
+
+
 class AIBudgetState(models.Model):
     """Singleton lock row used to serialize cloud-AI budget reservations."""
     key = models.CharField(max_length=32, primary_key=True, default='global', editable=False)

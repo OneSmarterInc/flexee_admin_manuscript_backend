@@ -38,7 +38,7 @@ class TestV1Security:
         assert '&lt;script&gt;alert(1)&lt;/script&gt;' in html
         assert '&lt;img src=x onerror=alert(1)&gt;' in html
         
-    @patch.dict(os.environ, {"TEST_BYPASS_ORIGIN": "0"})
+    @patch.dict(os.environ, {"TEST_BYPASS_ORIGIN": "0", "FRONTEND_ORIGINS": "http://localhost:5173"}, clear=False)
     def test_admin_post_origin_protection(self):
         # Valid origin
         response = self.client.post(

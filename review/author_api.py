@@ -1162,7 +1162,7 @@ def author_submission_detail(request, submission_id):
     try:
         item = VenueSubmission.objects.select_related(
             'venue', 'venue__organization', 'venue_config'
-        ).prefetch_related('evidence_findings').get(id=submission_id)
+        ).prefetch_related('evidence_findings', 'requirement_files').get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
     access_error = _author_access_error(request, item.manuscript)
@@ -1173,9 +1173,162 @@ def author_submission_detail(request, submission_id):
 
 @csrf_exempt
 @require_POST
+def author_save_submission_requirements(request, submission_id):
+    try:
+        item = VenueSubmission.objects.select_related(
+            'manuscript', 'venue', 'venue_config'
+        ).prefetch_related('requirement_files').get(id=submission_id)
+    except VenueSubmission.DoesNotExist:
+        return JsonResponse({'detail': 'Venue submission not found'}, status=404)
+    access_error = _author_access_error(request, item.manuscript)
+    if access_error:
+        return access_error
+    if item.status not in {'draft', 'packet_ready'}:
+        return JsonResponse(
+            {'detail': 'Submission requirements can only be changed before formal submission'},
+            status=409,
+        )
+
+    state = _submission_requirements_payload(item)
+    specs = {spec['key']: spec for spec in state['items']}
+    data = _json_body(request)
+    incoming = data.get('responses')
+    if not isinstance(incoming, dict):
+        return JsonResponse({'detail': 'responses must be a JSON object'}, status=400)
+
+    packet = dict(item.packet or {})
+    responses = packet.get('requirement_responses')
+    if not isinstance(responses, dict):
+        responses = {}
+
+    for key, raw_value in incoming.items():
+        spec = specs.get(str(key))
+        if not spec:
+            return JsonResponse({'detail': f'Unknown submission requirement: {key}'}, status=400)
+        if spec['type'] == 'file':
+            return JsonResponse(
+                {'detail': f'{spec["label"]} must be uploaded as a file'},
+                status=400,
+            )
+        if spec['type'] == 'checkbox':
+            if not isinstance(raw_value, bool):
+                return JsonResponse(
+                    {'detail': f'{spec["label"]} must be true or false'},
+                    status=400,
+                )
+            responses[spec['key']] = raw_value
+        else:
+            value = str(raw_value or '').strip()
+            if len(value) > int(spec.get('max_length', 4000)):
+                return JsonResponse(
+                    {'detail': f'{spec["label"]} exceeds the configured maximum length'},
+                    status=400,
+                )
+            responses[spec['key']] = value
+
+    packet['requirement_responses'] = responses
+    item.packet = packet
+    item.save(update_fields=['packet', 'updated_at'])
+    item = VenueSubmission.objects.select_related(
+        'manuscript', 'venue', 'venue_config'
+    ).prefetch_related('requirement_files').get(id=item.id)
+    return JsonResponse({'requirements': _submission_requirements_payload(item)})
+
+
+@csrf_exempt
+@require_POST
+def author_upload_submission_requirement(request, submission_id, requirement_key):
+    try:
+        item = VenueSubmission.objects.select_related(
+            'manuscript', 'venue', 'venue_config'
+        ).prefetch_related('requirement_files').get(id=submission_id)
+    except VenueSubmission.DoesNotExist:
+        return JsonResponse({'detail': 'Venue submission not found'}, status=404)
+    access_error = _author_access_error(request, item.manuscript)
+    if access_error:
+        return access_error
+    if item.status not in {'draft', 'packet_ready'}:
+        return JsonResponse(
+            {'detail': 'Submission requirement files can only be changed before formal submission'},
+            status=409,
+        )
+
+    state = _submission_requirements_payload(item)
+    spec = next(
+        (row for row in state['items'] if row.get('key') == requirement_key),
+        None,
+    )
+    if not spec:
+        return JsonResponse({'detail': 'Submission requirement not found'}, status=404)
+    if spec.get('type') != 'file':
+        return JsonResponse({'detail': 'This requirement does not accept a file'}, status=400)
+
+    uploaded = request.FILES.get('file')
+    if not uploaded:
+        return JsonResponse({'detail': 'file is required'}, status=400)
+
+    max_bytes = int(os.getenv('MAX_SUBMISSION_ITEM_BYTES', str(10 * 1024 * 1024)))
+    if uploaded.size > max_bytes:
+        return JsonResponse(
+            {'detail': f'Requirement file exceeds the {max_bytes}-byte upload limit'},
+            status=413,
+        )
+
+    original_filename = os.path.basename(str(uploaded.name or 'attachment'))
+    extension = os.path.splitext(original_filename)[1].lower()
+    allowed_extensions = {
+        '.pdf', '.doc', '.docx', '.txt', '.rtf',
+        '.csv', '.xls', '.xlsx', '.png', '.jpg', '.jpeg',
+    }
+    if extension not in allowed_extensions:
+        return JsonResponse(
+            {'detail': 'Requirement files must be PDF, Office document, text, CSV, or image files'},
+            status=400,
+        )
+
+    digest = hashlib.sha256()
+    for chunk in uploaded.chunks():
+        digest.update(chunk)
+    uploaded.seek(0)
+
+    existing = SubmissionRequirementFile.objects.filter(
+        venue_submission=item,
+        requirement_key=requirement_key,
+    ).first()
+    if existing and existing.file:
+        existing.file.delete(save=False)
+
+    row, _ = SubmissionRequirementFile.objects.update_or_create(
+        venue_submission=item,
+        requirement_key=requirement_key,
+        defaults={
+            'original_filename': original_filename[:500],
+            'file': uploaded,
+            'file_bytes': uploaded.size,
+            'file_sha256': digest.hexdigest(),
+        },
+    )
+
+    item = VenueSubmission.objects.select_related(
+        'manuscript', 'venue', 'venue_config'
+    ).prefetch_related('requirement_files').get(id=item.id)
+    return JsonResponse({
+        'file': {
+            'name': row.original_filename,
+            'bytes': row.file_bytes,
+            'sha256': row.file_sha256,
+        },
+        'requirements': _submission_requirements_payload(item),
+    })
+
+
+@csrf_exempt
+@require_POST
 def author_submit_packet(request, submission_id):
     try:
-        item = VenueSubmission.objects.select_related('manuscript', 'venue').get(id=submission_id)
+        item = VenueSubmission.objects.select_related(
+            'manuscript', 'venue', 'venue_config'
+        ).prefetch_related('requirement_files').get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
     access_error = _author_access_error(request, item.manuscript)
@@ -1185,6 +1338,16 @@ def author_submit_packet(request, submission_id):
     if item.status != 'packet_ready':
         return JsonResponse(
             {'detail': 'Complete the venue assessment and prepare the packet before submission'},
+            status=409,
+        )
+
+    requirements = _submission_requirements_payload(item)
+    if not requirements['complete']:
+        return JsonResponse(
+            {
+                'detail': 'Complete all required venue submission items before submission',
+                'requirements': requirements,
+            },
             status=409,
         )
 

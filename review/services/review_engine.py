@@ -548,7 +548,12 @@ def _repair_missing_outputs(parsed, decision, measured, judgments, kind):
         f"Review data:\n{json.dumps(compact, ensure_ascii=False)}"
     )
     try:
-        _, output = ai_chat_json(prompt, max_tokens=300, timeout=90)
+        _, output = ai_chat_json(
+            prompt,
+            max_tokens=300,
+            timeout=90,
+            operation='review_output_repair',
+        )
         repaired = _parse_model_json(output)
         repaired_summary = repaired.get('editor_summary') if isinstance(repaired, dict) else None
         repaired_letter = repaired.get('author_letter') if isinstance(repaired, dict) else None
@@ -583,7 +588,11 @@ def _judge_chunked(text, declared_sim, rubric_items, kind, disclosure, measured,
     models_used = set()
     for chunk in chunks:
         chunk_prompt = _build_prompt(chunk, declared_sim, rubric_items, kind, measured)
-        model, output = ai_chat_json(chunk_prompt, max_tokens=max_tokens)
+        model, output = ai_chat_json(
+            chunk_prompt,
+            max_tokens=max_tokens,
+            operation='manuscript_review_chunk',
+        )
         models_used.add(model)
         parsed = _parse_model_json(output)
         if isinstance(parsed, dict):
@@ -658,7 +667,12 @@ def judge_with_local_model(text, declared_sim, rubric_items, kind, disclosure, m
         else:
             raise
 
-    model, output = ai_chat_json(prompt, max_tokens=max_tokens, force_provider=force_provider)
+    model, output = ai_chat_json(
+        prompt,
+        max_tokens=max_tokens,
+        force_provider=force_provider,
+        operation='manuscript_review',
+    )
     parsed = _parse_model_json(output)
     if not isinstance(parsed, dict):
         raise RuntimeError("Local AI returned JSON, but the review payload was not an object.")

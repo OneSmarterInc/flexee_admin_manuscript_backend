@@ -255,6 +255,7 @@ def submit(request):
     upload.seek(0)
     digest = hashlib.sha256(content).hexdigest()
     safe_upload_name = sanitize_original_filename(upload.name, default='manuscript')
+    upload.name = safe_upload_name
     if safe_upload_name.lower().endswith('.zip'):
         try:
             validate_manuscript_zip(content)

@@ -324,3 +324,72 @@ def test_invalid_structured_venue_configuration_is_rejected_without_affecting_ol
     assert cfg.desk_rejection_rules == ['Existing free-text guidance remains supported.']
     assert cfg.structured_desk_rejection_rules[0]['field'] == 'word_count'
     assert cfg.required_submission_items[0]['key'] == 'orcid'
+
+
+@pytest.mark.django_db
+def test_transfer_rechecks_target_structured_desk_rules():
+    author = Author.objects.create(email='transfer-rule@example.com', name='Transfer Rule Author', password_hash='x')
+    manuscript = manuscript_for(author)
+    ReadinessAssessment.objects.create(
+        manuscript=manuscript,
+        status='completed',
+        engine_version='mechanical-v1',
+        summary={
+            'word_count': 9001,
+            'blocking_issues': 0,
+            'warnings': 0,
+            'ready_for_matching': True,
+        },
+        findings=[],
+    )
+    org = Organization.objects.create(name='Transfer Rule Org')
+    source_venue = Venue.objects.create(
+        organization=org,
+        name='Source Venue',
+        slug='source-venue-rule-test',
+        venue_type='journal',
+    )
+    target_venue = Venue.objects.create(
+        organization=org,
+        name='Target Venue',
+        slug='target-venue-rule-test',
+        venue_type='journal',
+    )
+    source_config = VenueAgentConfig.objects.create(
+        venue=source_venue,
+        version=1,
+        active=True,
+        aims_scope='Source scope.',
+    )
+    VenueAgentConfig.objects.create(
+        venue=target_venue,
+        version=1,
+        active=True,
+        aims_scope='Target scope.',
+        structured_desk_rejection_rules=[
+            {
+                'field': 'word_count',
+                'operator': '>',
+                'value': 8000,
+                'message': 'Target venue maximum is 8,000 words.',
+            }
+        ],
+    )
+    source = VenueSubmission.objects.create(
+        manuscript=manuscript,
+        venue=source_venue,
+        venue_config=source_config,
+        status='rejected',
+    )
+
+    response = author_client(author).post(
+        f'/api/author/venue-submissions/{source.id}/transfer/',
+        data=json.dumps({'venue_id': str(target_venue.id), 'reason': 'Try another venue'}),
+        content_type='application/json',
+    )
+
+    assert response.status_code == 409
+    assert response.json()['violations'][0]['message'] == 'Target venue maximum is 8,000 words.'
+    source.refresh_from_db()
+    assert source.status == 'rejected'
+    assert VenueSubmission.objects.filter(manuscript=manuscript).count() == 1

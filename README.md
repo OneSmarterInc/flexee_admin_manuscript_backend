@@ -88,7 +88,7 @@ ANTHROPIC_MODEL=claude-haiku-4-5-20251001
 python manage.py production_e2e --manuscript "C:\path\to\field-notes-test.docx" --author-email "yourname+flexee-e2e-anthropic@example.com" --manuscript-type practitioner_article --venue-slug field-notes-journal
 ```
 
-The command requires real SMTP by default. Use `--allow-console-email` only for a local rehearsal; it is not evidence of production email delivery. The report is written as `production_e2e_<provider>_<timestamp>.json` and includes stage timings, observed model names, final decision state, evidence/feedback counts, and whether each email path was requested.
+The command requires real SMTP by default. Use `--allow-console-email` only for a local rehearsal; it is not evidence of production email delivery. The report is written as `production_e2e_<provider>_<timestamp>.json` and includes stage timings, observed model names, final decision state, evidence/feedback counts, email-path checks, and the AI usage/cost rows recorded during the E2E window.
 
 To exercise the book path, use a real Five Zero-style book or ZIP and run:
 
@@ -96,7 +96,7 @@ To exercise the book path, use a real Five Zero-style book or ZIP and run:
 python manage.py production_e2e --manuscript "C:\path\to\five-zero-book.zip" --author-email "yourname+flexee-book-ollama@example.com" --manuscript-type book --venue-slug five-zero-books
 ```
 
-Use the same book again with `AI_PROVIDER=anthropic` to compare wall-clock timings. The current AI-provider abstraction does not persist token usage/cost, so the JSON report marks cost as not instrumented; record the provider billing separately for the run.
+Use the same book again with `AI_PROVIDER=anthropic` to compare wall-clock timings and the instrumented token/cost section in the JSON report. Run this proof in a dedicated environment when you need an isolated cost figure; concurrent application AI calls that occur inside the same E2E time window are included in that report.
 
 ## Per-venue content retention
 
@@ -556,7 +556,7 @@ Platform superusers can also retrieve the same safe aggregate data through:
 GET /api/admin/ai-usage/
 ```
 
-The response includes today's, current month's, and all-time calls/tokens/cost; remaining configured daily/monthly budget; active reservations; failed/blocked call counts; and totals grouped by provider/model. The endpoint uses `Cache-Control: no-store`.
+The response includes today's, current month's, and all-time calls/tokens/cost; committed and remaining configured daily/monthly budget; active reservations; failed/blocked call counts; unpriced cloud-call visibility; and totals grouped by provider/model and application operation. The endpoint uses `Cache-Control: no-store`.
 
 A budget-block event also emits the privacy-safe Sentry operation `component=ai_cost`, `operation=budget_block` when Sentry is configured.
 

@@ -13,6 +13,7 @@ from ..ai_usage import (
     AIBudgetExceeded,
     AIUsageConfigurationError,
     complete_ai_call,
+    cost_controls_enabled,
     fail_ai_call,
     reserve_ai_call,
 )
@@ -139,13 +140,22 @@ def _tracked_call(provider, prompt, *, max_tokens, timeout, operation):
             estimated_input_tokens,
             len(prompt_for_estimate.encode('utf-8')),
         )
-    event = reserve_ai_call(
-        provider=provider,
-        model=model_hint,
-        operation=operation,
-        estimated_input_tokens=estimated_input_tokens,
-        max_output_tokens=max_tokens,
-    )
+    try:
+        event = reserve_ai_call(
+            provider=provider,
+            model=model_hint,
+            operation=operation,
+            estimated_input_tokens=estimated_input_tokens,
+            max_output_tokens=max_tokens,
+        )
+    except (AIBudgetExceeded, AIUsageConfigurationError):
+        raise
+    except Exception:
+        # Usage persistence is observational while enforcement is disabled.
+        # When enforcement is enabled, database/accounting failures fail closed.
+        if cost_controls_enabled():
+            raise
+        event = None
 
     try:
         if provider == 'anthropic':
@@ -172,18 +182,25 @@ def _tracked_call(provider, prompt, *, max_tokens, timeout, operation):
         model, raw, input_tokens, output_tokens, usage_estimated = _normalise_result(
             result, prompt_for_estimate
         )
-        complete_ai_call(
-            event,
-            provider=provider,
-            model=model,
-            operation=operation,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            usage_estimated=usage_estimated,
-        )
+        try:
+            complete_ai_call(
+                event,
+                provider=provider,
+                model=model,
+                operation=operation,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                usage_estimated=usage_estimated,
+            )
+        except Exception:
+            if cost_controls_enabled():
+                raise
         return model, raw
     except Exception as exc:
-        fail_ai_call(event, exc)
+        try:
+            fail_ai_call(event, exc)
+        except Exception:
+            pass
         raise
 
 

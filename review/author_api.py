@@ -248,9 +248,7 @@ def author_manuscripts(request):
         except Author.DoesNotExist:
             pass
 
-    if not author:
-        return JsonResponse({'detail': 'Author authentication required', 'code': 'author_token_required'}, status=401)
-    if not author.email_verified:
+    if author and not author.email_verified:
         return JsonResponse({'detail': 'Email verification required before upload'}, status=403)
 
     max_bytes = int(os.getenv('MAX_MANUSCRIPT_BYTES', str(20 * 1024 * 1024)))

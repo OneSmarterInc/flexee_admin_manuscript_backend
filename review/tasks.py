@@ -254,5 +254,23 @@ def sweep_stuck_jobs_task():
                 submission.save(update_fields=['status', 'error_message', 'completed_at'])
             except VenueSubmission.DoesNotExist:
                 pass
+        elif job.job_type == 'semantic_readiness':
+            try:
+                from .models import ReadinessAssessment
+                assessment = ReadinessAssessment.objects.filter(manuscript_id=job.reference_id, status='pending').first()
+                if assessment:
+                    assessment.status = 'failed'
+                    assessment.error = {'type': 'TimeoutError', 'message': 'Job timed out after 30 minutes.'}
+                    assessment.completed_at = timezone.now()
+                    assessment.save(update_fields=['status', 'error', 'completed_at'])
+            except Exception:
+                pass
+        elif job.job_type == 'semantic_matches':
+            # VenueMatch rows can already contain valid deterministic or semantic
+            # results and have no per-row processing status. A manuscript-level
+            # timeout therefore cannot safely identify which row should be changed.
+            # The ReviewJob is already marked failed above, which is the correct
+            # place to record this timeout.
+            pass
 
     return f"Swept {count} stuck jobs."

@@ -288,16 +288,22 @@ def submission_status(request, submission_id):
     from .auth import remote_hash
     
     rh = remote_hash(request)
-    window_minutes = int(os.getenv('PUBLIC_SUBMIT_WINDOW_MINUTES', '60'))
-    max_submissions = int(os.getenv('PUBLIC_SUBMIT_MAX_SUBMISSIONS', '3'))
+    window_minutes = int(os.getenv('PUBLIC_STATUS_WINDOW_MINUTES', '60'))
+    max_polls = int(os.getenv('PUBLIC_STATUS_MAX_POLLS', '1200'))
     
-    recent_submissions = AuthorAuthEvent.objects.filter(
+    recent_polls = AuthorAuthEvent.objects.filter(
         remote_hash=rh,
-        detail__action='public_submit',
+        detail__action='public_status',
         occurred_at__gte=timezone.now() - timedelta(minutes=window_minutes)
     ).count()
-    if recent_submissions > max_submissions:
-        return JsonResponse({'detail': 'Too many public submissions. Try again later.', 'errors': ['Rate limited']}, status=429)
+    if recent_polls >= max_polls:
+        return JsonResponse({'detail': 'Too many status requests. Try again later.', 'errors': ['Rate limited']}, status=429)
+
+    AuthorAuthEvent.objects.create(
+        remote_hash=rh,
+        success=True,
+        detail={'action': 'public_status', 'submission_id': str(submission_id)}
+    )
 
     try:
         submission = Submission.objects.get(id=submission_id)
@@ -324,7 +330,7 @@ def submission_status(request, submission_id):
     else:
         return JsonResponse({
             'status': submission.status,
-            'error': submission.error
+            'error': 'Review processing failed. Please contact support.' if submission.error else None
         })
 
 
@@ -479,20 +485,20 @@ def admin_submissions(request):
 @require_GET
 @require_admin
 def admin_queue_health(request):
-    from django_q.models import OrmQ
+    from .models import ReviewJob
     from django.utils import timezone
     
-    jobs = OrmQ.objects.all().order_by('lock')
+    jobs = ReviewJob.objects.filter(status='queued').order_by('created_at')
     count = jobs.count()
-    oldest_age_seconds = 0
+    oldest_age_seconds = None
     
     if count > 0:
         oldest = jobs.first()
-        oldest_age_seconds = max(0, (timezone.now() - oldest.lock).total_seconds())
+        oldest_age_seconds = int(max(0, (timezone.now() - oldest.created_at).total_seconds()))
         
     response = JsonResponse({
-        'queued_job_count': count,
-        'oldest_queued_job_age_seconds': int(oldest_age_seconds)
+        'queued_jobs': count,
+        'oldest_job_age_seconds': oldest_age_seconds
     })
     response['Cache-Control'] = 'no-store'
     return response

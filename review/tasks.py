@@ -16,7 +16,9 @@ from .services.author_agents import (
 from .services.review_engine import run_review, extract_text, word_count as wc_fn
 from .services.email_service import send_review_emails
 from .views import _generate_chapter_summary, _format_chapter_editor_summary, _chapter_figure_count
+from .monitoring import capture_exception, capture_message, monitor_background_task
 
+@monitor_background_task('e2e_worker_probe')
 def run_e2e_worker_probe_task(job_id):
     """Small queued task used by the production E2E harness to prove qcluster is alive."""
     job = ReviewJob.objects.get(id=job_id)
@@ -28,6 +30,7 @@ def run_e2e_worker_probe_task(job_id):
     job.save(update_fields=['status', 'progress', 'completed_at', 'updated_at'])
 
 
+@monitor_background_task('public_review')
 def run_public_review_task(job_id, submission_id):
     job = ReviewJob.objects.get(id=job_id)
     job.status = 'processing'
@@ -150,6 +153,12 @@ def run_public_review_task(job_id, submission_id):
             submission.save(update_fields=['notification_status', 'notification_detail', 'notified_at', 'updated_at'])
             ReviewEvent.objects.create(submission=submission, event_type='notification_sent', detail=delivery['detail'])
         except Exception as email_error:
+            capture_exception(
+                email_error,
+                component='email',
+                operation='public_review_notification',
+                tags={'job_type': 'public_review'},
+            )
             email_warning = str(email_error)
             submission.notification_status = 'error'
             submission.notification_detail = {'error': email_warning}
@@ -162,6 +171,12 @@ def run_public_review_task(job_id, submission_id):
         job.save(update_fields=['status', 'completed_at', 'progress'])
 
     except Exception as error:
+        capture_exception(
+            error,
+            component='django_q',
+            operation='public_review',
+            tags={'job_type': 'public_review'},
+        )
         job.status = 'failed'
         job.error_message = str(error)
         job.completed_at = timezone.now()
@@ -174,9 +189,15 @@ def run_public_review_task(job_id, submission_id):
             submission.error = {'type': error.__class__.__name__, 'message': str(error)}
             submission.save(update_fields=['status', 'completed_at', 'error', 'updated_at'])
             ReviewEvent.objects.create(submission=submission, event_type='review_failed', detail=submission.error)
-        except Exception:
-            pass
+        except Exception as state_error:
+            capture_exception(
+                state_error,
+                component='django_q',
+                operation='public_review_failure_persistence',
+                tags={'job_type': 'public_review'},
+            )
 
+@monitor_background_task('semantic_readiness')
 def run_semantic_readiness_task(job_id, manuscript_id):
     job = ReviewJob.objects.get(id=job_id)
     job.status = 'processing'
@@ -191,11 +212,18 @@ def run_semantic_readiness_task(job_id, manuscript_id):
         job.progress = 100
         job.save(update_fields=['status', 'completed_at', 'progress'])
     except Exception as e:
+        capture_exception(
+            e,
+            component='django_q',
+            operation='semantic_readiness',
+            tags={'job_type': 'semantic_readiness'},
+        )
         job.status = 'failed'
         job.error_message = str(e)
         job.completed_at = timezone.now()
         job.save(update_fields=['status', 'error_message', 'completed_at'])
 
+@monitor_background_task('semantic_matching')
 def run_semantic_matching_task(job_id, manuscript_id, venue_ids=None):
     job = ReviewJob.objects.get(id=job_id)
     job.status = 'processing'
@@ -210,11 +238,18 @@ def run_semantic_matching_task(job_id, manuscript_id, venue_ids=None):
         job.progress = 100
         job.save(update_fields=['status', 'completed_at', 'progress'])
     except Exception as e:
+        capture_exception(
+            e,
+            component='django_q',
+            operation='semantic_matching',
+            tags={'job_type': 'semantic_matches'},
+        )
         job.status = 'failed'
         job.error_message = str(e)
         job.completed_at = timezone.now()
         job.save(update_fields=['status', 'error_message', 'completed_at'])
 
+@monitor_background_task('venue_assessment')
 def run_venue_assessment_task(job_id, submission_id):
     job = ReviewJob.objects.get(id=job_id)
     job.status = 'processing'
@@ -231,11 +266,18 @@ def run_venue_assessment_task(job_id, submission_id):
         job.progress = 100
         job.save(update_fields=['status', 'completed_at', 'progress'])
     except Exception as e:
+        capture_exception(
+            e,
+            component='django_q',
+            operation='venue_assessment',
+            tags={'job_type': 'venue_assessment'},
+        )
         job.status = 'failed'
         job.error_message = str(e)
         job.completed_at = timezone.now()
         job.save(update_fields=['status', 'error_message', 'completed_at'])
 
+@monitor_background_task('stuck_job_sweep')
 def sweep_stuck_jobs_task():
     now = timezone.now()
     processing_timeout_minutes = int(os.getenv('REVIEW_JOB_PROCESSING_TIMEOUT_MINUTES', '30'))
@@ -270,6 +312,15 @@ def sweep_stuck_jobs_task():
         if not updated:
             continue
         count += 1
+        capture_message(
+            'Background job timed out',
+            component='django_q',
+            operation='job_timeout',
+            tags={
+                'job_type': job.job_type,
+                'previous_status': previous_status,
+            },
+        )
 
         if job.job_type == 'public_review':
             try:
@@ -299,8 +350,13 @@ def sweep_stuck_jobs_task():
                     assessment.error = {'type': 'TimeoutError', 'message': message}
                     assessment.completed_at = now
                     assessment.save(update_fields=['status', 'error', 'completed_at'])
-            except Exception:
-                pass
+            except Exception as state_error:
+                capture_exception(
+                    state_error,
+                    component='django_q',
+                    operation='semantic_readiness_timeout_persistence',
+                    tags={'job_type': 'semantic_readiness'},
+                )
         elif job.job_type == 'semantic_matches':
             # VenueMatch rows may already contain valid results and have no
             # per-row execution status. Never destroy them because a parent job
@@ -309,6 +365,7 @@ def sweep_stuck_jobs_task():
 
     return f"Swept {count} stuck jobs."
 
+@monitor_background_task('retention_sweep')
 def sweep_retention_task():
     """Purge expired venue-scoped content and remove the shared manuscript payload once every venue copy has expired."""
     now = timezone.now()

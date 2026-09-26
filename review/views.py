@@ -100,7 +100,7 @@ def _generate_chapter_summary(text, filename='', word_count=0):
     # Chapter summaries are intentionally small and use a shorter context/output
     # budget than the full rubric review. This keeps ZIP uploads responsive on
     # 8 GB RAM development machines while preserving the existing response shape.
-    from .services.local_llm import ollama_chat_json
+    from .services.ai_provider import ai_chat_json
     prompt = (
         'Summarize this ZIP document/chapter using only the supplied text. '
         'Return JSON only with keys: "summary", "key_gaps", and "conclusion". '
@@ -110,11 +110,12 @@ def _generate_chapter_summary(text, filename='', word_count=0):
         + text[:12000]
     )
     try:
-        _, output = ollama_chat_json(
+        _, output = ai_chat_json(
             prompt,
             max_tokens=220,
             timeout=120,
-            num_ctx=4096,
+            force_provider='ollama',
+            operation='chapter_summary',
         )
         payload = json.loads(output)
         if isinstance(payload, dict):

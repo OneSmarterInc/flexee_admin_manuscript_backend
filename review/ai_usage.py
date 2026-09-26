@@ -6,7 +6,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import timedelta
 
 from django.db import transaction
-from django.db.models import Count, Sum
+from django.db.models import Count, Q, Sum
 from django.utils import timezone
 
 from .models import AIBudgetState, AIUsageEvent
@@ -290,13 +290,35 @@ def complete_ai_call(
     return event
 
 
-def fail_ai_call(event, exc):
+def fail_ai_call(
+    event,
+    exc,
+    *,
+    provider='unknown',
+    model='',
+    operation='ai_chat',
+    estimated_input_tokens=0,
+):
     if event is None:
-        return
+        return AIUsageEvent.objects.create(
+            provider=str(provider or 'unknown')[:40],
+            model=str(model or '')[:200],
+            operation=str(operation or 'ai_chat')[:100],
+            status='failed',
+            input_tokens=max(0, int(estimated_input_tokens or 0)),
+            output_tokens=0,
+            total_tokens=max(0, int(estimated_input_tokens or 0)),
+            estimated_max_cost_usd=ZERO,
+            actual_cost_usd=ZERO,
+            priced=pricing_for(provider, model)['priced'],
+            usage_estimated=True,
+            error_type=exc.__class__.__name__[:100],
+        )
     event.status = 'failed'
     event.error_type = exc.__class__.__name__[:100]
     event.actual_cost_usd = ZERO
     event.save(update_fields=['status', 'error_type', 'actual_cost_usd', 'updated_at'])
+    return event
 
 
 def _usage_aggregate(queryset):
@@ -339,6 +361,7 @@ def ai_usage_snapshot(*, now=None) -> dict:
             input_tokens=Sum('input_tokens'),
             output_tokens=Sum('output_tokens'),
             cost_usd=Sum('actual_cost_usd'),
+            unpriced_calls=Count('id', filter=Q(priced=False)),
         )
         .order_by('provider', 'model')
     ):
@@ -349,24 +372,47 @@ def ai_usage_snapshot(*, now=None) -> dict:
             'input_tokens': row['input_tokens'] or 0,
             'output_tokens': row['output_tokens'] or 0,
             'cost_usd': str(_money(row['cost_usd'] or ZERO)),
-            'priced': pricing_for(row['provider'], row['model'])['priced'],
+            'unpriced_calls': row['unpriced_calls'] or 0,
+            'currently_priced': pricing_for(row['provider'], row['model'])['priced'],
+        })
+
+    operation_rows = []
+    for row in (
+        completed.values('operation')
+        .annotate(
+            calls=Count('id'),
+            input_tokens=Sum('input_tokens'),
+            output_tokens=Sum('output_tokens'),
+            cost_usd=Sum('actual_cost_usd'),
+        )
+        .order_by('operation')
+    ):
+        operation_rows.append({
+            'operation': row['operation'],
+            'calls': row['calls'],
+            'input_tokens': row['input_tokens'] or 0,
+            'output_tokens': row['output_tokens'] or 0,
+            'cost_usd': str(_money(row['cost_usd'] or ZERO)),
         })
 
     daily_limit = limits['daily_cost_limit_usd']
     monthly_limit = limits['monthly_cost_limit_usd']
-    daily_cost = Decimal(today['cost_usd'])
-    monthly_cost = Decimal(month['cost_usd'])
+    reservation_cutoff = now - timedelta(minutes=limits['reservation_ttl_minutes'])
+    daily_committed = _committed_cost_since(day_start, reservation_cutoff)
+    monthly_committed = _committed_cost_since(month_start, reservation_cutoff)
 
     return {
         'generated_at': now.isoformat(),
         'cost_enforcement_enabled': limits['enabled'],
         'daily_cost_limit_usd': str(_money(daily_limit)),
         'monthly_cost_limit_usd': str(_money(monthly_limit)),
+        'daily_committed_cost_usd': str(daily_committed),
+        'monthly_committed_cost_usd': str(monthly_committed),
         'daily_remaining_usd': (
-            str(_money(max(ZERO, daily_limit - daily_cost))) if daily_limit > 0 else None
+            str(_money(max(ZERO, daily_limit - daily_committed))) if daily_limit > 0 else None
         ),
         'monthly_remaining_usd': (
-            str(_money(max(ZERO, monthly_limit - monthly_cost))) if monthly_limit > 0 else None
+            str(_money(max(ZERO, monthly_limit - monthly_committed))) if monthly_limit > 0 else None
         ),
         'today': today,
         'month': month,
@@ -377,5 +423,9 @@ def ai_usage_snapshot(*, now=None) -> dict:
         },
         'blocked_calls_total': AIUsageEvent.objects.filter(status='blocked').count(),
         'failed_calls_total': AIUsageEvent.objects.filter(status='failed').count(),
+        'unpriced_cloud_calls_total': completed.exclude(
+            provider__in=['ollama', 'mock']
+        ).filter(priced=False).count(),
         'by_provider_model': provider_rows,
+        'by_operation': operation_rows,
     }

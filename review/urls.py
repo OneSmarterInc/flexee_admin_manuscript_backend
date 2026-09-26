@@ -30,6 +30,8 @@ urlpatterns = [
     path('author/venues/', author_api.public_venues),
     path('author/venue-submissions/<uuid:submission_id>/', author_api.author_submission_detail),
     path('author/venue-submissions/<uuid:submission_id>/assessment/run/', author_api.author_run_venue_assessment),
+    path('author/venue-submissions/<uuid:submission_id>/requirements/', author_api.author_save_submission_requirements),
+    path('author/venue-submissions/<uuid:submission_id>/requirements/<str:requirement_key>/upload/', author_api.author_upload_submission_requirement),
     path('author/venue-submissions/<uuid:submission_id>/submit/', author_api.author_submit_packet),
     path('author/venue-submissions/<uuid:submission_id>/transfer/', author_api.author_transfer_submission),
 
@@ -61,6 +63,7 @@ urlpatterns = [
     path('admin/venue-submissions/<uuid:submission_id>/start-review/', editor_api.admin_start_venue_review),
     path('admin/venue-submissions/<uuid:submission_id>/decision/', editor_api.admin_venue_submission_decision),
     path('admin/venue-submissions/<uuid:submission_id>/download/', editor_api.admin_venue_submission_download),
+    path('admin/venue-submissions/<uuid:submission_id>/requirements/<str:requirement_key>/download/', editor_api.admin_submission_requirement_download),
 
     path('admin/smtp/', views.admin_smtp_settings),
     path('admin/smtp/test/', views.admin_smtp_test),

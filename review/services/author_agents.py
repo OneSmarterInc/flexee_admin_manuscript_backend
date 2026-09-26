@@ -10,6 +10,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from ..models import EvidenceFinding, ReadinessAssessment, Venue, VenueMatch, VenueSubmission
+from ..storage_security import validate_manuscript_zip
 from .field_agent import _extract_citations, _verify_citation_crossref
 from .ai_provider import ai_chat_json, ai_available
 from .review_engine import extract_text, word_count
@@ -111,6 +112,8 @@ def load_manuscript_text(manuscript):
     max_entries = _env_int('AUTHOR_ZIP_MAX_FILES', 40, minimum=1, maximum=200)
     parts = []
     total_uncompressed = 0
+
+    validate_manuscript_zip(content)
 
     try:
         archive = zipfile.ZipFile(BytesIO(content))

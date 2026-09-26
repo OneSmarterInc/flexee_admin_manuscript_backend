@@ -16,6 +16,17 @@ from .services.review_engine import run_review, extract_text, word_count as wc_f
 from .services.email_service import send_review_emails
 from .views import _generate_chapter_summary, _format_chapter_editor_summary, _chapter_figure_count
 
+def run_e2e_worker_probe_task(job_id):
+    """Small queued task used by the production E2E harness to prove qcluster is alive."""
+    job = ReviewJob.objects.get(id=job_id)
+    job.status = 'processing'
+    job.save(update_fields=['status', 'updated_at'])
+    job.status = 'completed'
+    job.progress = 100
+    job.completed_at = timezone.now()
+    job.save(update_fields=['status', 'progress', 'completed_at', 'updated_at'])
+
+
 def run_public_review_task(job_id, submission_id):
     job = ReviewJob.objects.get(id=job_id)
     job.status = 'processing'

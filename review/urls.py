@@ -34,6 +34,7 @@ urlpatterns = [
     path('author/venue-submissions/<uuid:submission_id>/requirements/<str:requirement_key>/upload/', author_api.author_upload_submission_requirement),
     path('author/venue-submissions/<uuid:submission_id>/submit/', author_api.author_submit_packet),
     path('author/venue-submissions/<uuid:submission_id>/transfer/', author_api.author_transfer_submission),
+    path('author/venue-submissions/<uuid:submission_id>/meca/', author_api.author_meca_transfer_package),
 
     path('admin/verify-password/', views.admin_verify_password),
     path('admin/login/', views.admin_login),

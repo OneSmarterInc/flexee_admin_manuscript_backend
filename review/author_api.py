@@ -41,6 +41,7 @@ from .models import (
 )
 from django_q.tasks import async_task
 from .services.review_engine import word_count
+from .services.field_agent import _extract_citations
 from .services.author_agents import (
     AgentExecutionError,
     AgentInputError,
@@ -66,6 +67,8 @@ ALLOWED_VENUE_TYPES = {value for value, _ in Venue.TYPE_CHOICES}
 ALLOWED_REQUIREMENT_TYPES = {'text', 'textarea', 'url', 'checkbox', 'file'}
 STRUCTURED_DESK_RULE_OPERATORS = {
     'word_count': {'>', '>=', '<', '<=', '==', '!='},
+    'reference_count': {'>', '>=', '<', '<=', '==', '!='},
+    'required_sections': {'missing_any', 'missing_all'},
     'manuscript_type': {'==', '!=', 'in', 'not_in'},
     'disclosure': {'contains', 'not_contains', 'empty', 'not_empty'},
 }
@@ -223,11 +226,21 @@ def _normalise_structured_desk_rules(value):
         rule_value = rule.get('value')
         if value_required and rule_value is None:
             raise ValueError(f'structured_desk_rejection_rules[{index}].value is required')
-        if field == 'word_count' and value_required:
+        if field in {'word_count', 'reference_count'} and value_required:
             try:
                 rule_value = int(rule_value)
             except (TypeError, ValueError):
                 raise ValueError(f'structured_desk_rejection_rules[{index}].value must be an integer')
+        if field == 'required_sections':
+            if not isinstance(rule_value, list) or not rule_value:
+                raise ValueError(
+                    f'structured_desk_rejection_rules[{index}].value must be a non-empty list of section names'
+                )
+            rule_value = [str(item).strip() for item in rule_value if str(item).strip()]
+            if not rule_value:
+                raise ValueError(
+                    f'structured_desk_rejection_rules[{index}].value must contain section names'
+                )
         if operator in {'in', 'not_in'}:
             if not isinstance(rule_value, list) or not rule_value:
                 raise ValueError(f'structured_desk_rejection_rules[{index}].value must be a non-empty list')
@@ -245,7 +258,39 @@ def _normalise_structured_desk_rules(value):
     return normalised
 
 
-def _structured_desk_rule_violations(manuscript, config, readiness):
+def _numeric_rule_triggered(actual, operator, expected):
+    return {
+        '>': actual > expected,
+        '>=': actual >= expected,
+        '<': actual < expected,
+        '<=': actual <= expected,
+        '==': actual == expected,
+        '!=': actual != expected,
+    }.get(operator, False)
+
+
+def _normalise_section_name(value):
+    return re.sub(r'[^a-z0-9]+', ' ', str(value or '').strip().lower()).strip()
+
+
+def _section_present(text, expected):
+    expected_normalised = _normalise_section_name(expected)
+    if not expected_normalised:
+        return False
+
+    for raw_line in str(text or '').splitlines():
+        line = raw_line.strip()
+        if not line or len(line) > 180:
+            continue
+        line = re.sub(r'^#{1,6}\s*', '', line)
+        line = re.sub(r'^\d+(?:\.\d+)*[.)]?\s*', '', line)
+        line = line.rstrip(':').strip()
+        if _normalise_section_name(line) == expected_normalised:
+            return True
+    return False
+
+
+def _structured_desk_rule_violations(manuscript, config, readiness, manuscript_text=None):
     rules = config.structured_desk_rejection_rules or []
     if not rules:
         return []
@@ -253,6 +298,17 @@ def _structured_desk_rule_violations(manuscript, config, readiness):
     word_total = None
     if readiness and isinstance(readiness.summary, dict):
         word_total = readiness.summary.get('word_count')
+
+    needs_text = any(
+        rule.get('field') in {'reference_count', 'required_sections'}
+        for rule in rules
+    )
+    if needs_text and manuscript_text is None:
+        manuscript_text = load_manuscript_text(manuscript)
+
+    reference_total = None
+    if needs_text:
+        reference_total, _ = _extract_citations(manuscript_text or '')
 
     violations = []
     for rule in rules:
@@ -268,14 +324,26 @@ def _structured_desk_rule_violations(manuscript, config, readiness):
                 continue
             actual = int(actual)
             expected = int(expected)
-            triggered = {
-                '>': actual > expected,
-                '>=': actual >= expected,
-                '<': actual < expected,
-                '<=': actual <= expected,
-                '==': actual == expected,
-                '!=': actual != expected,
-            }.get(operator, False)
+            triggered = _numeric_rule_triggered(actual, operator, expected)
+        elif field == 'reference_count':
+            actual = int(reference_total or 0)
+            expected = int(expected)
+            triggered = _numeric_rule_triggered(actual, operator, expected)
+        elif field == 'required_sections':
+            expected_sections = [str(item).strip() for item in expected or [] if str(item).strip()]
+            missing = [
+                section
+                for section in expected_sections
+                if not _section_present(manuscript_text or '', section)
+            ]
+            actual = {
+                'required': expected_sections,
+                'missing': missing,
+            }
+            if operator == 'missing_any':
+                triggered = bool(missing)
+            elif operator == 'missing_all':
+                triggered = bool(expected_sections) and len(missing) == len(expected_sections)
         elif field == 'manuscript_type':
             actual = manuscript.manuscript_type
             if operator == '==':
@@ -994,8 +1062,19 @@ def author_generate_matches(request, manuscript_id):
         return JsonResponse({'detail': 'Resolve blocking readiness issues before generating venue matches'}, status=409)
 
     generated = []
-    for venue in Venue.objects.filter(active=True).select_related('organization'):
-        config = _active_config(venue)
+    venues = list(Venue.objects.filter(active=True).select_related('organization'))
+    venue_configs = {venue.id: _active_config(venue) for venue in venues}
+    needs_text_rules = any(
+        config and any(
+            rule.get('field') in {'reference_count', 'required_sections'}
+            for rule in (config.structured_desk_rejection_rules or [])
+        )
+        for config in venue_configs.values()
+    )
+    manuscript_text = load_manuscript_text(manuscript) if needs_text_rules else None
+
+    for venue in venues:
+        config = venue_configs.get(venue.id)
         reasons = []
         gaps = []
         evidence = []
@@ -1038,6 +1117,7 @@ def author_generate_matches(request, manuscript_id):
                 manuscript,
                 config,
                 latest_readiness,
+                manuscript_text=manuscript_text,
             )
             if desk_violations:
                 eligibility = 'ineligible'

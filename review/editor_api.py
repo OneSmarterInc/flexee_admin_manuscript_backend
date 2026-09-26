@@ -8,7 +8,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
 from .auth import check_org_access, require_admin
-from .models import EditorFeedback, Venue, VenueAgentConfig, VenueSubmission
+from .models import EditorFeedback, SubmissionRequirementFile, Venue, VenueAgentConfig, VenueSubmission
 from .services.email_service import send_acceptance_email, send_rejection_email, _send
 from .author_api import _active_config, _json_body, _submission_payload, _venue_config_payload, _venue_payload
 
@@ -219,7 +219,7 @@ def admin_venue_submission_detail(request, submission_id):
     try:
         item = VenueSubmission.objects.select_related(
             'manuscript', 'venue', 'venue__organization', 'venue_config'
-        ).prefetch_related('evidence_findings', 'editor_feedback').get(id=submission_id)
+        ).prefetch_related('evidence_findings', 'editor_feedback', 'requirement_files').get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
     if not check_org_access(request.editor_user, item.venue.organization_id, ['owner', 'editor', 'viewer']):
@@ -325,6 +325,36 @@ def admin_venue_submission_decision(request, submission_id):
             pass
 
     return JsonResponse({'submission': _editor_submission_payload(item)})
+
+
+@require_GET
+@require_admin
+def admin_submission_requirement_download(request, submission_id, requirement_key):
+    try:
+        item = VenueSubmission.objects.select_related('venue').get(id=submission_id)
+    except VenueSubmission.DoesNotExist:
+        return JsonResponse({'detail': 'Venue submission not found'}, status=404)
+
+    if not check_org_access(request.editor_user, item.venue.organization_id, ['owner', 'editor', 'viewer']):
+        return JsonResponse({'detail': 'Forbidden'}, status=403)
+
+    try:
+        row = SubmissionRequirementFile.objects.get(
+            venue_submission=item,
+            requirement_key=requirement_key,
+        )
+    except SubmissionRequirementFile.DoesNotExist:
+        return JsonResponse({'detail': 'Requirement file not found'}, status=404)
+
+    try:
+        row.file.open('rb')
+        return FileResponse(
+            row.file,
+            as_attachment=True,
+            filename=row.original_filename,
+        )
+    except (FileNotFoundError, OSError):
+        return JsonResponse({'detail': 'Requirement file is unavailable'}, status=404)
 
 
 @require_GET

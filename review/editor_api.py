@@ -2,7 +2,7 @@ import json
 
 from django.db import transaction
 from django.db.models import Q
-from django.http import FileResponse, JsonResponse
+from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST

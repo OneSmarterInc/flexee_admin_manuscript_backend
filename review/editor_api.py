@@ -8,8 +8,9 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
 from .auth import check_org_access, require_admin
-from .models import EditorFeedback, SubmissionRequirementFile, Venue, VenueAgentConfig, VenueSubmission
+from .models import AuditEvent, EditorFeedback, SubmissionRequirementFile, Venue, VenueAgentConfig, VenueSubmission
 from .services.email_service import send_acceptance_email, send_rejection_email, _send
+from .audit import audit_event_payload, record_audit_event
 from .author_api import _active_config, _json_body, _submission_payload, _venue_config_payload, _venue_payload
 
 
@@ -117,6 +118,15 @@ def admin_venue_detail(request, venue_id):
     if 'active' in data:
         venue.active = bool(data.get('active'))
     venue.save()
+    record_audit_event(
+        request,
+        'venue.updated',
+        resource_type='venue',
+        resource_id=venue.id,
+        organization_id=venue.organization_id,
+        venue_id=venue.id,
+        detail={'changed_fields': sorted([key for key in data.keys() if key in {'name', 'venue_type', 'description', 'active'}])},
+    )
     return JsonResponse({'venue': _venue_payload(venue)})
 
 
@@ -160,6 +170,15 @@ def admin_activate_venue_config(request, venue_id, config_id):
     if not config.active:
         config.active = True
         config.save(update_fields=['active'])
+    record_audit_event(
+        request,
+        'venue_config.activated',
+        resource_type='venue_config',
+        resource_id=config.id,
+        organization_id=venue.organization_id,
+        venue_id=venue.id,
+        detail={'version': config.version},
+    )
     return JsonResponse({
         'venue': _venue_payload(venue, include_config=False),
         'config': _venue_config_payload(config),
@@ -229,6 +248,17 @@ def admin_venue_submission_detail(request, submission_id):
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
     if not check_org_access(request.editor_user, item.venue.organization_id, ['owner', 'editor', 'viewer']):
         return JsonResponse({'detail': 'Forbidden'}, status=403)
+    record_audit_event(
+        request,
+        'venue_submission.viewed',
+        resource_type='venue_submission',
+        resource_id=item.id,
+        organization_id=item.venue.organization_id,
+        venue_id=item.venue_id,
+        venue_submission_id=item.id,
+        manuscript_id=item.manuscript_id,
+        detail={'status': item.status},
+    )
     return JsonResponse({'submission': _editor_submission_payload(item, detail=True)})
 
 
@@ -249,9 +279,21 @@ def admin_start_venue_review(request, submission_id):
             {'detail': f'Cannot start editorial review from status {item.status}'},
             status=409,
         )
+    previous_status = item.status
     if item.status != 'under_review':
         item.status = 'under_review'
         item.save(update_fields=['status', 'updated_at'])
+    record_audit_event(
+        request,
+        'venue_submission.review_started',
+        resource_type='venue_submission',
+        resource_id=item.id,
+        organization_id=item.venue.organization_id,
+        venue_id=item.venue_id,
+        venue_submission_id=item.id,
+        manuscript_id=item.manuscript_id,
+        detail={'previous_status': previous_status, 'status': item.status},
+    )
     return JsonResponse({'submission': _editor_submission_payload(item)})
 
 
@@ -293,6 +335,17 @@ def admin_venue_submission_decision(request, submission_id):
         'human_decision': True,
     }
     item.save(update_fields=['status', 'decision', 'updated_at'])
+    record_audit_event(
+        request,
+        'venue_submission.decision_recorded',
+        resource_type='venue_submission',
+        resource_id=item.id,
+        organization_id=item.venue.organization_id,
+        venue_id=item.venue_id,
+        venue_submission_id=item.id,
+        manuscript_id=item.manuscript_id,
+        detail={'decision': decision, 'note_present': bool(note)},
+    )
 
     # ── Email notification to author ──────────────────────────────────────────
     # Build a lightweight adapter so we can reuse the existing email service
@@ -355,6 +408,17 @@ def admin_submission_requirement_download(request, submission_id, requirement_ke
 
     try:
         row.file.open('rb')
+        record_audit_event(
+            request,
+            'venue_submission.requirement_downloaded',
+            resource_type='submission_requirement_file',
+            resource_id=row.id,
+            organization_id=item.venue.organization_id,
+            venue_id=item.venue_id,
+            venue_submission_id=item.id,
+            manuscript_id=item.manuscript_id,
+            detail={'requirement_key': requirement_key, 'filename': row.original_filename},
+        )
         return FileResponse(
             row.file,
             as_attachment=True,
@@ -382,6 +446,17 @@ def admin_venue_submission_download(request, submission_id):
         return JsonResponse({'detail': 'Manuscript content has been purged'}, status=410)
     try:
         manuscript.manuscript_file.open('rb')
+        record_audit_event(
+            request,
+            'venue_submission.manuscript_downloaded',
+            resource_type='venue_submission',
+            resource_id=item.id,
+            organization_id=item.venue.organization_id,
+            venue_id=item.venue_id,
+            venue_submission_id=item.id,
+            manuscript_id=manuscript.id,
+            detail={'filename': manuscript.manuscript_filename},
+        )
         response = FileResponse(
             manuscript.manuscript_file,
             as_attachment=True,
@@ -390,3 +465,53 @@ def admin_venue_submission_download(request, submission_id):
         return response
     except (FileNotFoundError, OSError):
         return JsonResponse({'detail': 'Manuscript file is unavailable'}, status=404)
+
+@require_GET
+@require_admin
+def admin_audit_events(request):
+    queryset = AuditEvent.objects.all()
+    user = request.editor_user
+
+    if not user.platform_superuser:
+        org_ids = list(user.memberships.values_list('organization_id', flat=True))
+        queryset = queryset.filter(organization_id__in=org_ids)
+
+    organization_id = str(request.GET.get('organization_id', '')).strip()
+    venue_id = str(request.GET.get('venue_id', '')).strip()
+    submission_id = str(request.GET.get('submission_id', '')).strip()
+    action = str(request.GET.get('action', '')).strip()
+    actor = str(request.GET.get('actor', '')).strip()
+    query = str(request.GET.get('q', '')).strip()
+
+    if organization_id:
+        queryset = queryset.filter(organization_id=organization_id)
+    if venue_id:
+        queryset = queryset.filter(venue_id=venue_id)
+    if submission_id:
+        queryset = queryset.filter(venue_submission_id=submission_id)
+    if action:
+        queryset = queryset.filter(action=action)
+    if actor:
+        queryset = queryset.filter(actor_email__iexact=actor)
+    if query:
+        queryset = queryset.filter(
+            Q(actor_email__icontains=query)
+            | Q(actor_role__icontains=query)
+            | Q(action__icontains=query)
+            | Q(resource_type__icontains=query)
+            | Q(resource_id__icontains=query)
+        )
+
+    try:
+        limit = int(request.GET.get('limit', '200'))
+    except (TypeError, ValueError):
+        limit = 200
+    limit = max(1, min(limit, 500))
+
+    total = queryset.count()
+    events = list(queryset.order_by('-occurred_at', '-id')[:limit])
+    return JsonResponse({
+        'total': total,
+        'events': [audit_event_payload(event) for event in events],
+    })
+

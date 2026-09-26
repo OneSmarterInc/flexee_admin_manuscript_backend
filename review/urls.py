@@ -58,6 +58,7 @@ urlpatterns = [
     path('admin/venues/<uuid:venue_id>/feedback/', author_api.admin_editor_feedback),
 
     # Venue editor workspace.
+    path('admin/audit-events/', editor_api.admin_audit_events),
     path('admin/venue-submissions/', editor_api.admin_venue_submissions),
     path('admin/venue-submissions/<uuid:submission_id>/', editor_api.admin_venue_submission_detail),
     path('admin/venue-submissions/<uuid:submission_id>/start-review/', editor_api.admin_start_venue_review),

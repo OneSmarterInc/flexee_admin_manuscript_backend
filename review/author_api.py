@@ -51,6 +51,7 @@ from .services.author_agents import (
     run_venue_assessment,
 )
 from .services.email_service import _send as _send_email
+from .audit import record_audit_event
 
 
 ALLOWED_MANUSCRIPT_TYPES = {value for value, _ in Manuscript.TYPE_CHOICES}
@@ -1555,6 +1556,15 @@ def admin_venues(request):
         description=str(data.get('description', '')).strip(),
         active=bool(data.get('active', True)),
     )
+    record_audit_event(
+        request,
+        'venue.created',
+        resource_type='venue',
+        resource_id=venue.id,
+        organization_id=venue.organization_id,
+        venue_id=venue.id,
+        detail={'name': venue.name, 'venue_type': venue.venue_type},
+    )
     return JsonResponse({'venue': _venue_payload(venue)}, status=201)
 
 
@@ -1622,6 +1632,20 @@ def admin_venue_config(request, venue_id):
             config_notes=str(data.get('config_notes', '')).strip(),
         )
         venue.agent_configs.filter(active=True).exclude(id=config.id).update(active=False)
+        record_audit_event(
+            request,
+            'venue_config.created',
+            resource_type='venue_config',
+            resource_id=config.id,
+            organization_id=venue.organization_id,
+            venue_id=venue.id,
+            detail={
+                'version': config.version,
+                'retention_days': config.retention_days,
+                'structured_rule_count': len(config.structured_desk_rejection_rules or []),
+                'required_item_count': len(config.required_submission_items or []),
+            },
+        )
 
     return JsonResponse({
         'venue': _venue_payload(venue, include_config=False),
@@ -1660,6 +1684,17 @@ def admin_editor_feedback(request, venue_id):
         agent_value=data.get('agent_value'),
         editor_value=data.get('editor_value'),
         reason=str(data.get('reason', '')).strip(),
+    )
+    record_audit_event(
+        request,
+        'venue_submission.feedback_recorded',
+        resource_type='editor_feedback',
+        resource_id=feedback.id,
+        organization_id=venue.organization_id,
+        venue_id=venue.id,
+        venue_submission_id=submission.id if submission else None,
+        manuscript_id=submission.manuscript_id if submission else None,
+        detail={'assessment_field': feedback.assessment_field},
     )
     return JsonResponse({
         'feedback': {

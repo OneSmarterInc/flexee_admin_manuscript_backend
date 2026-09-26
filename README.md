@@ -112,3 +112,23 @@ Keep `python manage.py qcluster` running. The retention sweep removes expired ve
 
 For large installations, `RETENTION_SWEEP_BATCH_SIZE` controls the maximum expired submissions processed per hourly sweep (default 200).
 
+## Production audit trail
+
+The admin/editor workflow records append-only `AuditEvent` rows for manuscript/submission views, manuscript and requirement-file downloads, review starts, editor feedback, human decisions, venue creation/metadata changes, Venue Agent configuration creation/activation, legacy platform submission actions, SMTP configuration changes, and retention purges.
+
+Audit records snapshot the editor/admin email and organization role at the time of the action. The request source is stored only as a keyed hash; raw IP addresses are not written to the audit table.
+
+The protected endpoint is:
+
+```
+GET /api/admin/audit-events/
+```
+
+Organization users are automatically scoped to organizations in their memberships. Platform superusers can see platform-wide and unscoped events. The frontend exposes the same data under **Admin → Audit Log**.
+
+After pulling this change, apply the migration:
+
+```powershell
+python manage.py migrate
+```
+

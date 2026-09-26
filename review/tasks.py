@@ -5,7 +5,7 @@ import os
 import zipfile
 import concurrent.futures
 from io import BytesIO
-from .models import ReviewJob, Manuscript, VenueSubmission, Submission, ReviewEvent
+from .models import AuditEvent, ReviewJob, Manuscript, VenueSubmission, Submission, ReviewEvent
 from .services.author_agents import (
     run_semantic_readiness,
     run_semantic_matching,
@@ -331,7 +331,7 @@ def sweep_retention_task():
             try:
                 submission = (
                     VenueSubmission.objects.select_for_update()
-                    .select_related('manuscript', 'venue_config')
+                    .select_related('manuscript', 'venue', 'venue_config')
                     .get(id=submission_id)
                 )
             except VenueSubmission.DoesNotExist:
@@ -366,6 +366,17 @@ def sweep_retention_task():
                     'updated_at',
                 ]
             )
+            AuditEvent.objects.create(
+                actor_role='system',
+                action='venue_submission.retention_purged',
+                resource_type='venue_submission',
+                resource_id=str(submission.id),
+                organization_id=submission.venue.organization_id,
+                venue_id=submission.venue_id,
+                venue_submission_id=submission.id,
+                manuscript_id=submission.manuscript_id,
+                detail={'retention_expires_at': submission.retention_expires_at.isoformat()},
+            )
             purged_submissions += 1
 
             manuscript = Manuscript.objects.select_for_update().get(id=submission.manuscript_id)
@@ -396,6 +407,14 @@ def sweep_retention_task():
             )
             manuscript.readiness_assessments.all().delete()
             manuscript.venue_matches.all().delete()
+            AuditEvent.objects.create(
+                actor_role='system',
+                action='manuscript.retention_purged',
+                resource_type='manuscript',
+                resource_id=str(manuscript.id),
+                manuscript_id=manuscript.id,
+                detail={'reason': 'all venue submission retention windows expired'},
+            )
             purged_manuscripts += 1
 
     return (

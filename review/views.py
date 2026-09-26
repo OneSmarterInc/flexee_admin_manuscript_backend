@@ -23,6 +23,7 @@ from .services.review_engine import run_review
 from .audit import record_audit_event
 from .monitoring import capture_exception
 from .queue_health import queue_health_snapshot
+from .ai_usage import ai_usage_snapshot
 
 
 def _clean_summary_text(value, limit=700):
@@ -505,6 +506,14 @@ def admin_submissions(request):
 @require_platform_superuser
 def admin_queue_health(request):
     response = JsonResponse(queue_health_snapshot())
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
+@require_GET
+@require_platform_superuser
+def admin_ai_usage(request):
+    response = JsonResponse(ai_usage_snapshot())
     response['Cache-Control'] = 'no-store'
     return response
 

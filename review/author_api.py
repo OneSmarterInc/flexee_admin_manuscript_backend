@@ -58,6 +58,7 @@ from .storage_security import (
     validate_manuscript_filename,
     validate_manuscript_zip,
 )
+from .storage_quota import StorageQuotaExceeded, storage_quota_guard
 
 
 ALLOWED_MANUSCRIPT_TYPES = {value for value, _ in Manuscript.TYPE_CHOICES}
@@ -508,16 +509,14 @@ def _submission_payload(item):
 
 
 @require_POST
+@require_author
 def author_manuscripts(request):
-    author = None
-    session = read_author_session(request)
-    if session and session.get('aid'):
-        try:
-            author = Author.objects.get(id=session['aid'])
-        except Author.DoesNotExist:
-            pass
+    try:
+        author = Author.objects.get(id=request.flexee_author['aid'])
+    except Author.DoesNotExist:
+        return JsonResponse({'detail': 'Author account not found'}, status=401)
 
-    if author and not author.email_verified:
+    if not author.email_verified:
         return JsonResponse({'detail': 'Email verification required before upload'}, status=403)
 
     max_bytes = int(os.getenv('MAX_MANUSCRIPT_BYTES', str(20 * 1024 * 1024)))
@@ -568,24 +567,28 @@ def author_manuscripts(request):
     digest = hashlib.sha256(content).hexdigest()
     access_token = secrets.token_urlsafe(32)
 
-    item = Manuscript.objects.create(
-        author_account=author,
-        author_name=author_name,
-        author_email=author_email,
-        coauthors=request.POST.get('coauthors', '').strip(),
-        title=title,
-        manuscript_type=manuscript_type,
-        abstract=request.POST.get('abstract', '').strip(),
-        keywords=_clean_keywords(request.POST.get('keywords', '')),
-        disclosure=disclosure,
-        notes=request.POST.get('notes', '').strip(),
-        attestation=True,
-        manuscript_filename=safe_upload_name,
-        manuscript_file=upload,
-        manuscript_bytes=len(content),
-        manuscript_sha256=digest,
-        access_token_hash=_hash_author_token(access_token),
-    )
+    try:
+        with storage_quota_guard(author=author, incoming_bytes=len(content)):
+            item = Manuscript.objects.create(
+                author_account=author,
+                author_name=author_name,
+                author_email=author_email,
+                coauthors=request.POST.get('coauthors', '').strip(),
+                title=title,
+                manuscript_type=manuscript_type,
+                abstract=request.POST.get('abstract', '').strip(),
+                keywords=_clean_keywords(request.POST.get('keywords', '')),
+                disclosure=disclosure,
+                notes=request.POST.get('notes', '').strip(),
+                attestation=True,
+                manuscript_filename=safe_upload_name,
+                manuscript_file=upload,
+                manuscript_bytes=len(content),
+                manuscript_sha256=digest,
+                access_token_hash=_hash_author_token(access_token),
+            )
+    except StorageQuotaExceeded as exc:
+        return JsonResponse(exc.payload(), status=413)
     return JsonResponse({
         'manuscript': _manuscript_payload(item),
         'access_token': access_token,
@@ -1349,19 +1352,30 @@ def author_upload_submission_requirement(request, submission_id, requirement_key
         venue_submission=item,
         requirement_key=requirement_key,
     ).first()
-    if existing and existing.file:
-        existing.file.delete(save=False)
+    replacing_bytes = int(existing.file_bytes or 0) if existing else 0
+    quota_author = item.manuscript.author_account
 
-    row, _ = SubmissionRequirementFile.objects.update_or_create(
-        venue_submission=item,
-        requirement_key=requirement_key,
-        defaults={
-            'original_filename': original_filename[:500],
-            'file': uploaded,
-            'file_bytes': uploaded.size,
-            'file_sha256': digest.hexdigest(),
-        },
-    )
+    try:
+        with storage_quota_guard(
+            author=quota_author,
+            incoming_bytes=uploaded.size,
+            replacing_bytes=replacing_bytes,
+        ):
+            if existing and existing.file:
+                existing.file.delete(save=False)
+
+            row, _ = SubmissionRequirementFile.objects.update_or_create(
+                venue_submission=item,
+                requirement_key=requirement_key,
+                defaults={
+                    'original_filename': original_filename[:500],
+                    'file': uploaded,
+                    'file_bytes': uploaded.size,
+                    'file_sha256': digest.hexdigest(),
+                },
+            )
+    except StorageQuotaExceeded as exc:
+        return JsonResponse(exc.payload(), status=413)
 
     item = VenueSubmission.objects.select_related(
         'manuscript', 'venue', 'venue_config'

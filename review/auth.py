@@ -14,6 +14,12 @@ AUTHOR_COOKIE_NAME = 'flxee_author_session'
 UNSAFE_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}
 
 
+def _secure_cookie_required():
+    if os.getenv('DJANGO_ENV', 'development').strip().lower() == 'production':
+        return True
+    return os.getenv('COOKIE_SECURE', 'false').lower() in {'1', 'true', 'yes', 'on'}
+
+
 def allowed_frontend_origins():
     """Return browser origins accepted by both CORS and unsafe admin checks.
 
@@ -134,7 +140,7 @@ def read_session(request):
 
 
 def set_session_cookie(response, token, max_age):
-    secure = os.getenv('COOKIE_SECURE', 'false').lower() in {'1', 'true', 'yes', 'on'}
+    secure = _secure_cookie_required()
     response.set_cookie(
         COOKIE_NAME,
         token,

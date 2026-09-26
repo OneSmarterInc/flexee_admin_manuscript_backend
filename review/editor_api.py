@@ -4,7 +4,6 @@ from django.db import transaction
 from django.db.models import Q
 from django.http import JsonResponse
 from django.utils import timezone
-from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
 from .auth import check_org_access, require_admin
@@ -87,7 +86,6 @@ def _editor_submission_payload(item, *, detail=False):
     return payload
 
 
-@csrf_exempt
 @require_admin
 def admin_venue_detail(request, venue_id):
     try:
@@ -152,7 +150,6 @@ def admin_venue_configs(request, venue_id):
     })
 
 
-@csrf_exempt
 @require_POST
 @require_admin
 @transaction.atomic
@@ -264,7 +261,6 @@ def admin_venue_submission_detail(request, submission_id):
     return JsonResponse({'submission': _editor_submission_payload(item, detail=True)})
 
 
-@csrf_exempt
 @require_POST
 @require_admin
 def admin_start_venue_review(request, submission_id):
@@ -299,7 +295,6 @@ def admin_start_venue_review(request, submission_id):
     return JsonResponse({'submission': _editor_submission_payload(item)})
 
 
-@csrf_exempt
 @require_POST
 @require_admin
 def admin_venue_submission_decision(request, submission_id):

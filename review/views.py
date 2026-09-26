@@ -20,6 +20,7 @@ from .auth import (
 from .models import AdminAuthEvent, ReviewEvent, Submission, SMTPSettings
 from .services.email_service import send_review_emails, send_acceptance_email, send_rejection_email
 from .services.review_engine import run_review
+from .audit import record_audit_event
 
 
 def _clean_summary_text(value, limit=700):
@@ -552,6 +553,13 @@ def admin_submission_detail(request, submission_id):
             for event in item.events.all()
         ],
     })
+    record_audit_event(
+        request,
+        'legacy_submission.viewed',
+        resource_type='legacy_submission',
+        resource_id=submission_id,
+        detail={'status': item.status, 'title': item.title},
+    )
     response = JsonResponse(data)
     response['Cache-Control'] = 'no-store'
     return response
@@ -576,6 +584,13 @@ def admin_submission_accept(request, submission_id):
     submission.acceptance_message = message
     submission.save(update_fields=['admin_decision', 'acceptance_message', 'updated_at'])
     ReviewEvent.objects.create(submission=submission, event_type='admin_accepted', detail={'message': message})
+    record_audit_event(
+        request,
+        'legacy_submission.decision_recorded',
+        resource_type='legacy_submission',
+        resource_id=submission.id,
+        detail={'decision': 'ACCEPTED', 'message_present': bool(message)},
+    )
 
     email_warning = None
     try:
@@ -616,6 +631,13 @@ def admin_submission_reject(request, submission_id):
     submission.rejection_reason = reason
     submission.save(update_fields=['admin_decision', 'rejection_reason', 'updated_at'])
     ReviewEvent.objects.create(submission=submission, event_type='admin_rejected', detail={'reason': reason})
+    record_audit_event(
+        request,
+        'legacy_submission.decision_recorded',
+        resource_type='legacy_submission',
+        resource_id=submission.id,
+        detail={'decision': 'REJECTED', 'reason_present': bool(reason)},
+    )
 
     email_warning = None
     try:
@@ -641,6 +663,13 @@ def admin_submission_reject(request, submission_id):
 def admin_submission_delete(request, submission_id):
     try:
         submission = Submission.objects.get(id=submission_id)
+        record_audit_event(
+            request,
+            'legacy_submission.deleted',
+            resource_type='legacy_submission',
+            resource_id=submission.id,
+            detail={'title': submission.title},
+        )
         submission.delete()
         return JsonResponse({'ok': True})
     except Submission.DoesNotExist:
@@ -678,6 +707,13 @@ def admin_submission_send_email(request, submission_id):
         submission.save(update_fields=['notification_status', 'notification_detail', 'updated_at'])
         ReviewEvent.objects.create(submission=submission, event_type='custom_email_error', detail={'error': email_warning})
 
+    record_audit_event(
+        request,
+        'legacy_submission.email_sent',
+        resource_type='legacy_submission',
+        resource_id=submission.id,
+        detail={'subject': subject, 'delivery_warning': bool(email_warning)},
+    )
     return JsonResponse({'ok': True, 'email_warning': email_warning})
 
 
@@ -698,8 +734,16 @@ def admin_submission_download(request, submission_id):
         elif submission.manuscript_filename.lower().endswith('.zip'):
             content_type = 'application/zip'
 
+        file_handle = submission.manuscript_file.open('rb')
+        record_audit_event(
+            request,
+            'legacy_submission.manuscript_downloaded',
+            resource_type='legacy_submission',
+            resource_id=submission.id,
+            detail={'filename': submission.manuscript_filename},
+        )
         return FileResponse(
-            submission.manuscript_file.open('rb'),
+            file_handle,
             content_type=content_type,
             as_attachment=False, # Set to False so it opens in the browser if possible
             filename=submission.manuscript_filename
@@ -738,6 +782,18 @@ def admin_smtp_settings(request):
             smtp.use_ssl = bool(body.get('use_ssl', smtp.use_ssl))
             smtp.admin_notification_emails = body.get('admin_notification_emails', smtp.admin_notification_emails)
             smtp.save()
+            record_audit_event(
+                request,
+                'smtp.updated',
+                resource_type='smtp_settings',
+                resource_id=smtp.id,
+                detail={
+                    'host': smtp.host,
+                    'port': smtp.port,
+                    'username_present': bool(smtp.username),
+                    'password_changed': bool('password' in body and str(body.get('password', '')).strip()),
+                },
+            )
             return JsonResponse({'ok': True})
         except Exception as e:
             return JsonResponse({'error': str(e)}, status=400)

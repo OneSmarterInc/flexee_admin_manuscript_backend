@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Flexee production backup daily
+
+[Timer]
+OnCalendar=*-*-* 02:15:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=flexee-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -22,3 +22,5 @@ htmlcov/
 *.log
 logs/
 production_e2e_*.json
+backups/
+*.pre-restore-*

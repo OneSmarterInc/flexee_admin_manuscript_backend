@@ -1,0 +1,16 @@
+[Unit]
+Description=Flexee Production Backup
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/flexee/flexee_admin_manuscript_backend
+EnvironmentFile=/var/www/flexee/flexee_admin_manuscript_backend/.env
+ExecStart=/var/www/flexee/flexee_admin_manuscript_backend/.venv/bin/python manage.py backup_production
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true

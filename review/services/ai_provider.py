@@ -130,6 +130,15 @@ def _tracked_call(provider, prompt, *, max_tokens, timeout, operation):
         ANTHROPIC_SYSTEM + '\n' + prompt if provider == 'anthropic' else prompt
     )
     estimated_input_tokens = estimate_prompt_tokens(prompt_for_estimate)
+    if provider == 'anthropic':
+        # Reserve against a conservative upper bound before the billable call.
+        # Token count cannot exceed the number of UTF-8 bytes represented by
+        # the prompt, so this intentionally over-reserves and releases the
+        # difference when provider usage is finalized.
+        estimated_input_tokens = max(
+            estimated_input_tokens,
+            len(prompt_for_estimate.encode('utf-8')),
+        )
     event = reserve_ai_call(
         provider=provider,
         model=model_hint,

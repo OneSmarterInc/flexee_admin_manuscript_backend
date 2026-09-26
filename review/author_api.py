@@ -4,6 +4,7 @@ import json
 import os
 import re
 import secrets
+from datetime import timedelta
 from django.db import IntegrityError, transaction
 from django.http import JsonResponse
 from django.utils import timezone
@@ -374,6 +375,7 @@ def _manuscript_payload(item):
         'manuscript_bytes': item.manuscript_bytes,
         'manuscript_sha256': item.manuscript_sha256,
         'parsed_profile': item.parsed_profile,
+        'content_purged_at': item.content_purged_at.isoformat() if item.content_purged_at else None,
         'latest_readiness': _readiness_payload(latest_readiness) if latest_readiness else None,
     }
 
@@ -398,6 +400,7 @@ def _venue_config_payload(config):
         'desk_rejection_rules': config.desk_rejection_rules,
         'structured_desk_rejection_rules': config.structured_desk_rejection_rules,
         'required_submission_items': config.required_submission_items,
+        'retention_days': config.retention_days,
         'deadlines': config.deadlines,
         'submission_capacity': config.submission_capacity,
         'current_demand': config.current_demand,
@@ -470,6 +473,8 @@ def _submission_payload(item):
         'packet': item.packet,
         'editorial_brief': item.editorial_brief,
         'decision': item.decision,
+        'retention_expires_at': item.retention_expires_at.isoformat() if item.retention_expires_at else None,
+        'retention_purged_at': item.retention_purged_at.isoformat() if item.retention_purged_at else None,
         'requirements': _submission_requirements_payload(item),
         'evidence': [
             {
@@ -1376,9 +1381,16 @@ def author_submit_packet(request, submission_id):
             status=409,
         )
 
+    submitted_at = timezone.now()
     item.status = 'submitted'
-    item.submitted_at = timezone.now()
-    item.save(update_fields=['status', 'submitted_at', 'updated_at'])
+    item.submitted_at = submitted_at
+    retention_days = item.venue_config.retention_days if item.venue_config_id else None
+    item.retention_expires_at = (
+        submitted_at + timedelta(days=retention_days)
+        if retention_days
+        else None
+    )
+    item.save(update_fields=['status', 'submitted_at', 'retention_expires_at', 'updated_at'])
 
     # ── Confirmation email to author ────────────────────────────────────────────
     manuscript = item.manuscript
@@ -1566,7 +1578,14 @@ def admin_venue_config(request, venue_id):
         structured_desk_rejection_rules = _normalise_structured_desk_rules(
             data.get('structured_desk_rejection_rules', [])
         )
-    except ValueError as exc:
+        raw_retention_days = data.get('retention_days')
+        if raw_retention_days in (None, ''):
+            retention_days = None
+        else:
+            retention_days = int(raw_retention_days)
+            if retention_days < 1 or retention_days > 3650:
+                raise ValueError('retention_days must be between 1 and 3650 days, or blank to disable automatic expiry')
+    except (TypeError, ValueError) as exc:
         return JsonResponse({'detail': str(exc)}, status=400)
 
     with transaction.atomic():
@@ -1588,6 +1607,7 @@ def admin_venue_config(request, venue_id):
             desk_rejection_rules=_json_list(data.get('desk_rejection_rules')),
             structured_desk_rejection_rules=structured_desk_rejection_rules,
             required_submission_items=required_submission_items,
+            retention_days=retention_days,
             deadlines=data.get('deadlines') if isinstance(data.get('deadlines'), dict) else {},
             submission_capacity=data.get('submission_capacity') if isinstance(data.get('submission_capacity'), dict) else {},
             current_demand=data.get('current_demand') if isinstance(data.get('current_demand'), dict) else {},

@@ -458,3 +458,10 @@ class ReviewJob(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['job_type', 'reference_id'],
+                condition=models.Q(status__in=['queued', 'processing']),
+                name='review_unique_active_job',
+            ),
+        ]

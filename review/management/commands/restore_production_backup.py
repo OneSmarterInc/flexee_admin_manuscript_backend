@@ -21,6 +21,7 @@ from review.backup_utils import (
     verify_sqlite,
 )
 from review.models import AuditEvent
+from review.monitoring import capture_exception
 
 
 class Command(BaseCommand):
@@ -224,6 +225,12 @@ class Command(BaseCommand):
                 self.stdout.write(f'Restore report: {report_path}')
 
         except Exception as exc:
+            capture_exception(
+                exc,
+                component='operations',
+                operation='production_restore',
+                tags={'backup_vendor': backup_vendor},
+            )
             if staged_media is not None:
                 shutil.rmtree(staged_media, ignore_errors=True)
             try:

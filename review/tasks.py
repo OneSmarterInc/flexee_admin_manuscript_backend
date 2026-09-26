@@ -1,3 +1,4 @@
+from django.db import transaction
 from django.utils import timezone
 from datetime import timedelta
 import os
@@ -307,3 +308,98 @@ def sweep_stuck_jobs_task():
             pass
 
     return f"Swept {count} stuck jobs."
+
+def sweep_retention_task():
+    """Purge expired venue-scoped content and remove the shared manuscript payload once every venue copy has expired."""
+    now = timezone.now()
+    batch_size = max(1, min(int(os.getenv('RETENTION_SWEEP_BATCH_SIZE', '200')), 2000))
+    candidate_ids = list(
+        VenueSubmission.objects.filter(
+            retention_purged_at__isnull=True,
+            retention_expires_at__isnull=False,
+            retention_expires_at__lte=now,
+        )
+        .order_by('retention_expires_at')
+        .values_list('id', flat=True)[:batch_size]
+    )
+
+    purged_submissions = 0
+    purged_manuscripts = 0
+
+    for submission_id in candidate_ids:
+        with transaction.atomic():
+            try:
+                submission = (
+                    VenueSubmission.objects.select_for_update()
+                    .select_related('manuscript', 'venue_config')
+                    .get(id=submission_id)
+                )
+            except VenueSubmission.DoesNotExist:
+                continue
+
+            if (
+                submission.retention_purged_at
+                or not submission.retention_expires_at
+                or submission.retention_expires_at > now
+            ):
+                continue
+
+            for row in submission.requirement_files.all():
+                if row.file:
+                    row.file.delete(save=False)
+            submission.requirement_files.all().delete()
+            submission.evidence_findings.all().delete()
+
+            previous_packet = submission.packet if isinstance(submission.packet, dict) else {}
+            submission.packet = {
+                'retention_purged': True,
+                'retention_purged_at': now.isoformat(),
+                'venue_config_version': previous_packet.get('venue_config_version'),
+            }
+            submission.editorial_brief = {}
+            submission.retention_purged_at = now
+            submission.save(
+                update_fields=[
+                    'packet',
+                    'editorial_brief',
+                    'retention_purged_at',
+                    'updated_at',
+                ]
+            )
+            purged_submissions += 1
+
+            manuscript = Manuscript.objects.select_for_update().get(id=submission.manuscript_id)
+            has_retained_copy = manuscript.venue_submissions.filter(
+                retention_purged_at__isnull=True
+            ).exists()
+            if has_retained_copy or manuscript.content_purged_at:
+                continue
+
+            if manuscript.manuscript_file:
+                manuscript.manuscript_file.delete(save=False)
+            manuscript.manuscript_file = ''
+            manuscript.manuscript_bytes = 0
+            manuscript.parsed_profile = {}
+            manuscript.abstract = ''
+            manuscript.notes = ''
+            manuscript.content_purged_at = now
+            manuscript.save(
+                update_fields=[
+                    'manuscript_file',
+                    'manuscript_bytes',
+                    'parsed_profile',
+                    'abstract',
+                    'notes',
+                    'content_purged_at',
+                    'updated_at',
+                ]
+            )
+            manuscript.readiness_assessments.all().delete()
+            manuscript.venue_matches.all().delete()
+            purged_manuscripts += 1
+
+    return (
+        f'Purged {purged_submissions} expired venue submission(s) and '
+        f'{purged_manuscripts} fully expired manuscript payload(s).'
+    )
+

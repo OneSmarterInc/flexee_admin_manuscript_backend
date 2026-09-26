@@ -223,6 +223,11 @@ class VenueAgentConfig(models.Model):
     desk_rejection_rules = models.JSONField(default=list, blank=True)
     structured_desk_rejection_rules = models.JSONField(default=list, blank=True)
     required_submission_items = models.JSONField(default=list, blank=True)
+    retention_days = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text='Days to retain venue submission content after formal submission. Blank disables automatic expiry.',
+    )
     deadlines = models.JSONField(default=dict, blank=True)
     submission_capacity = models.JSONField(default=dict, blank=True)
     current_demand = models.JSONField(default=dict, blank=True)
@@ -272,6 +277,7 @@ class Manuscript(models.Model):
     manuscript_sha256 = models.CharField(max_length=64, db_index=True)
     access_token_hash = models.CharField(max_length=64, blank=True, db_index=True)
     parsed_profile = models.JSONField(default=dict, blank=True)
+    content_purged_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-created_at']
@@ -365,6 +371,8 @@ class VenueSubmission(models.Model):
     packet = models.JSONField(default=dict, blank=True)
     editorial_brief = models.JSONField(default=dict, blank=True)
     decision = models.JSONField(default=dict, blank=True)
+    retention_expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    retention_purged_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
     class Meta:
         ordering = ['-created_at']

@@ -98,3 +98,17 @@ python manage.py production_e2e --manuscript "C:\path\to\five-zero-book.zip" --a
 
 Use the same book again with `AI_PROVIDER=anthropic` to compare wall-clock timings. The current AI-provider abstraction does not persist token usage/cost, so the JSON report marks cost as not instrumented; record the provider billing separately for the run.
 
+## Per-venue content retention
+
+Venue Agent configurations can set an optional `retention_days` value. Blank means the venue does not automatically expire content. When an author formally submits a packet, the active configuration's retention window is snapshotted onto that `VenueSubmission`, so later configuration changes do not rewrite historical retention dates.
+
+Install the hourly Django-Q retention schedule after migrations:
+
+```powershell
+python manage.py install_retention_schedule
+```
+
+Keep `python manage.py qcluster` running. The retention sweep removes expired venue-specific packet/brief/evidence/requirement-file content. The shared manuscript file and semantic/readiness artifacts are removed only after every venue submission for that manuscript has been purged; an unexpired or no-expiry venue copy prevents premature deletion. Human editorial decision/status metadata is preserved.
+
+For large installations, `RETENTION_SWEEP_BATCH_SIZE` controls the maximum expired submissions processed per hourly sweep (default 200).
+

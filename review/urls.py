@@ -12,6 +12,7 @@ urlpatterns = [
     # Author scholarly-network workflow.
     path('author/register/', author_api.author_register),
     path('author/verify-email/', author_api.author_verify_email),
+    path('author/resend-verification/', author_api.author_resend_verification),
     path('author/login/', author_api.author_login),
     path('author/logout/', author_api.author_logout),
     path('author/session/', author_api.author_session),

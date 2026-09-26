@@ -4,7 +4,7 @@ import json
 import os
 import re
 import secrets
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.http import JsonResponse
 from django.utils import timezone
 from django.utils.text import slugify
@@ -20,7 +20,8 @@ from .auth import (
     read_author_session,
     hash_password,
     verify_password,
-    remote_hash
+    remote_hash,
+    check_org_access,
 )
 from .models import (
     Author,
@@ -52,6 +53,39 @@ from .services.email_service import _send as _send_email
 
 ALLOWED_MANUSCRIPT_TYPES = {value for value, _ in Manuscript.TYPE_CHOICES}
 ALLOWED_VENUE_TYPES = {value for value, _ in Venue.TYPE_CHOICES}
+
+
+def _queue_unique_job(job_type, reference_id, task_path, *task_args):
+    """Create at most one queued/processing job for a logical operation."""
+    reference_id = str(reference_id)
+    try:
+        with transaction.atomic():
+            existing = ReviewJob.objects.filter(
+                job_type=job_type,
+                reference_id=reference_id,
+                status__in=['queued', 'processing'],
+            ).order_by('-created_at').first()
+            if existing:
+                return existing, False
+            job = ReviewJob.objects.create(
+                job_type=job_type,
+                reference_id=reference_id,
+                status='queued',
+            )
+    except IntegrityError:
+        # The partial unique constraint closes the race between the lookup and
+        # create. Query after leaving the failed savepoint/transaction.
+        existing = ReviewJob.objects.filter(
+            job_type=job_type,
+            reference_id=reference_id,
+            status__in=['queued', 'processing'],
+        ).order_by('-created_at').first()
+        if existing is None:
+            raise
+        return existing, False
+
+    transaction.on_commit(lambda: async_task(task_path, job.id, *task_args))
+    return job, True
 
 
 def _hash_author_token(token):
@@ -311,6 +345,18 @@ def author_manuscripts(request):
         'access_token': access_token,
     }, status=201)
 
+def _send_author_verification(request, author):
+    from django.core.signing import dumps
+
+    token = dumps({'author_id': str(author.id)})
+    verify_url = request.build_absolute_uri(f'/api/author/verify-email/?token={token}')
+    _send_email(
+        to=author.email,
+        subject='Verify your author account',
+        body=f'Please verify your email by clicking: {verify_url}',
+    )
+
+
 @csrf_exempt
 @require_POST
 def author_register(request):
@@ -346,20 +392,24 @@ def author_register(request):
     )
     AuthorAuthEvent.objects.create(remote_hash=rh, success=True, detail={'action': 'register', 'email': email})
 
-    from django.core.signing import dumps
-    token = dumps({'author_id': str(author.id)})
-    verify_url = request.build_absolute_uri(f'/api/author/verify-email?token={token}')
+    verification_email_sent = True
     try:
-        _send_email(
-            to=email,
-            subject='Verify your author account',
-            body=f'Please verify your email by clicking: {verify_url}'
-        )
-    except Exception as e:
-        print(f"Failed to send verification email to {email}: {e}")
+        _send_author_verification(request, author)
+    except Exception:
+        verification_email_sent = False
 
     token, max_age = issue_author_session(author.id)
-    response = JsonResponse({'id': str(author.id), 'email': author.email, 'name': author.name}, status=201)
+    response = JsonResponse({
+        'id': str(author.id),
+        'email': author.email,
+        'name': author.name,
+        'email_verified': author.email_verified,
+        'verification_email_sent': verification_email_sent,
+        'verification_warning': (
+            None if verification_email_sent
+            else 'Your account was created, but the verification email could not be sent. You can resend it from your author workspace.'
+        ),
+    }, status=201)
     set_author_session_cookie(response, token, max_age)
     return response
 
@@ -398,7 +448,12 @@ def author_login(request):
     AuthorAuthEvent.objects.create(remote_hash=rh, success=True, detail={'email': email, 'reason': 'ok', 'action': 'login'})
 
     token, max_age = issue_author_session(author.id)
-    response = JsonResponse({'id': str(author.id), 'email': author.email, 'name': author.name})
+    response = JsonResponse({
+        'id': str(author.id),
+        'email': author.email,
+        'name': author.name,
+        'email_verified': author.email_verified,
+    })
     set_author_session_cookie(response, token, max_age)
     return response
 
@@ -428,6 +483,48 @@ def author_verify_email(request):
         return JsonResponse({'detail': 'Invalid or expired token'}, status=400)
 
 
+@csrf_exempt
+@require_POST
+@require_author
+def author_resend_verification(request):
+    try:
+        author = Author.objects.get(id=request.flexee_author['aid'])
+    except Author.DoesNotExist:
+        return JsonResponse({'detail': 'Author not found'}, status=404)
+
+    if author.email_verified:
+        return JsonResponse({'ok': True, 'email_verified': True, 'detail': 'Email is already verified.'})
+
+    from datetime import timedelta
+    rh = remote_hash(request)
+    window_minutes = int(os.getenv('AUTHOR_VERIFY_RESEND_WINDOW_MINUTES', '15'))
+    max_attempts = int(os.getenv('AUTHOR_VERIFY_RESEND_MAX', '3'))
+    recent = AuthorAuthEvent.objects.filter(
+        remote_hash=rh,
+        detail__action='resend_verification',
+        occurred_at__gte=timezone.now() - timedelta(minutes=window_minutes),
+    ).count()
+    if recent >= max_attempts:
+        return JsonResponse({'detail': 'Too many verification email requests. Try again later.'}, status=429)
+
+    try:
+        _send_author_verification(request, author)
+    except Exception:
+        AuthorAuthEvent.objects.create(
+            remote_hash=rh,
+            success=False,
+            detail={'action': 'resend_verification', 'author_id': str(author.id)},
+        )
+        return JsonResponse({'detail': 'Verification email could not be sent. Please try again later.'}, status=503)
+
+    AuthorAuthEvent.objects.create(
+        remote_hash=rh,
+        success=True,
+        detail={'action': 'resend_verification', 'author_id': str(author.id)},
+    )
+    return JsonResponse({'ok': True, 'email_verified': False, 'detail': 'Verification email sent.'})
+
+
 @require_GET
 def author_session(request):
     session = read_author_session(request)
@@ -441,7 +538,12 @@ def author_session(request):
         clear_author_session_cookie(response)
         return response
 
-    return JsonResponse({'id': str(author.id), 'email': author.email, 'name': author.name})
+    return JsonResponse({
+        'id': str(author.id),
+        'email': author.email,
+        'name': author.name,
+        'email_verified': author.email_verified,
+    })
 
 @require_GET
 @require_author
@@ -577,14 +679,14 @@ def author_run_semantic_readiness(request, manuscript_id):
     if access_error:
         return access_error
 
-    job = ReviewJob.objects.create(
-        job_type='semantic_readiness',
-        reference_id=str(manuscript.id),
-        status='queued'
+    job, _ = _queue_unique_job(
+        'semantic_readiness',
+        manuscript.id,
+        'review.tasks.run_semantic_readiness_task',
+        manuscript.id,
     )
-    async_task('review.tasks.run_semantic_readiness_task', job.id, manuscript.id)
 
-    return JsonResponse({'job_id': str(job.id), 'status': 'queued'}, status=202)
+    return JsonResponse({'job_id': str(job.id), 'status': job.status}, status=202)
 
 
 @require_GET
@@ -723,14 +825,15 @@ def author_run_semantic_matches(request, manuscript_id):
     if venue_ids is not None and not isinstance(venue_ids, list):
         return JsonResponse({'detail': 'venue_ids must be a JSON list when provided'}, status=400)
 
-    job = ReviewJob.objects.create(
-        job_type='semantic_matches',
-        reference_id=str(manuscript.id),
-        status='queued'
+    job, _ = _queue_unique_job(
+        'semantic_matches',
+        manuscript.id,
+        'review.tasks.run_semantic_matching_task',
+        manuscript.id,
+        venue_ids,
     )
-    async_task('review.tasks.run_semantic_matching_task', job.id, manuscript.id, venue_ids)
 
-    return JsonResponse({'job_id': str(job.id), 'status': 'queued'}, status=202)
+    return JsonResponse({'job_id': str(job.id), 'status': job.status}, status=202)
 
 
 @require_GET
@@ -812,14 +915,14 @@ def author_run_venue_assessment(request, submission_id):
     except Exception:
         pass
 
-    job = ReviewJob.objects.create(
-        job_type='venue_assessment',
-        reference_id=str(submission.id),
-        status='queued'
+    job, _ = _queue_unique_job(
+        'venue_assessment',
+        submission.id,
+        'review.tasks.run_venue_assessment_task',
+        submission.id,
     )
-    async_task('review.tasks.run_venue_assessment_task', job.id, submission.id)
 
-    return JsonResponse({'job_id': str(job.id), 'status': 'queued'}, status=202)
+    return JsonResponse({'job_id': str(job.id), 'status': job.status}, status=202)
 
 
 @require_GET
@@ -943,6 +1046,9 @@ def author_transfer_submission(request, submission_id):
 def admin_venues(request):
     if request.method == 'GET':
         items = Venue.objects.select_related('organization').all()
+        if not request.editor_user.platform_superuser:
+            org_ids = request.editor_user.memberships.values_list('organization_id', flat=True)
+            items = items.filter(organization_id__in=org_ids)
         return JsonResponse({'venues': [_venue_payload(item) for item in items]})
     if request.method != 'POST':
         return JsonResponse({'detail': 'Method not allowed'}, status=405)
@@ -957,16 +1063,25 @@ def admin_venues(request):
 
     organization = None
     organization_id = data.get('organization_id')
+    organization_name = str(data.get('organization_name', '')).strip()
     if organization_id:
         try:
             organization = Organization.objects.get(id=organization_id)
         except (Organization.DoesNotExist, ValueError):
             return JsonResponse({'detail': 'Organization not found'}, status=404)
-    elif str(data.get('organization_name', '')).strip():
+        if not check_org_access(request.editor_user, organization.id, ['owner']):
+            return JsonResponse({'detail': 'Forbidden'}, status=403)
+    elif organization_name:
+        # Creating a new tenant is a platform operation. Authorize before the
+        # insert so a rejected request cannot leave an orphan Organization row.
+        if not request.editor_user.platform_superuser:
+            return JsonResponse({'detail': 'Forbidden'}, status=403)
         organization = Organization.objects.create(
-            name=str(data.get('organization_name')).strip(),
+            name=organization_name,
             organization_type=str(data.get('organization_type', 'other')).strip() or 'other',
         )
+    elif not request.editor_user.platform_superuser:
+        return JsonResponse({'detail': 'organization_id is required'}, status=400)
 
     base_slug = slugify(str(data.get('slug', '')).strip() or name)[:160] or 'venue'
     candidate = base_slug
@@ -995,36 +1110,42 @@ def admin_venue_config(request, venue_id):
         return JsonResponse({'detail': 'Venue not found'}, status=404)
 
     if request.method == 'GET':
+        if not check_org_access(request.editor_user, venue.organization_id, ['owner', 'editor', 'viewer']):
+            return JsonResponse({'detail': 'Forbidden'}, status=403)
         config = _active_config(venue)
         if not config:
             return JsonResponse({'detail': 'No venue agent configuration exists'}, status=404)
         return JsonResponse({'venue': _venue_payload(venue, include_config=False), 'config': _venue_config_payload(config)})
     if request.method != 'POST':
         return JsonResponse({'detail': 'Method not allowed'}, status=405)
+    if not check_org_access(request.editor_user, venue.organization_id, ['owner']):
+        return JsonResponse({'detail': 'Forbidden'}, status=403)
 
     data = _json_body(request)
-    current = venue.agent_configs.order_by('-version').first()
-    next_version = (current.version + 1) if current else 1
+    with transaction.atomic():
+        venue = Venue.objects.select_for_update().get(id=venue.id)
+        current = venue.agent_configs.order_by('-version').first()
+        next_version = (current.version + 1) if current else 1
+        config = VenueAgentConfig.objects.create(
+            venue=venue,
+            version=next_version,
+            active=True,
+            aims_scope=str(data.get('aims_scope', '')).strip(),
+            article_types=_json_list(data.get('article_types')),
+            accepted_methods=_json_list(data.get('accepted_methods')),
+            quality_threshold=str(data.get('quality_threshold', '')).strip(),
+            reviewer_criteria=_json_list(data.get('reviewer_criteria')),
+            policies=data.get('policies') if isinstance(data.get('policies'), dict) else {},
+            disclosures=_json_list(data.get('disclosures')),
+            reporting_standards=_json_list(data.get('reporting_standards')),
+            desk_rejection_rules=_json_list(data.get('desk_rejection_rules')),
+            deadlines=data.get('deadlines') if isinstance(data.get('deadlines'), dict) else {},
+            submission_capacity=data.get('submission_capacity') if isinstance(data.get('submission_capacity'), dict) else {},
+            current_demand=data.get('current_demand') if isinstance(data.get('current_demand'), dict) else {},
+            config_notes=str(data.get('config_notes', '')).strip(),
+        )
+        venue.agent_configs.filter(active=True).exclude(id=config.id).update(active=False)
 
-    venue.agent_configs.filter(active=True).update(active=False)
-    config = VenueAgentConfig.objects.create(
-        venue=venue,
-        version=next_version,
-        active=True,
-        aims_scope=str(data.get('aims_scope', '')).strip(),
-        article_types=_json_list(data.get('article_types')),
-        accepted_methods=_json_list(data.get('accepted_methods')),
-        quality_threshold=str(data.get('quality_threshold', '')).strip(),
-        reviewer_criteria=_json_list(data.get('reviewer_criteria')),
-        policies=data.get('policies') if isinstance(data.get('policies'), dict) else {},
-        disclosures=_json_list(data.get('disclosures')),
-        reporting_standards=_json_list(data.get('reporting_standards')),
-        desk_rejection_rules=_json_list(data.get('desk_rejection_rules')),
-        deadlines=data.get('deadlines') if isinstance(data.get('deadlines'), dict) else {},
-        submission_capacity=data.get('submission_capacity') if isinstance(data.get('submission_capacity'), dict) else {},
-        current_demand=data.get('current_demand') if isinstance(data.get('current_demand'), dict) else {},
-        config_notes=str(data.get('config_notes', '')).strip(),
-    )
     return JsonResponse({
         'venue': _venue_payload(venue, include_config=False),
         'config': _venue_config_payload(config),
@@ -1039,6 +1160,8 @@ def admin_editor_feedback(request, venue_id):
         venue = Venue.objects.get(id=venue_id)
     except Venue.DoesNotExist:
         return JsonResponse({'detail': 'Venue not found'}, status=404)
+    if not check_org_access(request.editor_user, venue.organization_id, ['owner', 'editor']):
+        return JsonResponse({'detail': 'Forbidden'}, status=403)
 
     data = _json_body(request)
     field = str(data.get('assessment_field', '')).strip()
@@ -1085,24 +1208,36 @@ def author_job_status(request, job_id):
     if job.job_type in ('semantic_readiness', 'semantic_matches'):
         try:
             item = Manuscript.objects.get(id=job.reference_id)
-            access_error = _author_access_error(request, item)
-            if access_error:
-                return access_error
         except Manuscript.DoesNotExist:
-            pass
+            return JsonResponse({'detail': 'Job not found'}, status=404)
+        access_error = _author_access_error(request, item)
+        if access_error:
+            return access_error
     elif job.job_type == 'venue_assessment':
         try:
-            item = VenueSubmission.objects.get(id=job.reference_id)
-            access_error = _author_access_error(request, item.manuscript)
-            if access_error:
-                return access_error
+            item = VenueSubmission.objects.select_related('manuscript').get(id=job.reference_id)
         except VenueSubmission.DoesNotExist:
-            pass
+            return JsonResponse({'detail': 'Job not found'}, status=404)
+        access_error = _author_access_error(request, item.manuscript)
+        if access_error:
+            return access_error
+    else:
+        # Public-review jobs have their own UUID-based status endpoint and must
+        # not be exposed through the author job-number endpoint.
+        return JsonResponse({'detail': 'Job not found'}, status=404)
+
+    public_error = None
+    if job.status == 'failed':
+        public_error = (
+            'Background processing timed out. Please try again.'
+            if 'timed out' in str(job.error_message or '').lower()
+            else 'The background job could not be completed. Please try again.'
+        )
 
     return JsonResponse({
         'id': str(job.id),
         'status': job.status,
         'progress': job.progress,
         'result_reference': job.reference_id,
-        'error': job.error_message
+        'error': public_error,
     })

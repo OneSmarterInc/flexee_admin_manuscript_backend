@@ -9,7 +9,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
-from .auth import require_admin
+from .auth import require_platform_superuser
 from .models import ReviewEvent, Submission
 from .services.review_engine import extract_text, word_count
 
@@ -128,7 +128,7 @@ Manuscript text:
 
 @csrf_exempt
 @require_POST
-@require_admin
+@require_platform_superuser
 def admin_submission_api_summary(request, submission_id):
     try:
         submission = Submission.objects.get(id=submission_id)

@@ -1064,6 +1064,10 @@ def run_venue_assessment(submission):
         'external_reference_check': citations,
         'analysis_coverage': profile.get('coverage', {}),
         'human_decision_required': True,
+        'decision_authority': (
+            'This brief is advisory. The agent does not accept, reject, or desk-reject '
+            'a manuscript. Every editorial decision is made by a human editor at the venue.'
+        ),
     }
 
     risks = data.get('unresolved_risks') if isinstance(data.get('unresolved_risks'), list) else []

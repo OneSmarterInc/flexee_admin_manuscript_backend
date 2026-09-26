@@ -11,6 +11,23 @@ from django.http import JsonResponse
 
 COOKIE_NAME = 'flxee_admin_session'
 AUTHOR_COOKIE_NAME = 'flxee_author_session'
+UNSAFE_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}
+
+
+def allowed_frontend_origins():
+    """Return browser origins accepted by both CORS and unsafe admin checks.
+
+    FRONTEND_ORIGINS is the canonical setting. ADMIN_ALLOWED_ORIGINS is merged
+    for backward compatibility with older deployments so the two protections
+    cannot silently disagree.
+    """
+    raw_frontend = os.getenv(
+        'FRONTEND_ORIGINS',
+        'http://localhost:5173,http://127.0.0.1:5173',
+    )
+    raw_legacy_admin = os.getenv('ADMIN_ALLOWED_ORIGINS', '')
+    values = f'{raw_frontend},{raw_legacy_admin}'
+    return {origin.strip() for origin in values.split(',') if origin.strip()}
 
 def _b64u(data):
     return base64.urlsafe_b64encode(data).decode('ascii').rstrip('=')
@@ -136,10 +153,9 @@ def clear_session_cookie(response):
 def require_admin(view):
     @wraps(view)
     def wrapped(request, *args, **kwargs):
-        if request.method == 'POST':
+        if request.method in UNSAFE_METHODS:
             origin = request.headers.get('Origin')
-            allowed = [o.strip() for o in os.getenv('ADMIN_ALLOWED_ORIGINS', 'http://localhost:5173').split(',') if o.strip()]
-            if origin not in allowed and os.getenv("TEST_BYPASS_ORIGIN") != "1":
+            if origin not in allowed_frontend_origins() and os.getenv('TEST_BYPASS_ORIGIN') != '1':
                 return JsonResponse({'detail': 'Untrusted Origin'}, status=403)
 
         session = read_session(request)
@@ -153,6 +169,30 @@ def require_admin(view):
             
         request.flexee_admin = session
         request.editor_user = user
+        return view(request, *args, **kwargs)
+    return wrapped
+
+
+def check_org_access(user, organization_id, required_roles=None):
+    """Return whether an editor may access an organization-scoped resource."""
+    if user.platform_superuser:
+        return True
+    if not organization_id:
+        return False
+    roles = required_roles or ['owner', 'editor', 'viewer']
+    return user.memberships.filter(
+        organization_id=organization_id,
+        role__in=roles,
+    ).exists()
+
+
+def require_platform_superuser(view):
+    """Require an authenticated platform superuser for global admin actions."""
+    @require_admin
+    @wraps(view)
+    def wrapped(request, *args, **kwargs):
+        if not request.editor_user.platform_superuser:
+            return JsonResponse({'detail': 'Forbidden'}, status=403)
         return view(request, *args, **kwargs)
     return wrapped
 

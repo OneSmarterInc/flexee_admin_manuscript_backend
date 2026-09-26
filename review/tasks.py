@@ -19,7 +19,7 @@ from .views import _generate_chapter_summary, _format_chapter_editor_summary, _c
 def run_public_review_task(job_id, submission_id):
     job = ReviewJob.objects.get(id=job_id)
     job.status = 'processing'
-    job.save(update_fields=['status'])
+    job.save(update_fields=['status', 'updated_at'])
     
     try:
         submission = Submission.objects.get(id=submission_id)
@@ -168,7 +168,7 @@ def run_public_review_task(job_id, submission_id):
 def run_semantic_readiness_task(job_id, manuscript_id):
     job = ReviewJob.objects.get(id=job_id)
     job.status = 'processing'
-    job.save(update_fields=['status'])
+    job.save(update_fields=['status', 'updated_at'])
     
     try:
         manuscript = Manuscript.objects.get(id=manuscript_id)
@@ -187,7 +187,7 @@ def run_semantic_readiness_task(job_id, manuscript_id):
 def run_semantic_matching_task(job_id, manuscript_id, venue_ids=None):
     job = ReviewJob.objects.get(id=job_id)
     job.status = 'processing'
-    job.save(update_fields=['status'])
+    job.save(update_fields=['status', 'updated_at'])
     
     try:
         manuscript = Manuscript.objects.get(id=manuscript_id)
@@ -206,7 +206,7 @@ def run_semantic_matching_task(job_id, manuscript_id, venue_ids=None):
 def run_venue_assessment_task(job_id, submission_id):
     job = ReviewJob.objects.get(id=job_id)
     job.status = 'processing'
-    job.save(update_fields=['status'])
+    job.save(update_fields=['status', 'updated_at'])
     
     try:
         submission = VenueSubmission.objects.select_related(
@@ -225,52 +225,74 @@ def run_venue_assessment_task(job_id, submission_id):
         job.save(update_fields=['status', 'error_message', 'completed_at'])
 
 def sweep_stuck_jobs_task():
-    cutoff = timezone.now() - timedelta(minutes=30)
-    stuck_jobs = ReviewJob.objects.filter(status='processing', updated_at__lt=cutoff)
+    now = timezone.now()
+    processing_timeout_minutes = int(os.getenv('REVIEW_JOB_PROCESSING_TIMEOUT_MINUTES', '30'))
+    queue_timeout_minutes = int(os.getenv('REVIEW_JOB_QUEUE_TIMEOUT_MINUTES', '10'))
+    processing_cutoff = now - timedelta(minutes=processing_timeout_minutes)
+    queued_cutoff = now - timedelta(minutes=queue_timeout_minutes)
+
+    candidates = list(
+        ReviewJob.objects.filter(status='processing', updated_at__lt=processing_cutoff)
+    ) + list(
+        ReviewJob.objects.filter(status='queued', created_at__lt=queued_cutoff)
+    )
     count = 0
-    
-    for job in stuck_jobs:
-        job.status = 'failed'
-        job.error_message = 'Job timed out after 30 minutes.'
-        job.completed_at = timezone.now()
-        job.save(update_fields=['status', 'error_message', 'completed_at'])
+
+    for job in candidates:
+        previous_status = job.status
+        if previous_status == 'queued':
+            message = f'Job did not start within the {queue_timeout_minutes}-minute queue timeout.'
+        else:
+            message = f'Job timed out after {processing_timeout_minutes} minutes.'
+
+        # Do not overwrite a job that completed or changed state after the
+        # candidate query. This makes the sweeper safe against worker races.
+        updated = ReviewJob.objects.filter(
+            id=job.id,
+            status=previous_status,
+        ).update(
+            status='failed',
+            error_message=message,
+            completed_at=now,
+        )
+        if not updated:
+            continue
         count += 1
-        
+
         if job.job_type == 'public_review':
             try:
                 submission = Submission.objects.get(id=job.reference_id)
-                submission.status = 'failed'
-                submission.error = {'type': 'TimeoutError', 'message': 'Job timed out after 30 minutes.'}
-                submission.completed_at = timezone.now()
-                submission.save(update_fields=['status', 'error', 'completed_at', 'updated_at'])
+                if submission.status == 'processing':
+                    submission.status = 'failed'
+                    submission.error = {'type': 'TimeoutError', 'message': message}
+                    submission.completed_at = now
+                    submission.save(update_fields=['status', 'error', 'completed_at', 'updated_at'])
             except Submission.DoesNotExist:
                 pass
         elif job.job_type == 'venue_assessment':
-            try:
-                submission = VenueSubmission.objects.get(id=job.reference_id)
-                submission.status = 'failed'
-                submission.error_message = 'Job timed out after 30 minutes.'
-                submission.completed_at = timezone.now()
-                submission.save(update_fields=['status', 'error_message', 'completed_at'])
-            except VenueSubmission.DoesNotExist:
-                pass
+            # VenueSubmission.status models the editorial workflow and has no
+            # failed/error/completed fields. The ReviewJob is the authoritative
+            # place to record assessment execution failure; leave the draft
+            # submission intact so the author can retry safely.
+            pass
         elif job.job_type == 'semantic_readiness':
             try:
                 from .models import ReadinessAssessment
-                assessment = ReadinessAssessment.objects.filter(manuscript_id=job.reference_id, status='pending').first()
+                assessment = ReadinessAssessment.objects.filter(
+                    manuscript_id=job.reference_id,
+                    status='pending',
+                ).first()
                 if assessment:
                     assessment.status = 'failed'
-                    assessment.error = {'type': 'TimeoutError', 'message': 'Job timed out after 30 minutes.'}
-                    assessment.completed_at = timezone.now()
+                    assessment.error = {'type': 'TimeoutError', 'message': message}
+                    assessment.completed_at = now
                     assessment.save(update_fields=['status', 'error', 'completed_at'])
             except Exception:
                 pass
         elif job.job_type == 'semantic_matches':
-            # VenueMatch rows can already contain valid deterministic or semantic
-            # results and have no per-row processing status. A manuscript-level
-            # timeout therefore cannot safely identify which row should be changed.
-            # The ReviewJob is already marked failed above, which is the correct
-            # place to record this timeout.
+            # VenueMatch rows may already contain valid results and have no
+            # per-row execution status. Never destroy them because a parent job
+            # timed out.
             pass
 
     return f"Swept {count} stuck jobs."

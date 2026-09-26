@@ -7,7 +7,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
-from .auth import require_admin
+from .auth import check_org_access, require_admin
 from .models import EditorFeedback, Venue, VenueAgentConfig, VenueSubmission
 from .services.email_service import send_acceptance_email, send_rejection_email, _send
 from .author_api import _active_config, _json_body, _submission_payload, _venue_config_payload, _venue_payload
@@ -24,17 +24,6 @@ EDITOR_STATUSES = {
     'transferred',
 }
 DECISION_STATUSES = {'revision_requested', 'accepted', 'rejected'}
-
-def _check_org_access(user, organization_id, required_roles=None):
-    if user.platform_superuser:
-        return True
-    if not required_roles:
-        required_roles = ['owner', 'editor', 'viewer']
-    return user.memberships.filter(
-        organization_id=organization_id,
-        role__in=required_roles
-    ).exists()
-
 
 
 def _feedback_payload(item):
@@ -99,7 +88,7 @@ def admin_venue_detail(request, venue_id):
         return JsonResponse({'detail': 'Venue not found'}, status=404)
 
     required_roles = ['owner', 'editor', 'viewer'] if request.method == 'GET' else ['owner']
-    if not _check_org_access(request.editor_user, venue.organization_id, required_roles):
+    if not check_org_access(request.editor_user, venue.organization_id, required_roles):
         return JsonResponse({'detail': 'Forbidden'}, status=403)
 
     if request.method == 'GET':
@@ -133,11 +122,11 @@ def admin_venue_configs(request, venue_id):
         venue = Venue.objects.get(id=venue_id)
     except Venue.DoesNotExist:
         return JsonResponse({'detail': 'Venue not found'}, status=404)
-    if not _check_org_access(request.editor_user, venue.organization_id, ['owner', 'editor', 'viewer']):
+    if not check_org_access(request.editor_user, venue.organization_id, ['owner', 'editor', 'viewer']):
         return JsonResponse({'detail': 'Forbidden'}, status=403)
 
     required_roles = ['owner', 'editor', 'viewer'] if request.method == 'GET' else ['owner']
-    if not _check_org_access(request.editor_user, venue.organization_id, required_roles):
+    if not check_org_access(request.editor_user, venue.organization_id, required_roles):
         return JsonResponse({'detail': 'Forbidden'}, status=403)
     configs = venue.agent_configs.order_by('-version', '-created_at')
     return JsonResponse({
@@ -159,7 +148,7 @@ def admin_activate_venue_config(request, venue_id, config_id):
     except VenueAgentConfig.DoesNotExist:
         return JsonResponse({'detail': 'Venue configuration not found'}, status=404)
 
-    if not _check_org_access(request.editor_user, venue.organization_id, ['owner']):
+    if not check_org_access(request.editor_user, venue.organization_id, ['owner']):
         return JsonResponse({'detail': 'Forbidden'}, status=403)
 
     venue.agent_configs.filter(active=True).exclude(id=config.id).update(active=False)
@@ -233,7 +222,7 @@ def admin_venue_submission_detail(request, submission_id):
         ).prefetch_related('evidence_findings', 'editor_feedback').get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
-    if not _check_org_access(request.editor_user, item.venue.organization_id, ['owner', 'editor', 'viewer']):
+    if not check_org_access(request.editor_user, item.venue.organization_id, ['owner', 'editor', 'viewer']):
         return JsonResponse({'detail': 'Forbidden'}, status=403)
     return JsonResponse({'submission': _editor_submission_payload(item, detail=True)})
 
@@ -247,7 +236,7 @@ def admin_start_venue_review(request, submission_id):
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
 
-    if not _check_org_access(request.editor_user, item.venue.organization_id, ['owner', 'editor']):
+    if not check_org_access(request.editor_user, item.venue.organization_id, ['owner', 'editor']):
         return JsonResponse({'detail': 'Forbidden'}, status=403)
 
     if item.status not in {'submitted', 'revision_requested', 'under_review'}:
@@ -270,7 +259,7 @@ def admin_venue_submission_decision(request, submission_id):
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
 
-    if not _check_org_access(request.editor_user, item.venue.organization_id, ['owner', 'editor']):
+    if not check_org_access(request.editor_user, item.venue.organization_id, ['owner', 'editor']):
         return JsonResponse({'detail': 'Forbidden'}, status=403)
 
     data = _json_body(request)
@@ -346,7 +335,7 @@ def admin_venue_submission_download(request, submission_id):
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
 
-    if not _check_org_access(request.editor_user, item.venue.organization_id, ['owner', 'editor', 'viewer']):
+    if not check_org_access(request.editor_user, item.venue.organization_id, ['owner', 'editor', 'viewer']):
         return JsonResponse({'detail': 'Forbidden'}, status=403)
 
     manuscript = item.manuscript

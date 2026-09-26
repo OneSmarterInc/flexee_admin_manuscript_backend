@@ -16,7 +16,8 @@ class TestV1Security:
         self.client = Client()
         self.admin = EditorUser.objects.create(
             email='admin@example.com',
-            password_hash='dummy'
+            password_hash='dummy',
+            platform_superuser=True,
         )
         token, _ = issue_session('admin@example.com')
         self.client.cookies['flxee_admin_session'] = token

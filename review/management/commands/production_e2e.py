@@ -12,7 +12,7 @@ import httpx
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.core.signing import dumps
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, Sum
 from django_q.tasks import async_task
 
 from review.auth import allowed_frontend_origins, hash_password, totp_code
@@ -441,7 +441,7 @@ class Command(BaseCommand):
                 'operation': row['operation'],
                 'calls': row['calls'],
                 'total_tokens': row['total_tokens'] or 0,
-                'cost_usd': str(row['cost_usd'] or 0),
+                'cost_usd': format(row['cost_usd'] or 0, '.6f'),
             })
 
         return {
@@ -451,7 +451,7 @@ class Command(BaseCommand):
             'input_tokens': totals['input_tokens'] or 0,
             'output_tokens': totals['output_tokens'] or 0,
             'total_tokens': totals['total_tokens'] or 0,
-            'cost_usd': str(totals['cost_usd'] or 0),
+            'cost_usd': format(totals['cost_usd'] or 0, '.6f'),
             'failed_calls': rows.filter(status='failed').count(),
             'blocked_calls': rows.filter(status='blocked').count(),
             'unpriced_cloud_calls': completed.exclude(

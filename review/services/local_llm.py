@@ -53,7 +53,7 @@ def assert_prompt_fits_context(prompt, *, num_ctx, num_predict):
         )
 
 
-def ollama_chat_json(prompt, *, max_tokens=None, timeout=None, num_ctx=None):
+def ollama_chat_json(prompt, *, max_tokens=None, timeout=None, num_ctx=None, return_usage=False):
     """Call the local Ollama Qwen2.5 endpoint and return its JSON-mode content.
 
     No cloud credentials are used. The caller remains responsible for validating
@@ -114,4 +114,11 @@ def ollama_chat_json(prompt, *, max_tokens=None, timeout=None, num_ctx=None):
     if not content:
         raise RuntimeError(f"Ollama returned an empty response for model {model}")
 
+    if return_usage:
+        usage = {
+            'input_tokens': int(payload.get('prompt_eval_count') or estimate_prompt_tokens(prompt)),
+            'output_tokens': int(payload.get('eval_count') or estimate_prompt_tokens(content)),
+            'usage_estimated': not bool(payload.get('prompt_eval_count') or payload.get('eval_count')),
+        }
+        return model, content, usage
     return model, content

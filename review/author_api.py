@@ -301,6 +301,14 @@ def _structured_desk_rule_violations(manuscript, config, readiness):
 
 
 def _submission_requirements_payload(item):
+    if item.retention_purged_at:
+        return {
+            'configured': False,
+            'complete': True,
+            'items': [],
+            'purged': True,
+        }
+
     config = item.venue_config
     specs = list((config.required_submission_items if config else []) or [])
     packet = item.packet if isinstance(item.packet, dict) else {}

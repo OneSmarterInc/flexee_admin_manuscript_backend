@@ -10,7 +10,7 @@ import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client, override_settings
 
-from review.auth import issue_session
+from review.auth import AUTHOR_COOKIE_NAME, issue_author_session, issue_session
 from review.models import (
     Author,
     EditorUser,
@@ -100,7 +100,17 @@ def test_author_zip_traversal_is_rejected_before_persistence(tmp_path, settings)
         content_type='application/zip',
     )
 
-    response = Client().post('/api/author/manuscripts/', {
+    author = Author.objects.create(
+        email='author@example.com',
+        name='Author',
+        password_hash='x',
+        email_verified=True,
+    )
+    client = Client()
+    token, _ = issue_author_session(author.id)
+    client.cookies[AUTHOR_COOKIE_NAME] = token
+
+    response = client.post('/api/author/manuscripts/', {
         'title': 'Unsafe archive',
         'author': 'Author',
         'email': 'author@example.com',

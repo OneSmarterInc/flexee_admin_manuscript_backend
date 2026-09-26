@@ -19,7 +19,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument(
             '--backup-root',
-            default=os.getenv('BACKUP_ROOT', str(settings.BASE_DIR / 'backups')),
+            default=(os.getenv('BACKUP_ROOT', '').strip() or str(settings.BASE_DIR / 'backups')),
             help='Directory where backup bundles are stored.',
         )
         parser.add_argument(
@@ -30,11 +30,11 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             '--pg-dump-bin',
-            default=os.getenv('PG_DUMP_BIN', 'pg_dump'),
+            default=(os.getenv('PG_DUMP_BIN', '').strip() or 'pg_dump'),
         )
         parser.add_argument(
             '--pg-restore-bin',
-            default=os.getenv('PG_RESTORE_BIN', 'pg_restore'),
+            default=(os.getenv('PG_RESTORE_BIN', '').strip() or 'pg_restore'),
         )
         parser.add_argument(
             '--no-verify',

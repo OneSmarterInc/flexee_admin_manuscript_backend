@@ -686,3 +686,21 @@ curl -I https://api.example.com/__private_media__/test.pdf
 
 Both should return `404` rather than manuscript content. Then verify a legitimate editor download through the authenticated application UI still succeeds.
 
+## Dependency vulnerability audit
+
+Runtime dependencies are pinned and CI now audits the resolved production dependency graph on every push and pull request.
+
+Local verification:
+
+```bash
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m pip check
+python -m pip_audit -r requirements.txt --strict --progress-spinner off
+```
+
+The current audit baseline is documented in `SECURITY_DEPENDENCY_AUDIT_2026-09-26.md`.
+
+Do not bypass or remove the audit step to make a dependency update pass. If a future advisory causes CI to fail, update or replace the affected dependency, run the full backend test suite, and merge through the normal review process.
+
+Weekly Dependabot PRs are enabled for both Python packages and GitHub Actions so new dependency versions are surfaced automatically without direct changes to `main`.
+

@@ -525,3 +525,46 @@ class ReviewJob(models.Model):
                 name='review_unique_active_job',
             ),
         ]
+
+class AIBudgetState(models.Model):
+    """Singleton lock row used to serialize cloud-AI budget reservations."""
+    key = models.CharField(max_length=32, primary_key=True, default='global', editable=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'AI budget state'
+        verbose_name_plural = 'AI budget state'
+
+
+class AIUsageEvent(models.Model):
+    STATUS_CHOICES = [
+        ('reserved', 'Reserved'),
+        ('completed', 'Completed'),
+        ('failed', 'Failed'),
+        ('blocked', 'Blocked'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    provider = models.CharField(max_length=40, db_index=True)
+    model = models.CharField(max_length=200, blank=True, db_index=True)
+    operation = models.CharField(max_length=100, default='ai_chat', db_index=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, db_index=True)
+    input_tokens = models.BigIntegerField(default=0)
+    output_tokens = models.BigIntegerField(default=0)
+    total_tokens = models.BigIntegerField(default=0)
+    estimated_max_cost_usd = models.DecimalField(max_digits=14, decimal_places=6, default=0)
+    actual_cost_usd = models.DecimalField(max_digits=14, decimal_places=6, default=0)
+    priced = models.BooleanField(default=False)
+    usage_estimated = models.BooleanField(default=False)
+    error_type = models.CharField(max_length=100, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['provider', '-created_at'], name='review_ai_provider_time_idx'),
+            models.Index(fields=['status', '-created_at'], name='review_ai_status_time_idx'),
+            models.Index(fields=['operation', '-created_at'], name='review_ai_operation_time_idx'),
+        ]
+

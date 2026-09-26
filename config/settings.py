@@ -20,6 +20,29 @@ _load_env(BASE_DIR / '.env')
 ENVIRONMENT = os.getenv('DJANGO_ENV', 'development').lower()
 PRODUCTION = ENVIRONMENT == 'production'
 
+# Production error monitoring is opt-in: no DSN means no events leave the app.
+# The monitoring layer strips request bodies, query strings, cookies, user data,
+# breadcrumb payloads, exception messages, and local variables before sending.
+SENTRY_DSN = os.getenv('SENTRY_DSN', '').strip()
+SENTRY_ENVIRONMENT = os.getenv('SENTRY_ENVIRONMENT', ENVIRONMENT).strip() or ENVIRONMENT
+SENTRY_RELEASE = (
+    os.getenv('SENTRY_RELEASE', '').strip()
+    or os.getenv('RELEASE_SHA', '').strip()
+)
+try:
+    SENTRY_TRACES_SAMPLE_RATE = float(os.getenv('SENTRY_TRACES_SAMPLE_RATE', '0'))
+except (TypeError, ValueError):
+    SENTRY_TRACES_SAMPLE_RATE = 0.0
+SENTRY_TRACES_SAMPLE_RATE = max(0.0, min(SENTRY_TRACES_SAMPLE_RATE, 1.0))
+
+from review.monitoring import initialize_sentry
+SENTRY_ENABLED = initialize_sentry(
+    dsn=SENTRY_DSN,
+    environment=SENTRY_ENVIRONMENT,
+    release=SENTRY_RELEASE,
+    traces_sample_rate=SENTRY_TRACES_SAMPLE_RATE,
+)
+
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY')
 if not SECRET_KEY:
     if PRODUCTION:

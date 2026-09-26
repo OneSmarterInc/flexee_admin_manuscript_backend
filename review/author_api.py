@@ -998,6 +998,22 @@ def author_generate_matches(request, manuscript_id):
             else:
                 gaps.append('Aims and scope are not yet configured.')
 
+            desk_violations = _structured_desk_rule_violations(
+                manuscript,
+                config,
+                latest_readiness,
+            )
+            if desk_violations:
+                eligibility = 'ineligible'
+                for violation in desk_violations:
+                    gaps.append(violation['message'])
+                    evidence.append({
+                        'source_type': 'venue_policy',
+                        'source_locator': f'venue config v{config.version} · structured_desk_rejection_rules',
+                        'claim': violation['message'],
+                        'rule': violation,
+                    })
+
         fit_summary = (
             'Passes the currently configured deterministic routing checks. Semantic scope fit still requires the matching agent.'
             if eligibility == 'eligible'
@@ -1338,6 +1354,16 @@ def admin_venue_config(request, venue_id):
         return JsonResponse({'detail': 'Forbidden'}, status=403)
 
     data = _json_body(request)
+    try:
+        required_submission_items = _normalise_required_submission_items(
+            data.get('required_submission_items', [])
+        )
+        structured_desk_rejection_rules = _normalise_structured_desk_rules(
+            data.get('structured_desk_rejection_rules', [])
+        )
+    except ValueError as exc:
+        return JsonResponse({'detail': str(exc)}, status=400)
+
     with transaction.atomic():
         venue = Venue.objects.select_for_update().get(id=venue.id)
         current = venue.agent_configs.order_by('-version').first()
@@ -1355,6 +1381,8 @@ def admin_venue_config(request, venue_id):
             disclosures=_json_list(data.get('disclosures')),
             reporting_standards=_json_list(data.get('reporting_standards')),
             desk_rejection_rules=_json_list(data.get('desk_rejection_rules')),
+            structured_desk_rejection_rules=structured_desk_rejection_rules,
+            required_submission_items=required_submission_items,
             deadlines=data.get('deadlines') if isinstance(data.get('deadlines'), dict) else {},
             submission_capacity=data.get('submission_capacity') if isinstance(data.get('submission_capacity'), dict) else {},
             current_demand=data.get('current_demand') if isinstance(data.get('current_demand'), dict) else {},

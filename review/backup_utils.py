@@ -168,6 +168,8 @@ def _safe_tar_members(archive: tarfile.TarFile):
             raise BackupError(f'Unsafe media archive member: {member.name}')
         if member.issym() or member.islnk():
             raise BackupError(f'Symbolic/hard links are not allowed in media backups: {member.name}')
+        if not member.isfile() and not member.isdir():
+            raise BackupError(f'Special archive members are not allowed in media backups: {member.name}')
     return members
 
 
@@ -188,10 +190,20 @@ def verify_media_archive(path: Path):
 
 def extract_media_archive(path: Path, destination: Path):
     destination.mkdir(parents=True, exist_ok=True)
+    destination = destination.resolve()
     with tarfile.open(path, 'r:gz') as archive:
         members = _safe_tar_members(archive)
         for member in members:
-            archive.extract(member, path=destination)
+            target = destination / member.name
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source = archive.extractfile(member)
+            if source is None:
+                raise BackupError(f'Cannot extract archived media member: {member.name}')
+            with source, target.open('wb') as output:
+                shutil.copyfileobj(source, output, length=1024 * 1024)
 
 
 def write_manifest(bundle_dir: Path, manifest: dict):

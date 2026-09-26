@@ -466,10 +466,46 @@ def run_semantic_readiness(manuscript):
             warning_count = sum(1 for item in combined_findings if item.get('status') == 'warning')
             model = models[0] if models else ''
 
+        # Citation integrity is useful to the author before venue selection.
+        # It remains advisory: deterministic readiness continues to control the
+        # ready_for_matching gate, and a Crossref outage cannot fail readiness.
+        try:
+            citations = _citation_checks(text, manuscript.manuscript_sha256)
+        except Exception:
+            citations = {
+                'total_references': 0,
+                'checked': 0,
+                'results': [],
+                'unavailable': True,
+            }
+
+        unverified = [
+            item for item in citations.get('results', [])
+            if item.get('status') != 'verified'
+        ]
+        if citations.get('checked'):
+            combined_findings = combined_findings + [{
+                'code': 'citation_integrity',
+                'label': 'Citation integrity (sampled)',
+                'status': 'warning' if unverified else 'pass',
+                'detail': (
+                    f"{len(unverified)} of {citations['checked']} sampled references "
+                    f"could not be verified against Crossref."
+                    if unverified else
+                    f"All {citations['checked']} sampled references were verified against Crossref."
+                ),
+                'source': {'type': 'external', 'locator': 'Crossref'},
+            }]
+            warning_count = sum(
+                1 for item in combined_findings
+                if item.get('status') == 'warning'
+            )
+
         summary = {
             'word_count': mechanical.summary.get('word_count', word_count(text)),
             'blocking_issues': mechanical.summary.get('blocking_issues', 0),
             'warnings': warning_count,
+            'citation_integrity': citations,
             'ready_for_matching': mechanical.summary.get('ready_for_matching', False),
             'semantic_advisory_only': True,
             'semantic_profile': profile,
@@ -1028,7 +1064,27 @@ def run_venue_assessment(submission):
                 submission.packet = packet
                 submission.save(update_fields=['packet'])
 
-    citations = _citation_checks(text, submission.manuscript.manuscript_sha256)
+    # Reuse the citation result produced during semantic readiness. This avoids
+    # repeating external Crossref calls after the author chooses a venue. Older
+    # manuscripts without stored citation data keep the previous fallback.
+    semantic_assessment = submission.manuscript.readiness_assessments.filter(
+        status='completed',
+        engine_version__contains='semantic-readiness',
+    ).first()
+    citations = (
+        (semantic_assessment.summary or {}).get('citation_integrity')
+        if semantic_assessment else None
+    )
+    if not isinstance(citations, dict):
+        try:
+            citations = _citation_checks(text, submission.manuscript.manuscript_sha256)
+        except Exception:
+            citations = {
+                'total_references': 0,
+                'checked': 0,
+                'results': [],
+                'unavailable': True,
+            }
 
     try:
         if not ai_available() or profile.get('summary') == 'Semantic analysis unavailable':

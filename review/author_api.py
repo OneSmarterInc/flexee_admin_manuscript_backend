@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 from datetime import timedelta
+from io import BytesIO
 from django.db import IntegrityError, transaction
 from django.http import JsonResponse
 from django.utils import timezone
@@ -56,9 +57,11 @@ from .monitoring import capture_exception
 from .storage_security import (
     UploadSecurityError,
     sanitize_original_filename,
+    secure_download_response,
     validate_manuscript_filename,
     validate_manuscript_zip,
 )
+from .services.meca import MecaPackageUnavailable, build_meca_package
 
 
 ALLOWED_MANUSCRIPT_TYPES = {value for value, _ in Manuscript.TYPE_CHOICES}
@@ -476,6 +479,29 @@ def _match_payload(item):
     }
 
 
+def _transfer_payload(transfer):
+    if not transfer:
+        return None
+    return {
+        'id': str(transfer.id),
+        'from_submission_id': str(transfer.from_submission_id),
+        'to_submission_id': str(transfer.to_submission_id),
+        'created_at': transfer.created_at.isoformat(),
+        'reason': transfer.reason,
+        'share_review_history': transfer.share_review_history,
+        'review_history_consented_at': (
+            transfer.review_history_consented_at.isoformat()
+            if transfer.review_history_consented_at
+            else None
+        ),
+        'meca_available': (
+            not bool(transfer.manuscript.content_purged_at)
+            and bool(transfer.manuscript.manuscript_file)
+        ),
+        'meca_recommendation_version': '2.0.1',
+    }
+
+
 def _submission_payload(item):
     return {
         'id': str(item.id),
@@ -505,6 +531,7 @@ def _submission_payload(item):
             }
             for e in item.evidence_findings.all()
         ],
+        'transfer': _transfer_payload(item.incoming_transfers.first()),
     }
 
 
@@ -1505,6 +1532,8 @@ def author_transfer_submission(request, submission_id):
                 status=409,
             )
 
+    share_review_history = data.get('share_review_history') is True
+
     target = VenueSubmission.objects.create(
         manuscript=source.manuscript,
         venue=target_venue,
@@ -1519,17 +1548,76 @@ def author_transfer_submission(request, submission_id):
             'manuscript_type': source.manuscript.manuscript_type,
             'disclosure': source.manuscript.disclosure,
             'transferred_from_submission_id': str(source.id),
+            'review_history_transfer_consent': share_review_history,
+            'meca_recommendation_version': '2.0.1',
         },
     )
-    SubmissionTransfer.objects.create(
+    transfer = SubmissionTransfer.objects.create(
         manuscript=source.manuscript,
         from_submission=source,
         to_submission=target,
         reason=str(data.get('reason', '')).strip(),
+        share_review_history=share_review_history,
+        review_history_consented_at=timezone.now() if share_review_history else None,
     )
     source.status = 'transferred'
     source.save(update_fields=['status', 'updated_at'])
-    return JsonResponse({'submission': _submission_payload(target)}, status=201)
+    return JsonResponse({
+        'submission': _submission_payload(target),
+        'transfer': _transfer_payload(transfer),
+    }, status=201)
+
+
+@require_GET
+def author_meca_transfer_package(request, submission_id):
+    try:
+        target = VenueSubmission.objects.select_related(
+            'manuscript',
+            'venue',
+            'venue__organization',
+        ).get(id=submission_id)
+    except VenueSubmission.DoesNotExist:
+        return JsonResponse({'detail': 'Venue submission not found'}, status=404)
+
+    access_error = _author_access_error(request, target.manuscript)
+    if access_error:
+        return access_error
+
+    transfer = target.incoming_transfers.select_related(
+        'manuscript',
+        'from_submission',
+        'from_submission__venue',
+        'from_submission__venue__organization',
+        'to_submission',
+        'to_submission__venue',
+        'to_submission__venue__organization',
+    ).prefetch_related(
+        'from_submission__evidence_findings',
+        'from_submission__editor_feedback',
+    ).first()
+    if not transfer:
+        return JsonResponse(
+            {'detail': 'This submission was not created by a transfer'},
+            status=404,
+        )
+
+    try:
+        package = build_meca_package(transfer)
+    except MecaPackageUnavailable as exc:
+        return JsonResponse({'detail': str(exc)}, status=410)
+
+    stream = BytesIO(package['content'])
+    stream.seek(0)
+    response = secure_download_response(
+        stream,
+        filename=package['filename'],
+        content_type='application/zip',
+    )
+    response['X-MECA-Version'] = package['meca_recommendation_version']
+    response['X-Review-History-Included'] = (
+        'true' if package['included_review_history'] else 'false'
+    )
+    return response
 
 
 @csrf_exempt

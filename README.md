@@ -33,6 +33,32 @@ python manage.py seed_flexee_venues --refresh
 
 Editors can then maintain venue metadata, create new configuration versions, reactivate older versions, review venue-specific submissions, record venue-scoped feedback, and make human editorial decisions from the protected admin workspace.
 
+## Submission transfer and MECA export
+
+A rejected or withdrawn venue submission can be transferred to another active venue without duplicating the manuscript record. The destination gets a new venue-specific submission and runs its own assessment against its pinned venue configuration.
+
+Prior editorial/review history is **not shared by default**. The transfer request accepts an explicit JSON boolean:
+
+```json
+{
+  "venue_id": "<destination-venue-uuid>",
+  "reason": "Author selected another destination.",
+  "share_review_history": true
+}
+```
+
+When `share_review_history=true`, the transfer records the consent timestamp and the generated package includes a redacted `reviews.xml` containing the prior editorial brief, evidence, editor feedback, and decision. Editor identity in the prior decision is deliberately omitted. When consent is absent or false, `reviews.xml` is not generated.
+
+For a submission created by transfer, an authenticated author can download the package from:
+
+```text
+GET /api/author/venue-submissions/<uuid>/meca/
+```
+
+The generated `<transfer-uuid>-meca.zip` follows the MECA 2.0.1 package layout used by the NISO Manuscript Exchange Common Approach: root `manifest.xml`, root `transfer.xml`, the manuscript under `SourceFiles/`, and optional root `reviews.xml`. The manifest lists every packaged payload file and includes the manuscript SHA-256. Export is generated on demand and fails closed after manuscript content has been purged by retention policy.
+
+The implementation tests package structure and consent behavior. It does not claim external receiving-system certification or full third-party DTD/JATS validation.
+
 ## Production
 
 Production deployment requires two processes sharing the same `DATABASE_URL` (or using the same SQLite database file):

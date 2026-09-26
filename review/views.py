@@ -22,6 +22,7 @@ from .services.email_service import send_review_emails, send_acceptance_email, s
 from .services.review_engine import run_review
 from .audit import record_audit_event
 from .monitoring import capture_exception
+from .queue_health import queue_health_snapshot
 
 
 def _clean_summary_text(value, limit=700):
@@ -503,21 +504,7 @@ def admin_submissions(request):
 @require_GET
 @require_platform_superuser
 def admin_queue_health(request):
-    from .models import ReviewJob
-    from django.utils import timezone
-    
-    jobs = ReviewJob.objects.filter(status='queued').order_by('created_at')
-    count = jobs.count()
-    oldest_age_seconds = None
-    
-    if count > 0:
-        oldest = jobs.first()
-        oldest_age_seconds = int(max(0, (timezone.now() - oldest.created_at).total_seconds()))
-        
-    response = JsonResponse({
-        'queued_jobs': count,
-        'oldest_job_age_seconds': oldest_age_seconds
-    })
+    response = JsonResponse(queue_health_snapshot())
     response['Cache-Control'] = 'no-store'
     return response
 

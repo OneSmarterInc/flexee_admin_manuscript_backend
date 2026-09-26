@@ -198,7 +198,14 @@ def _tracked_call(provider, prompt, *, max_tokens, timeout, operation):
         return model, raw
     except Exception as exc:
         try:
-            fail_ai_call(event, exc)
+            fail_ai_call(
+                event,
+                exc,
+                provider=provider,
+                model=model_hint,
+                operation=operation,
+                estimated_input_tokens=estimated_input_tokens,
+            )
         except Exception:
             pass
         raise

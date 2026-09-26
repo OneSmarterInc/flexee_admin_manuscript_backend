@@ -53,7 +53,30 @@ DEBUG = os.getenv('DJANGO_DEBUG', 'false').lower() in {'1', 'true', 'yes', 'on'}
 if PRODUCTION:
     DEBUG = False
 
-ALLOWED_HOSTS = [x.strip() for x in os.getenv('DJANGO_ALLOWED_HOSTS', '127.0.0.1,localhost').split(',') if x.strip()]
+_allowed_hosts_raw = os.getenv('DJANGO_ALLOWED_HOSTS', '').strip()
+if PRODUCTION and not _allowed_hosts_raw:
+    raise RuntimeError('DJANGO_ALLOWED_HOSTS must be explicitly configured in production')
+if not _allowed_hosts_raw:
+    _allowed_hosts_raw = '127.0.0.1,localhost'
+ALLOWED_HOSTS = [x.strip() for x in _allowed_hosts_raw.split(',') if x.strip()]
+if PRODUCTION and '*' in ALLOWED_HOSTS:
+    raise RuntimeError('DJANGO_ALLOWED_HOSTS may not contain * in production')
+
+if PRODUCTION:
+    frontend_origins = [
+        x.strip()
+        for x in os.getenv('FRONTEND_ORIGINS', '').split(',')
+        if x.strip()
+    ]
+    if not frontend_origins:
+        raise RuntimeError('FRONTEND_ORIGINS must be explicitly configured in production')
+    insecure_origins = [origin for origin in frontend_origins if not origin.startswith('https://')]
+    if insecure_origins:
+        raise RuntimeError('FRONTEND_ORIGINS must use https:// in production')
+    if not os.getenv('ADMIN_SESSION_SECRET', '').strip():
+        raise RuntimeError('ADMIN_SESSION_SECRET must be configured in production')
+    if '*' in {x.strip() for x in os.getenv('TRUSTED_PROXIES', '').split(',') if x.strip()}:
+        raise RuntimeError('TRUSTED_PROXIES may not contain * in production')
 
 INSTALLED_APPS = ['review', 'django_q']
 
@@ -107,12 +130,18 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 if PRODUCTION:
     SECURE_SSL_REDIRECT = os.getenv('SECURE_SSL_REDIRECT', 'true').lower() in {'1', 'true', 'yes', 'on'}
+    if not SECURE_SSL_REDIRECT:
+        raise RuntimeError('SECURE_SSL_REDIRECT must remain enabled in production')
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SECURE_HSTS_SECONDS = int(os.getenv('SECURE_HSTS_SECONDS', '31536000'))
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    SECURE_REFERRER_POLICY = 'same-origin'
     X_FRAME_OPTIONS = 'DENY'
+    if os.getenv('TRUST_X_FORWARDED_PROTO', 'false').lower() in {'1', 'true', 'yes', 'on'}:
+        SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 else:
     SECURE_SSL_REDIRECT = False
     SESSION_COOKIE_SECURE = False
@@ -120,10 +149,32 @@ else:
     SECURE_HSTS_SECONDS = 0
     X_FRAME_OPTIONS = 'SAMEORIGIN'
 
-DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv('MAX_MANUSCRIPT_BYTES', str(20 * 1024 * 1024))) + 1024 * 1024
+MAX_MANUSCRIPT_BYTES = int(os.getenv('MAX_MANUSCRIPT_BYTES', str(20 * 1024 * 1024)))
+MAX_SUBMISSION_ITEM_BYTES = int(os.getenv('MAX_SUBMISSION_ITEM_BYTES', str(10 * 1024 * 1024)))
+if MAX_MANUSCRIPT_BYTES <= 0 or MAX_SUBMISSION_ITEM_BYTES <= 0:
+    raise RuntimeError('Upload limits must be positive integers')
+
+DATA_UPLOAD_MAX_MEMORY_SIZE = max(MAX_MANUSCRIPT_BYTES, MAX_SUBMISSION_ITEM_BYTES) + 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = DATA_UPLOAD_MAX_MEMORY_SIZE
-MEDIA_ROOT = BASE_DIR / 'media'
-MEDIA_URL = '/media/'
+
+_private_media_raw = os.getenv('PRIVATE_MEDIA_ROOT', '').strip()
+if PRODUCTION and not _private_media_raw:
+    raise RuntimeError(
+        'PRIVATE_MEDIA_ROOT must be configured in production and must point outside the application source tree'
+    )
+MEDIA_ROOT = Path(_private_media_raw).expanduser().resolve() if _private_media_raw else (BASE_DIR / 'media').resolve()
+if PRODUCTION:
+    base_resolved = BASE_DIR.resolve()
+    try:
+        MEDIA_ROOT.relative_to(base_resolved)
+    except ValueError:
+        pass
+    else:
+        raise RuntimeError('PRIVATE_MEDIA_ROOT must be outside the application source tree in production')
+
+# Private uploads are delivered only through authenticated Django endpoints.
+# Do not configure Nginx/Apache/S3 public access for this path.
+MEDIA_URL = '/__private_media__/'
 
 if os.getenv('SMTP_HOST', '').strip():
     EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'

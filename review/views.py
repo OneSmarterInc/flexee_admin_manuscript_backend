@@ -24,6 +24,13 @@ from .audit import record_audit_event
 from .monitoring import capture_exception
 from .queue_health import queue_health_snapshot
 from .ai_usage import ai_usage_snapshot
+from .storage_security import (
+    UploadSecurityError,
+    sanitize_original_filename,
+    secure_download_response,
+    validate_manuscript_filename,
+    validate_manuscript_zip,
+)
 
 
 def _clean_summary_text(value, limit=700):
@@ -230,8 +237,11 @@ def submit(request):
         errors.append('manuscript is empty')
     elif upload.size > max_bytes:
         errors.append(f'manuscript exceeds the {max_bytes // 1024 // 1024} MB upload limit')
-    elif not upload.name.lower().endswith(('.docx', '.pdf', '.md', '.zip')):
-        errors.append('manuscript must be a .docx, .pdf, .md, or .zip file')
+    else:
+        try:
+            safe_upload_name = validate_manuscript_filename(upload.name)
+        except UploadSecurityError as exc:
+            errors.append(str(exc))
     if errors:
         return JsonResponse({'detail': errors[0], 'errors': errors}, status=400)
 
@@ -244,28 +254,21 @@ def submit(request):
     content = upload.read()
     upload.seek(0)
     digest = hashlib.sha256(content).hexdigest()
-    if upload.name.lower().endswith('.zip'):
-        import zipfile
-        from io import BytesIO
+    safe_upload_name = sanitize_original_filename(upload.name, default='manuscript')
+    if safe_upload_name.lower().endswith('.zip'):
         try:
-            with zipfile.ZipFile(BytesIO(content)) as zf:
-                infolist = zf.infolist()
-                if len(infolist) > int(os.getenv('ZIP_MAX_FILES', '1000')):
-                    return JsonResponse({'detail': 'ZIP contains too many files', 'errors': ['ZIP contains too many files']}, status=400)
-                extracted_size = sum([i.file_size for i in infolist])
-                if extracted_size > int(os.getenv('ZIP_MAX_EXTRACTED_BYTES', str(100 * 1024 * 1024))):
-                    return JsonResponse({'detail': 'Extracted ZIP size exceeds limit', 'errors': ['Extracted ZIP size exceeds limit']}, status=400)
-        except zipfile.BadZipFile:
-            return JsonResponse({'detail': 'The uploaded file is not a valid ZIP archive', 'errors': ['The uploaded file is not a valid ZIP archive']}, status=400)
+            validate_manuscript_zip(content)
+        except UploadSecurityError as exc:
+            return JsonResponse({'detail': str(exc), 'errors': [str(exc)]}, status=400)
 
     submission = Submission.objects.create(
         status='processing', kind=kind, author_name=author, author_email=author_email,
         coauthors=coauthors, title=title, declared_sim=declared_sim, disclosure=disclosure,
-        notes=notes, attestation=True, manuscript_filename=upload.name,
+        notes=notes, attestation=True, manuscript_filename=safe_upload_name,
         manuscript_file=upload,
         manuscript_bytes=len(content), manuscript_sha256=digest,
     )
-    ReviewEvent.objects.create(submission=submission, event_type='accepted', detail={'filename': upload.name, 'bytes': len(content)})
+    ReviewEvent.objects.create(submission=submission, event_type='accepted', detail={'filename': safe_upload_name, 'bytes': len(content)})
 
     from .models import ReviewJob
     from django_q.tasks import async_task
@@ -758,11 +761,10 @@ def admin_submission_download(request, submission_id):
             resource_id=submission.id,
             detail={'filename': submission.manuscript_filename},
         )
-        return FileResponse(
+        return secure_download_response(
             file_handle,
             content_type=content_type,
-            as_attachment=False, # Set to False so it opens in the browser if possible
-            filename=submission.manuscript_filename
+            filename=submission.manuscript_filename,
         )
     except Submission.DoesNotExist:
         return JsonResponse({'detail': 'Submission not found'}, status=404)

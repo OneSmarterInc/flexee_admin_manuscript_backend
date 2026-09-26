@@ -25,44 +25,61 @@ def queue_health_thresholds() -> dict:
     queue_timeout_seconds = _env_int('REVIEW_JOB_QUEUE_TIMEOUT_MINUTES', 10, minimum=1) * 60
     processing_timeout_seconds = _env_int('REVIEW_JOB_PROCESSING_TIMEOUT_MINUTES', 30, minimum=1) * 60
 
-    return {
-        'warning_queued_jobs': _env_int('QUEUE_HEALTH_WARNING_QUEUED_JOBS', 10, minimum=1),
-        'critical_queued_jobs': _env_int('QUEUE_HEALTH_CRITICAL_QUEUED_JOBS', 25, minimum=1),
-        'warning_oldest_queued_seconds': _env_int(
-            'QUEUE_HEALTH_WARNING_OLDEST_QUEUED_SECONDS',
-            max(60, queue_timeout_seconds // 2),
-            minimum=1,
-        ),
-        'critical_oldest_queued_seconds': _env_int(
+    warning_queued_jobs = _env_int('QUEUE_HEALTH_WARNING_QUEUED_JOBS', 10, minimum=1)
+    critical_queued_jobs = max(
+        warning_queued_jobs,
+        _env_int('QUEUE_HEALTH_CRITICAL_QUEUED_JOBS', 25, minimum=1),
+    )
+    warning_oldest_queued_seconds = _env_int(
+        'QUEUE_HEALTH_WARNING_OLDEST_QUEUED_SECONDS',
+        max(60, queue_timeout_seconds // 2),
+        minimum=1,
+    )
+    critical_oldest_queued_seconds = max(
+        warning_oldest_queued_seconds,
+        _env_int(
             'QUEUE_HEALTH_CRITICAL_OLDEST_QUEUED_SECONDS',
             queue_timeout_seconds,
             minimum=1,
         ),
-        'warning_oldest_processing_seconds': _env_int(
-            'QUEUE_HEALTH_WARNING_OLDEST_PROCESSING_SECONDS',
-            max(300, int(processing_timeout_seconds * 0.75)),
-            minimum=1,
-        ),
-        'critical_oldest_processing_seconds': _env_int(
+    )
+    warning_oldest_processing_seconds = _env_int(
+        'QUEUE_HEALTH_WARNING_OLDEST_PROCESSING_SECONDS',
+        max(300, int(processing_timeout_seconds * 0.75)),
+        minimum=1,
+    )
+    critical_oldest_processing_seconds = max(
+        warning_oldest_processing_seconds,
+        _env_int(
             'QUEUE_HEALTH_CRITICAL_OLDEST_PROCESSING_SECONDS',
             processing_timeout_seconds,
             minimum=1,
         ),
+    )
+    warning_recent_failures = _env_int(
+        'QUEUE_HEALTH_WARNING_RECENT_FAILURES',
+        3,
+        minimum=1,
+    )
+    critical_recent_failures = max(
+        warning_recent_failures,
+        _env_int('QUEUE_HEALTH_CRITICAL_RECENT_FAILURES', 10, minimum=1),
+    )
+
+    return {
+        'warning_queued_jobs': warning_queued_jobs,
+        'critical_queued_jobs': critical_queued_jobs,
+        'warning_oldest_queued_seconds': warning_oldest_queued_seconds,
+        'critical_oldest_queued_seconds': critical_oldest_queued_seconds,
+        'warning_oldest_processing_seconds': warning_oldest_processing_seconds,
+        'critical_oldest_processing_seconds': critical_oldest_processing_seconds,
         'failure_window_minutes': _env_int(
             'QUEUE_HEALTH_FAILURE_WINDOW_MINUTES',
             60,
             minimum=1,
         ),
-        'warning_recent_failures': _env_int(
-            'QUEUE_HEALTH_WARNING_RECENT_FAILURES',
-            3,
-            minimum=1,
-        ),
-        'critical_recent_failures': _env_int(
-            'QUEUE_HEALTH_CRITICAL_RECENT_FAILURES',
-            10,
-            minimum=1,
-        ),
+        'warning_recent_failures': warning_recent_failures,
+        'critical_recent_failures': critical_recent_failures,
         'alert_cooldown_minutes': _env_int(
             'QUEUE_HEALTH_ALERT_COOLDOWN_MINUTES',
             30,
@@ -115,7 +132,7 @@ def queue_health_snapshot(*, now=None) -> dict:
     oldest_processing_seconds = _age_seconds(now, oldest_processing_at)
 
     failure_cutoff = now - timedelta(minutes=thresholds['failure_window_minutes'])
-    recent = ReviewJob.objects.filter(created_at__gte=failure_cutoff).aggregate(
+    recent = ReviewJob.objects.filter(completed_at__gte=failure_cutoff).aggregate(
         completed=Count('id', filter=Q(status='completed')),
         failed=Count('id', filter=Q(status='failed')),
     )

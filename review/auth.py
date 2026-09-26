@@ -233,7 +233,7 @@ def read_author_session(request):
         return None
 
 def set_author_session_cookie(response, token, max_age):
-    secure = os.getenv('COOKIE_SECURE', 'false').lower() in {'1', 'true', 'yes', 'on'}
+    secure = _secure_cookie_required()
     response.set_cookie(
         AUTHOR_COOKIE_NAME,
         token,

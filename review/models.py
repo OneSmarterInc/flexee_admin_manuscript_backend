@@ -495,6 +495,8 @@ class SubmissionTransfer(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     reason = models.TextField(blank=True)
+    share_review_history = models.BooleanField(default=False)
+    review_history_consented_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-created_at']

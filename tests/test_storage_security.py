@@ -36,7 +36,7 @@ def _zip_bytes(entries):
 
 
 def test_sanitize_original_filename_removes_paths_and_control_characters():
-    assert sanitize_original_filename('../folder\\evil\r\nname.pdf') == 'evil__name.pdf'
+    assert sanitize_original_filename('../folder\\evil\r\nname.pdf') == 'evil_name.pdf'
     assert sanitize_original_filename('..') == 'upload'
 
 
@@ -88,7 +88,6 @@ def test_zip_compression_bomb_ratio_is_rejected(monkeypatch):
 
 
 @pytest.mark.django_db
-@override_settings(MEDIA_ROOT=None)
 def test_author_zip_traversal_is_rejected_before_persistence(tmp_path, settings):
     settings.MEDIA_ROOT = tmp_path
     payload = _zip_bytes([

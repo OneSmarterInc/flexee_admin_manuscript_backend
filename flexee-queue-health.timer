@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Flexee queue health monitor every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=flexee-queue-health.service
+
+[Install]
+WantedBy=timers.target

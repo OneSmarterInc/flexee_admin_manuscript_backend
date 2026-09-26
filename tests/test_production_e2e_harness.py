@@ -1,9 +1,11 @@
+from datetime import timedelta
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.utils import timezone
 
 from review.management.commands.production_e2e import Command
-from review.models import ReviewJob
+from review.models import AIUsageEvent, ReviewJob
 from review.tasks import run_e2e_worker_probe_task
 
 
@@ -55,3 +57,29 @@ def test_find_match_fails_when_target_missing():
     command = Command()
     with pytest.raises(CommandError, match='was not present'):
         command._find_match([{'venue': {'id': 'one'}}], 'missing')
+
+@pytest.mark.django_db
+def test_production_e2e_cost_report_uses_persisted_ai_usage():
+    AIUsageEvent.objects.create(
+        provider='anthropic',
+        model='test-model',
+        operation='venue_assessment',
+        status='completed',
+        input_tokens=100,
+        output_tokens=50,
+        total_tokens=150,
+        estimated_max_cost_usd='0.010000',
+        actual_cost_usd='0.002500',
+        priced=True,
+        usage_estimated=False,
+    )
+
+    report = Command()._ai_cost_report(timezone.now() - timedelta(minutes=1))
+
+    assert report['status'] == 'instrumented'
+    assert report['completed_calls'] == 1
+    assert report['total_tokens'] == 150
+    assert report['cost_usd'] == '0.002500'
+    assert report['unpriced_cloud_calls'] == 0
+    assert report['by_operation'][0]['operation'] == 'venue_assessment'
+

@@ -76,8 +76,13 @@ def _parse_json_object(raw):
     return data
 
 
-def _agent_json(prompt, *, max_tokens=700, timeout=180):
-    model, raw = ai_chat_json(prompt, max_tokens=max_tokens, timeout=timeout)
+def _agent_json(prompt, *, max_tokens=700, timeout=180, operation='author_agent'):
+    model, raw = ai_chat_json(
+        prompt,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        operation=operation,
+    )
     return model, _parse_json_object(raw)
 
 
@@ -428,7 +433,11 @@ def run_semantic_readiness(manuscript):
         else:
             try:
                 for chunk in selected:
-                    model, raw = _agent_json(_chunk_prompt(manuscript, chunk), max_tokens=650)
+                    model, raw = _agent_json(
+                        _chunk_prompt(manuscript, chunk),
+                        max_tokens=650,
+                        operation='semantic_readiness',
+                    )
                     models.append(model)
                     results.append(_sanitize_chunk_result(raw, chunk, text))
             except Exception:
@@ -791,7 +800,11 @@ def run_semantic_matching(manuscript, *, venue_ids=None):
         try:
             if not ai_available() or profile.get('summary') == 'Semantic analysis unavailable':
                 raise RuntimeError('AI unavailable')
-            model, data = _agent_json(_match_prompt(manuscript, match, config), max_tokens=700)
+            model, data = _agent_json(
+                _match_prompt(manuscript, match, config),
+                max_tokens=700,
+                operation='semantic_matching',
+            )
             models.add(model)
             evidence_ids = set(_profile_evidence_map(manuscript))
             reasons = _sanitize_match_items(data.get('reasons'), evidence_ids)
@@ -1054,7 +1067,12 @@ def run_venue_assessment(submission):
     policies = config.policies or {}
     if policies.get('blind_review', False) and not (submission.packet or {}).get('anonymization_override', False):
         if ai_available() and profile.get('summary') != 'Semantic analysis unavailable':
-            model_anon, data_anon = _agent_json(_anonymization_prompt(text), max_tokens=1000, timeout=120)
+            model_anon, data_anon = _agent_json(
+                _anonymization_prompt(text),
+                max_tokens=1000,
+                timeout=120,
+                operation='anonymization_check',
+            )
             status_anon = data_anon.get('status', 'passed')
             if status_anon == 'blocked':
                 packet = dict(submission.packet or {})
@@ -1094,7 +1112,12 @@ def run_venue_assessment(submission):
     try:
         if not ai_available() or profile.get('summary') == 'Semantic analysis unavailable':
             raise RuntimeError('AI unavailable')
-        model, data = _agent_json(_assessment_prompt(submission, config, citations), max_tokens=1100, timeout=240)
+        model, data = _agent_json(
+            _assessment_prompt(submission, config, citations),
+            max_tokens=1100,
+            timeout=240,
+            operation='venue_assessment',
+        )
     except Exception as exc:
         model = 'deterministic-fallback'
         data = {

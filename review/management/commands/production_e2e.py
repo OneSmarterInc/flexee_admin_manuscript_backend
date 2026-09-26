@@ -12,10 +12,12 @@ import httpx
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.core.signing import dumps
+from django.db.models import Count, Sum
 from django_q.tasks import async_task
 
 from review.auth import allowed_frontend_origins, hash_password, totp_code
 from review.models import (
+    AIUsageEvent,
     Author,
     EditorFeedback,
     EditorUser,
@@ -79,8 +81,9 @@ class Command(BaseCommand):
         started = time.monotonic()
         stages = {}
         created = {'author_id': None, 'manuscript_id': None, 'submission_id': None, 'editor_id': None}
+        cost_started_at = datetime.now(dt_timezone.utc)
         report = {
-            'started_at': datetime.now(dt_timezone.utc).isoformat(),
+            'started_at': cost_started_at.isoformat(),
             'status': 'running',
             'provider': os.getenv('AI_PROVIDER', 'auto').strip().lower(),
             'ollama_model': os.getenv('OLLAMA_MODEL', ''),
@@ -93,8 +96,8 @@ class Command(BaseCommand):
             'email': {},
             'models_observed': {},
             'cost': {
-                'status': 'not_instrumented',
-                'note': 'The current provider abstraction does not persist token usage/cost. Record provider billing separately for this run.',
+                'status': 'collecting',
+                'note': 'AI usage rows created during this E2E window will be summarized when the run ends.',
             },
         }
 
@@ -387,6 +390,14 @@ class Command(BaseCommand):
         finally:
             report['total_seconds'] = round(time.monotonic() - started, 3)
             report['finished_at'] = datetime.now(dt_timezone.utc).isoformat()
+            try:
+                report['cost'] = self._ai_cost_report(cost_started_at)
+            except Exception as cost_error:
+                report['cost'] = {
+                    'status': 'collection_failed',
+                    'error_type': cost_error.__class__.__name__,
+                    'note': 'The E2E workflow finished, but its AI usage window could not be summarized.',
+                }
             report_path = self._report_path(options, report['provider'])
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding='utf-8')
@@ -405,6 +416,53 @@ class Command(BaseCommand):
                 f"submission={created.get('submission_id') or 'cleaned'}"
             )
         )
+
+    def _ai_cost_report(self, started_at):
+        rows = AIUsageEvent.objects.filter(created_at__gte=started_at)
+        completed = rows.filter(status='completed')
+        totals = completed.aggregate(
+            calls=Count('id'),
+            input_tokens=Sum('input_tokens'),
+            output_tokens=Sum('output_tokens'),
+            total_tokens=Sum('total_tokens'),
+            cost_usd=Sum('actual_cost_usd'),
+        )
+        operations = []
+        for row in (
+            completed.values('operation')
+            .annotate(
+                calls=Count('id'),
+                total_tokens=Sum('total_tokens'),
+                cost_usd=Sum('actual_cost_usd'),
+            )
+            .order_by('operation')
+        ):
+            operations.append({
+                'operation': row['operation'],
+                'calls': row['calls'],
+                'total_tokens': row['total_tokens'] or 0,
+                'cost_usd': format(row['cost_usd'] or 0, '.6f'),
+            })
+
+        return {
+            'status': 'instrumented',
+            'window_started_at': started_at.isoformat(),
+            'completed_calls': totals['calls'] or 0,
+            'input_tokens': totals['input_tokens'] or 0,
+            'output_tokens': totals['output_tokens'] or 0,
+            'total_tokens': totals['total_tokens'] or 0,
+            'cost_usd': format(totals['cost_usd'] or 0, '.6f'),
+            'failed_calls': rows.filter(status='failed').count(),
+            'blocked_calls': rows.filter(status='blocked').count(),
+            'unpriced_cloud_calls': completed.exclude(
+                provider__in=['ollama', 'mock']
+            ).filter(priced=False).count(),
+            'by_operation': operations,
+            'note': (
+                'This window is exact for a dedicated E2E environment. Concurrent '
+                'application AI calls during the same time window are included.'
+            ),
+        }
 
     def _preflight(self, options, report):
         provider = report['provider']

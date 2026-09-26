@@ -132,3 +132,160 @@ After pulling this change, apply the migration:
 python manage.py migrate
 ```
 
+## Production backup and restore
+
+Production backups include both the PostgreSQL database and every file under `MEDIA_ROOT`. Each run creates one timestamped backup bundle containing:
+
+- `database.dump` — PostgreSQL custom-format dump created by `pg_dump`
+- `media.tar.gz` — uploaded manuscript and venue-requirement files
+- `manifest.json` — SHA-256 checksums, sizes, media file count, creation time, release SHA, and verification state
+
+The backup is written to a temporary directory and renamed into place only after the database dump, media archive, checksums, and archive verification succeed. Completed bundles older than `BACKUP_RETENTION_DAYS` are removed only after a new successful backup. Every attempt is also appended to `backup_attempts.jsonl`, and successful/failed backup/restore operations are added to the production audit trail when the application database is available.
+
+### Production prerequisites
+
+Install PostgreSQL client tools:
+
+```bash
+sudo apt update
+sudo apt install postgresql-client
+pg_dump --version
+pg_restore --version
+```
+
+Configure a protected backup location outside `MEDIA_ROOT`. A mounted durable volume is preferable to the application filesystem:
+
+```env
+BACKUP_ROOT=/var/backups/flexee
+BACKUP_RETENTION_DAYS=30
+PG_DUMP_BIN=pg_dump
+PG_RESTORE_BIN=pg_restore
+RELEASE_SHA=
+```
+
+Create the directory and restrict access:
+
+```bash
+sudo mkdir -p /var/backups/flexee
+sudo chown www-data:www-data /var/backups/flexee
+sudo chmod 700 /var/backups/flexee
+```
+
+Run one backup manually first:
+
+```bash
+cd /var/www/flexee/flexee_admin_manuscript_backend
+sudo -u www-data .venv/bin/python manage.py backup_production
+```
+
+A successful run prints the final bundle path and `Verified=True`.
+
+Verify any completed bundle again without restoring it:
+
+```bash
+sudo -u www-data .venv/bin/python manage.py verify_production_backup \
+  --backup /var/backups/flexee/flexee-backup-YYYYMMDDTHHMMSSZ-xxxxxxxx
+```
+
+### Daily systemd backup
+
+The repository contains `flexee-backup.service` and `flexee-backup.timer`. Install them after confirming the paths/users match the server:
+
+```bash
+sudo cp flexee-backup.service /etc/systemd/system/
+sudo cp flexee-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now flexee-backup.timer
+sudo systemctl list-timers flexee-backup.timer
+```
+
+Run an immediate scheduled-service test:
+
+```bash
+sudo systemctl start flexee-backup.service
+sudo systemctl status flexee-backup.service --no-pager
+sudo journalctl -u flexee-backup.service -n 100 --no-pager
+```
+
+### Required restore test
+
+Checksum/archive verification is not a substitute for an actual restore. Periodically restore a recent backup into a separate disposable PostgreSQL database.
+
+Create a restore-test database (example):
+
+```bash
+sudo -u postgres createdb flexee_restore_test
+```
+
+Use a dedicated restore target URL. Do **not** use the live production database URL:
+
+```bash
+export RESTORE_TARGET_DATABASE_URL='postgresql://flexee_user:YOUR_PASSWORD@127.0.0.1:5432/flexee_restore_test'
+```
+
+Restore and smoke-test the database:
+
+```bash
+.venv/bin/python manage.py restore_production_backup \
+  --backup /var/backups/flexee/flexee-backup-YYYYMMDDTHHMMSSZ-xxxxxxxx \
+  --target-database-url "$RESTORE_TARGET_DATABASE_URL" \
+  --confirm-target-database flexee_restore_test
+```
+
+The restore command verifies the source bundle before touching the target, restores with `pg_restore --clean --if-exists --no-owner --no-privileges --exit-on-error`, then connects to the restored database and confirms that it is reachable and contains the Django migration table.
+
+To test media restoration as well, use a disposable directory:
+
+```bash
+mkdir -p /tmp/flexee-media-restore-test
+
+.venv/bin/python manage.py restore_production_backup \
+  --backup /var/backups/flexee/flexee-backup-YYYYMMDDTHHMMSSZ-xxxxxxxx \
+  --target-database-url "$RESTORE_TARGET_DATABASE_URL" \
+  --confirm-target-database flexee_restore_test \
+  --restore-media \
+  --media-root /tmp/flexee-media-restore-test \
+  --confirm-media-replace REPLACE_MEDIA
+```
+
+When media is replaced, an existing target directory is renamed to a timestamped `.pre-restore-` path rather than silently destroyed.
+
+The restore command intentionally does not default to `DATABASE_URL`. If the requested target matches the database currently used by Django, restoration is refused unless `--allow-current-database` is explicitly supplied. That flag is intended only for an intentional disaster-recovery operation.
+
+### Local Windows/SQLite rehearsal
+
+The production path is PostgreSQL, but the backup/restore workflow can be rehearsed locally with SQLite without installing PostgreSQL client tools:
+
+```powershell
+python manage.py backup_production --allow-sqlite
+```
+
+The command prints a bundle path under `backups`. Verify it:
+
+```powershell
+python manage.py verify_production_backup --backup ".\backups\flexee-backup-..."
+```
+
+Restore that bundle into a separate SQLite file instead of overwriting your working database:
+
+```powershell
+python manage.py restore_production_backup `
+  --backup ".\backups\flexee-backup-..." `
+  --target-sqlite-path ".\restore-test.sqlite3" `
+  --confirm-target-database "restore-test.sqlite3"
+```
+
+To include a media restore rehearsal:
+
+```powershell
+python manage.py restore_production_backup `
+  --backup ".\backups\flexee-backup-..." `
+  --target-sqlite-path ".\restore-test.sqlite3" `
+  --confirm-target-database "restore-test.sqlite3" `
+  --restore-media `
+  --media-root ".\restore-media-test" `
+  --confirm-media-replace REPLACE_MEDIA
+```
+
+Never treat an untested backup as production-ready. Keep at least one recent restore-test result with the backup evidence for the production checklist.
+

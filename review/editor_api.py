@@ -342,6 +342,8 @@ def admin_submission_requirement_download(request, submission_id, requirement_ke
 
     if not check_org_access(request.editor_user, item.venue.organization_id, ['owner', 'editor', 'viewer']):
         return JsonResponse({'detail': 'Forbidden'}, status=403)
+    if item.retention_purged_at:
+        return JsonResponse({'detail': 'Submission requirement content has expired under the venue retention policy'}, status=410)
 
     try:
         row = SubmissionRequirementFile.objects.get(
@@ -372,8 +374,12 @@ def admin_venue_submission_download(request, submission_id):
 
     if not check_org_access(request.editor_user, item.venue.organization_id, ['owner', 'editor', 'viewer']):
         return JsonResponse({'detail': 'Forbidden'}, status=403)
+    if item.retention_purged_at:
+        return JsonResponse({'detail': 'Manuscript content has expired under the venue retention policy'}, status=410)
 
     manuscript = item.manuscript
+    if manuscript.content_purged_at or not manuscript.manuscript_file:
+        return JsonResponse({'detail': 'Manuscript content has been purged'}, status=410)
     try:
         manuscript.manuscript_file.open('rb')
         response = FileResponse(

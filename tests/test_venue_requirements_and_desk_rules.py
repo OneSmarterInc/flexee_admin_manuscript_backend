@@ -393,3 +393,88 @@ def test_transfer_rechecks_target_structured_desk_rules():
     source.refresh_from_db()
     assert source.status == 'rejected'
     assert VenueSubmission.objects.filter(manuscript=manuscript).count() == 1
+
+
+@pytest.mark.django_db
+def test_reference_count_and_required_sections_rules_are_deterministic():
+    author = Author.objects.create(email='structure-rule@example.com', name='Structure Rule Author', password_hash='x')
+    payload = (
+        b'# Test manuscript\n\n'
+        b'## Introduction\nBackground text.\n\n'
+        b'## Methods\nMethods text.\n\n'
+        b'## References\nSmith, J. (2024). One reference title. Journal Name.\n'
+    )
+    manuscript = Manuscript.objects.create(
+        author_account=author,
+        author_name='Structure Rule Author',
+        author_email=author.email,
+        title='Structured rule manuscript',
+        manuscript_type='research_article',
+        disclosure='No competing interests.',
+        manuscript_filename='structured.md',
+        manuscript_file=SimpleUploadedFile('structured.md', payload, content_type='text/markdown'),
+        manuscript_bytes=len(payload),
+        manuscript_sha256='e' * 64,
+    )
+    ReadinessAssessment.objects.create(
+        manuscript=manuscript,
+        status='completed',
+        engine_version='mechanical-v1',
+        summary={
+            'word_count': 1000,
+            'blocking_issues': 0,
+            'warnings': 0,
+            'ready_for_matching': True,
+        },
+        findings=[],
+    )
+    org = Organization.objects.create(name='Structured Rule Org')
+    venue = Venue.objects.create(
+        organization=org,
+        name='Structured Rule Venue',
+        slug='structured-rule-venue',
+        venue_type='journal',
+    )
+    VenueAgentConfig.objects.create(
+        venue=venue,
+        version=1,
+        active=True,
+        aims_scope='Research articles.',
+        article_types=['research_article'],
+        structured_desk_rejection_rules=[
+            {
+                'field': 'reference_count',
+                'operator': '<',
+                'value': 2,
+                'message': 'At least two references are required.',
+            },
+            {
+                'field': 'required_sections',
+                'operator': 'missing_any',
+                'value': ['Methods', 'Results'],
+                'message': 'Methods and Results sections are required.',
+            },
+        ],
+    )
+
+    response = author_client(author).post(
+        f'/api/author/manuscripts/{manuscript.id}/matches/run/',
+        data='{}',
+        content_type='application/json',
+    )
+
+    assert response.status_code == 201
+    result = next(item for item in response.json()['matches'] if item['venue']['id'] == str(venue.id))
+    assert result['eligibility'] == 'ineligible'
+    assert 'At least two references are required.' in result['gaps']
+    assert 'Methods and Results sections are required.' in result['gaps']
+
+    rules = [
+        evidence['rule']
+        for evidence in result['evidence']
+        if evidence.get('rule')
+    ]
+    reference_rule = next(rule for rule in rules if rule['field'] == 'reference_count')
+    section_rule = next(rule for rule in rules if rule['field'] == 'required_sections')
+    assert reference_rule['actual'] == 1
+    assert section_rule['actual']['missing'] == ['Results']

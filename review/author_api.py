@@ -1112,6 +1112,21 @@ def author_create_submission(request, manuscript_id):
         )
 
     config = _active_config(venue)
+    latest_readiness = manuscript.readiness_assessments.filter(status='completed').first()
+    if config:
+        violations = _structured_desk_rule_violations(
+            manuscript,
+            config,
+            latest_readiness,
+        )
+        if violations:
+            return JsonResponse(
+                {
+                    'detail': 'This venue has deterministic desk-rejection rules that the manuscript does not satisfy',
+                    'violations': violations,
+                },
+                status=409,
+            )
     item = VenueSubmission.objects.create(
         manuscript=manuscript,
         venue=venue,

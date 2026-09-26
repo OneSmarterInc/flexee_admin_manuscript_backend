@@ -331,3 +331,25 @@ def test_author_can_resend_verification_email():
         success=True,
         detail__action='resend_verification',
     ).exists()
+
+
+@pytest.mark.django_db
+def test_author_job_endpoint_does_not_expose_public_review_jobs():
+    submission = Submission.objects.create(
+        status='processing',
+        kind='article',
+        author_name='Public Author',
+        title='Public job',
+        disclosure='none',
+        manuscript_filename='public.md',
+        manuscript_bytes=10,
+        manuscript_sha256='b' * 64,
+    )
+    job = ReviewJob.objects.create(
+        job_type='public_review',
+        reference_id=str(submission.id),
+        status='queued',
+    )
+
+    response = Client().get(f'/api/author/jobs/{job.id}/')
+    assert response.status_code == 404

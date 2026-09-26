@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from copy import deepcopy
+from functools import wraps
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -213,3 +214,22 @@ def flush_sentry(timeout=2.0):
         return
     import sentry_sdk
     sentry_sdk.flush(timeout=timeout)
+
+
+def monitor_background_task(operation: str):
+    """Capture unexpected Django-Q task crashes and preserve normal failure semantics."""
+    def decorator(func):
+        @wraps(func)
+        def wrapped(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception as exc:
+                capture_exception(
+                    exc,
+                    component='django_q',
+                    operation=operation,
+                    tags={'task': func.__name__},
+                )
+                raise
+        return wrapped
+    return decorator

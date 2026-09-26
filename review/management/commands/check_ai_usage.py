@@ -31,9 +31,15 @@ class Command(BaseCommand):
         anthropic_pricing = pricing_for('anthropic', anthropic_model)
         limits = budget_limits()
 
+        anthropic_key_present = bool(os.getenv('ANTHROPIC_API_KEY', '').strip())
+        cloud_fallback_enabled = (
+            os.getenv('ENABLE_CLOUD_FALLBACK', 'false').strip().lower()
+            in {'1', 'true', 'yes', 'on'}
+        )
         cloud_possible = (
             provider == 'anthropic'
-            or (provider == 'auto' and bool(os.getenv('ANTHROPIC_API_KEY', '').strip()))
+            or (provider == 'auto' and anthropic_key_present)
+            or (cloud_fallback_enabled and anthropic_key_present)
         )
         has_limit = (
             limits['daily_cost_limit_usd'] > 0

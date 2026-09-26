@@ -206,7 +206,7 @@ def test_expired_venue_copy_is_purged_without_deleting_another_retained_copy():
         file_bytes=14,
         file_sha256='c' * 64,
     )
-    requirement_path = requirement.file.path
+    requirement_name = requirement.file.name
 
     result = sweep_retention_task()
 
@@ -219,7 +219,7 @@ def test_expired_venue_copy_is_purged_without_deleting_another_retained_copy():
     assert expired.decision['decision'] == 'accepted'
     assert expired.evidence_findings.count() == 0
     assert expired.requirement_files.count() == 0
-    assert not requirement.file.storage.exists(requirement.name)
+    assert not requirement.file.storage.exists(requirement_name)
     assert manuscript.content_purged_at is None
     assert manuscript.manuscript_file
     assert manuscript.parsed_profile

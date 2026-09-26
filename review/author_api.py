@@ -32,6 +32,7 @@ from .models import (
     Organization,
     ReadinessAssessment,
     SubmissionTransfer,
+    SubmissionRequirementFile,
     Venue,
     VenueAgentConfig,
     VenueMatch,
@@ -53,6 +54,12 @@ from .services.email_service import _send as _send_email
 
 ALLOWED_MANUSCRIPT_TYPES = {value for value, _ in Manuscript.TYPE_CHOICES}
 ALLOWED_VENUE_TYPES = {value for value, _ in Venue.TYPE_CHOICES}
+ALLOWED_REQUIREMENT_TYPES = {'text', 'textarea', 'url', 'checkbox', 'file'}
+STRUCTURED_DESK_RULE_OPERATORS = {
+    'word_count': {'>', '>=', '<', '<=', '==', '!='},
+    'manuscript_type': {'==', '!=', 'in', 'not_in'},
+    'disclosure': {'contains', 'not_contains', 'empty', 'not_empty'},
+}
 
 
 def _queue_unique_job(job_type, reference_id, task_path, *task_args):
@@ -138,6 +145,212 @@ def _json_list(value):
     return []
 
 
+def _normalise_required_submission_items(value):
+    items = _json_list(value)
+    if len(items) > 30:
+        raise ValueError('required_submission_items supports at most 30 items')
+
+    normalised = []
+    seen = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ValueError(f'required_submission_items[{index}] must be an object')
+        label = str(item.get('label', '')).strip()
+        if not label:
+            raise ValueError(f'required_submission_items[{index}].label is required')
+        key = str(item.get('key', '')).strip() or slugify(label).replace('-', '_')
+        key = re.sub(r'[^a-zA-Z0-9_-]+', '_', key).strip('_')[:120]
+        if not key:
+            raise ValueError(f'required_submission_items[{index}].key is invalid')
+        if key in seen:
+            raise ValueError(f'duplicate required submission item key: {key}')
+        seen.add(key)
+
+        item_type = str(item.get('type', 'text')).strip().lower()
+        if item_type not in ALLOWED_REQUIREMENT_TYPES:
+            raise ValueError(
+                f'required_submission_items[{index}].type must be one of '
+                + ', '.join(sorted(ALLOWED_REQUIREMENT_TYPES))
+            )
+
+        try:
+            max_length = int(item.get('max_length', 4000))
+        except (TypeError, ValueError):
+            raise ValueError(f'required_submission_items[{index}].max_length must be an integer')
+        max_length = max(1, min(max_length, 20000))
+
+        normalised.append({
+            'key': key,
+            'label': label[:240],
+            'type': item_type,
+            'required': bool(item.get('required', True)),
+            'help_text': str(item.get('help_text', '')).strip()[:500],
+            'max_length': max_length,
+        })
+    return normalised
+
+
+def _normalise_structured_desk_rules(value):
+    rules = _json_list(value)
+    if len(rules) > 30:
+        raise ValueError('structured_desk_rejection_rules supports at most 30 rules')
+
+    normalised = []
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            raise ValueError(f'structured_desk_rejection_rules[{index}] must be an object')
+        field = str(rule.get('field', '')).strip()
+        operator = str(rule.get('operator', '')).strip()
+        if field not in STRUCTURED_DESK_RULE_OPERATORS:
+            raise ValueError(
+                f'structured_desk_rejection_rules[{index}].field must be one of '
+                + ', '.join(sorted(STRUCTURED_DESK_RULE_OPERATORS))
+            )
+        if operator not in STRUCTURED_DESK_RULE_OPERATORS[field]:
+            raise ValueError(
+                f'operator {operator!r} is not supported for structured desk rule field {field!r}'
+            )
+        value_required = operator not in {'empty', 'not_empty'}
+        rule_value = rule.get('value')
+        if value_required and rule_value is None:
+            raise ValueError(f'structured_desk_rejection_rules[{index}].value is required')
+        if field == 'word_count' and value_required:
+            try:
+                rule_value = int(rule_value)
+            except (TypeError, ValueError):
+                raise ValueError(f'structured_desk_rejection_rules[{index}].value must be an integer')
+        if operator in {'in', 'not_in'}:
+            if not isinstance(rule_value, list) or not rule_value:
+                raise ValueError(f'structured_desk_rejection_rules[{index}].value must be a non-empty list')
+            rule_value = [str(item).strip() for item in rule_value if str(item).strip()]
+
+        message = str(rule.get('message', '')).strip()
+        if not message:
+            raise ValueError(f'structured_desk_rejection_rules[{index}].message is required')
+        normalised.append({
+            'field': field,
+            'operator': operator,
+            'value': rule_value,
+            'message': message[:500],
+        })
+    return normalised
+
+
+def _structured_desk_rule_violations(manuscript, config, readiness):
+    rules = config.structured_desk_rejection_rules or []
+    if not rules:
+        return []
+
+    word_total = None
+    if readiness and isinstance(readiness.summary, dict):
+        word_total = readiness.summary.get('word_count')
+
+    violations = []
+    for rule in rules:
+        field = rule.get('field')
+        operator = rule.get('operator')
+        expected = rule.get('value')
+        triggered = False
+        actual = None
+
+        if field == 'word_count':
+            actual = word_total
+            if actual is None:
+                continue
+            actual = int(actual)
+            expected = int(expected)
+            triggered = {
+                '>': actual > expected,
+                '>=': actual >= expected,
+                '<': actual < expected,
+                '<=': actual <= expected,
+                '==': actual == expected,
+                '!=': actual != expected,
+            }.get(operator, False)
+        elif field == 'manuscript_type':
+            actual = manuscript.manuscript_type
+            if operator == '==':
+                triggered = actual == str(expected)
+            elif operator == '!=':
+                triggered = actual != str(expected)
+            elif operator == 'in':
+                triggered = actual in {str(item) for item in expected or []}
+            elif operator == 'not_in':
+                triggered = actual not in {str(item) for item in expected or []}
+        elif field == 'disclosure':
+            actual = str(manuscript.disclosure or '')
+            if operator == 'contains':
+                triggered = str(expected).lower() in actual.lower()
+            elif operator == 'not_contains':
+                triggered = str(expected).lower() not in actual.lower()
+            elif operator == 'empty':
+                triggered = not actual.strip()
+            elif operator == 'not_empty':
+                triggered = bool(actual.strip())
+
+        if triggered:
+            violations.append({
+                'field': field,
+                'operator': operator,
+                'value': expected,
+                'actual': actual,
+                'message': str(rule.get('message', '')).strip(),
+            })
+    return violations
+
+
+def _submission_requirements_payload(item):
+    config = item.venue_config
+    specs = list((config.required_submission_items if config else []) or [])
+    packet = item.packet if isinstance(item.packet, dict) else {}
+    responses = packet.get('requirement_responses')
+    if not isinstance(responses, dict):
+        responses = {}
+    file_map = {
+        row.requirement_key: row
+        for row in item.requirement_files.all()
+    }
+
+    output = []
+    required_complete = True
+    for spec in specs:
+        key = str(spec.get('key', '')).strip()
+        item_type = spec.get('type', 'text')
+        value = responses.get(key)
+        file_row = file_map.get(key)
+
+        if item_type == 'file':
+            completed = bool(file_row and file_row.file)
+            display_value = None
+        elif item_type == 'checkbox':
+            completed = value is True
+            display_value = bool(value)
+        else:
+            display_value = str(value or '').strip()
+            completed = bool(display_value)
+
+        required = bool(spec.get('required', True))
+        if required and not completed:
+            required_complete = False
+        output.append({
+            **spec,
+            'value': display_value,
+            'completed': completed,
+            'file': {
+                'name': file_row.original_filename,
+                'bytes': file_row.file_bytes,
+                'sha256': file_row.file_sha256,
+                'uploaded_at': file_row.uploaded_at.isoformat(),
+            } if file_row else None,
+        })
+
+    return {
+        'configured': bool(specs),
+        'complete': required_complete,
+        'items': output,
+    }
+
+
 def _clean_keywords(value):
     return [str(item).strip() for item in _json_list(value) if str(item).strip()][:50]
 
@@ -183,6 +396,8 @@ def _venue_config_payload(config):
         'disclosures': config.disclosures,
         'reporting_standards': config.reporting_standards,
         'desk_rejection_rules': config.desk_rejection_rules,
+        'structured_desk_rejection_rules': config.structured_desk_rejection_rules,
+        'required_submission_items': config.required_submission_items,
         'deadlines': config.deadlines,
         'submission_capacity': config.submission_capacity,
         'current_demand': config.current_demand,
@@ -255,6 +470,7 @@ def _submission_payload(item):
         'packet': item.packet,
         'editorial_brief': item.editorial_brief,
         'decision': item.decision,
+        'requirements': _submission_requirements_payload(item),
         'evidence': [
             {
                 'id': str(e.id),

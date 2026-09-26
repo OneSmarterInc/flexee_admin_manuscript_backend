@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   django-checks:
     runs-on: ubuntu-latest
@@ -13,8 +16,10 @@ jobs:
       ADMIN_SESSION_SECRET: testsecret
       ADMIN_TOTP_SECRET: JBSWY3DPEHPK3PXP
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - run: python -m pip install -r requirements.txt -r requirements-dev.txt

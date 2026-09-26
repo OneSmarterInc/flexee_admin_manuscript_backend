@@ -154,6 +154,17 @@ class Command(BaseCommand):
                 headers={'Origin': origin},
             )
             try:
+                self._stage(
+                    stages,
+                    'author_csrf_bootstrap',
+                    lambda: self._prime_csrf(author_client),
+                )
+                self._stage(
+                    stages,
+                    'admin_csrf_bootstrap',
+                    lambda: self._prime_csrf(admin_client),
+                )
+
                 author_id = self._stage(
                     stages,
                     'author_registration',
@@ -636,6 +647,15 @@ class Command(BaseCommand):
     def _get_json(self, client, path, *, expected, **kwargs):
         response = client.get(path, **kwargs)
         return self._response_json(response, expected=expected)
+
+    def _prime_csrf(self, client):
+        response = client.get('/api/csrf/')
+        payload = self._response_json(response, expected={200})
+        token = str(payload.get('csrfToken') or '').strip()
+        if not token:
+            raise CommandError('CSRF bootstrap endpoint did not return a token.')
+        client.headers['X-CSRFToken'] = token
+        return {'csrf': 'ready'}
 
     def _post_json(self, client, path, payload, *, expected):
         response = client.post(path, json=payload)

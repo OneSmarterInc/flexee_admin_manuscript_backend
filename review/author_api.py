@@ -560,6 +560,7 @@ def author_manuscripts(request):
     content = upload.read()
     upload.seek(0)
     safe_upload_name = sanitize_original_filename(upload.name, default='manuscript')
+    upload.name = safe_upload_name
     if safe_upload_name.lower().endswith('.zip'):
         try:
             validate_manuscript_zip(content)
@@ -1341,6 +1342,7 @@ def author_upload_submission_requirement(request, submission_id, requirement_key
         )
 
     original_filename = sanitize_original_filename(uploaded.name, default='attachment')
+    uploaded.name = original_filename
     extension = os.path.splitext(original_filename)[1].lower()
     allowed_extensions = {
         '.pdf', '.doc', '.docx', '.txt', '.rtf',

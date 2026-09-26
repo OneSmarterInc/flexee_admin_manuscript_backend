@@ -41,6 +41,23 @@ def _feedback_payload(item):
 
 def _editor_submission_payload(item, *, detail=False):
     manuscript = item.manuscript
+    manuscript_purged = bool(item.retention_purged_at)
+    manuscript_payload = {
+        'id': str(manuscript.id),
+        'title': manuscript.title,
+        'author_name': manuscript.author_name,
+        'author_email': manuscript.author_email,
+        'coauthors': manuscript.coauthors,
+        'manuscript_type': manuscript.manuscript_type,
+        'manuscript_filename': '' if manuscript_purged else manuscript.manuscript_filename,
+        'manuscript_bytes': 0 if manuscript_purged else manuscript.manuscript_bytes,
+        'keywords': [] if manuscript_purged else manuscript.keywords,
+        'abstract': '' if manuscript_purged else manuscript.abstract,
+        'disclosure': '' if manuscript_purged else manuscript.disclosure,
+        'notes': '' if manuscript_purged else manuscript.notes,
+        'parsed_profile': {} if manuscript_purged else manuscript.parsed_profile,
+        'content_retained': not manuscript_purged,
+    }
     payload = {
         'id': str(item.id),
         'created_at': item.created_at.isoformat(),
@@ -49,23 +66,11 @@ def _editor_submission_payload(item, *, detail=False):
         'status': item.status,
         'venue': _venue_payload(item.venue, include_config=False),
         'venue_config_version': item.venue_config.version if item.venue_config_id else None,
-        'manuscript': {
-            'id': str(manuscript.id),
-            'title': manuscript.title,
-            'author_name': manuscript.author_name,
-            'author_email': manuscript.author_email,
-            'coauthors': manuscript.coauthors,
-            'manuscript_type': manuscript.manuscript_type,
-            'manuscript_filename': manuscript.manuscript_filename,
-            'manuscript_bytes': manuscript.manuscript_bytes,
-            'keywords': manuscript.keywords,
-            'abstract': manuscript.abstract,
-            'disclosure': manuscript.disclosure,
-            'notes': manuscript.notes,
-            'parsed_profile': manuscript.parsed_profile,
-        },
+        'manuscript': manuscript_payload,
         'brief_summary': str((item.editorial_brief or {}).get('editor_summary', '')).strip(),
         'decision': item.decision or {},
+        'retention_expires_at': item.retention_expires_at.isoformat() if item.retention_expires_at else None,
+        'retention_purged_at': item.retention_purged_at.isoformat() if item.retention_purged_at else None,
     }
     if detail:
         full = _submission_payload(item)

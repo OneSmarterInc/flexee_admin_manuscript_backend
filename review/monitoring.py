@@ -21,6 +21,9 @@ SENSITIVE_KEYS = {
     'apikey',
     'dsn',
     'smtp_password',
+    'email',
+    'author_email',
+    'username',
     'admin_totp_secret',
     'admin_session_secret',
 }
@@ -107,6 +110,10 @@ def scrub_sentry_event(event, hint=None):
 
     exception = event.get('exception')
     if isinstance(exception, dict):
+        # Some integrations duplicate exception text into message/logentry.
+        # Remove those copies before redacting the structured exception value.
+        event.pop('message', None)
+        event.pop('logentry', None)
         values = exception.get('values')
         if isinstance(values, list):
             for value in values:

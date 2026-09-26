@@ -58,32 +58,34 @@ ALLOWED_VENUE_TYPES = {value for value, _ in Venue.TYPE_CHOICES}
 def _queue_unique_job(job_type, reference_id, task_path, *task_args):
     """Create at most one queued/processing job for a logical operation."""
     reference_id = str(reference_id)
-    with transaction.atomic():
-        existing = ReviewJob.objects.filter(
-            job_type=job_type,
-            reference_id=reference_id,
-            status__in=['queued', 'processing'],
-        ).order_by('-created_at').first()
-        if existing:
-            return existing, False
-        try:
+    try:
+        with transaction.atomic():
+            existing = ReviewJob.objects.filter(
+                job_type=job_type,
+                reference_id=reference_id,
+                status__in=['queued', 'processing'],
+            ).order_by('-created_at').first()
+            if existing:
+                return existing, False
             job = ReviewJob.objects.create(
                 job_type=job_type,
                 reference_id=reference_id,
                 status='queued',
             )
-        except IntegrityError:
-            job = ReviewJob.objects.filter(
-                job_type=job_type,
-                reference_id=reference_id,
-                status__in=['queued', 'processing'],
-            ).order_by('-created_at').first()
-            if job is None:
-                raise
-            return job, False
+    except IntegrityError:
+        # The partial unique constraint closes the race between the lookup and
+        # create. Query after leaving the failed savepoint/transaction.
+        existing = ReviewJob.objects.filter(
+            job_type=job_type,
+            reference_id=reference_id,
+            status__in=['queued', 'processing'],
+        ).order_by('-created_at').first()
+        if existing is None:
+            raise
+        return existing, False
 
-        transaction.on_commit(lambda: async_task(task_path, job.id, *task_args))
-        return job, True
+    transaction.on_commit(lambda: async_task(task_path, job.id, *task_args))
+    return job, True
 
 
 def _hash_author_token(token):

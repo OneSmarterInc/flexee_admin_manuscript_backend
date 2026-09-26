@@ -277,6 +277,12 @@ def create_backup(
     release_sha='',
 ) -> tuple[Path, dict]:
     backup_root = backup_root.resolve()
+    media_root = media_root.resolve()
+    try:
+        backup_root.relative_to(media_root)
+        raise BackupError('BACKUP_ROOT must not be inside MEDIA_ROOT.')
+    except ValueError:
+        pass
     backup_root.mkdir(parents=True, exist_ok=True)
     now = utc_now()
     suffix = uuid.uuid4().hex[:8]

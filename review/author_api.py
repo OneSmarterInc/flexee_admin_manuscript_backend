@@ -9,7 +9,6 @@ from django.db import IntegrityError, transaction
 from django.http import JsonResponse
 from django.utils import timezone
 from django.utils.text import slugify
-from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from .auth import (
@@ -508,7 +507,6 @@ def _submission_payload(item):
     }
 
 
-@csrf_exempt
 @require_POST
 def author_manuscripts(request):
     author = None
@@ -605,7 +603,6 @@ def _send_author_verification(request, author):
     )
 
 
-@csrf_exempt
 @require_POST
 def author_register(request):
     data = _json_body(request)
@@ -667,7 +664,6 @@ def author_register(request):
     return response
 
 
-@csrf_exempt
 @require_POST
 def author_login(request):
     data = _json_body(request)
@@ -711,7 +707,6 @@ def author_login(request):
     return response
 
 
-@csrf_exempt
 @require_POST
 def author_logout(request):
     response = JsonResponse({'detail': 'Logged out'})
@@ -736,7 +731,6 @@ def author_verify_email(request):
         return JsonResponse({'detail': 'Invalid or expired token'}, status=400)
 
 
-@csrf_exempt
 @require_POST
 @require_author
 def author_resend_verification(request):
@@ -832,7 +826,6 @@ def author_manuscript_detail(request, manuscript_id):
     return JsonResponse({'manuscript': _manuscript_payload(item)})
 
 
-@csrf_exempt
 @require_POST
 def author_run_readiness(request, manuscript_id):
     try:
@@ -926,7 +919,6 @@ def author_run_readiness(request, manuscript_id):
     return JsonResponse({'readiness': _readiness_payload(assessment)}, status=201)
 
 
-@csrf_exempt
 @require_POST
 def author_run_semantic_readiness(request, manuscript_id):
     try:
@@ -982,7 +974,6 @@ def _normalise_label(value):
     return re.sub(r'[^a-z0-9]+', '_', str(value or '').strip().lower()).strip('_')
 
 
-@csrf_exempt
 @require_POST
 def author_generate_matches(request, manuscript_id):
     try:
@@ -1083,7 +1074,6 @@ def author_generate_matches(request, manuscript_id):
     }, status=201)
 
 
-@csrf_exempt
 @require_POST
 def author_run_semantic_matches(request, manuscript_id):
     try:
@@ -1123,7 +1113,6 @@ def author_matches(request, manuscript_id):
     return JsonResponse({'matches': [_match_payload(item) for item in items]})
 
 
-@csrf_exempt
 @require_POST
 def author_create_submission(request, manuscript_id):
     try:
@@ -1187,7 +1176,6 @@ def author_create_submission(request, manuscript_id):
     return JsonResponse({'submission': _submission_payload(item)}, status=201)
 
 
-@csrf_exempt
 @require_POST
 def author_run_venue_assessment(request, submission_id):
     try:
@@ -1238,7 +1226,6 @@ def author_submission_detail(request, submission_id):
     return JsonResponse({'submission': _submission_payload(item)})
 
 
-@csrf_exempt
 @require_POST
 def author_save_submission_requirements(request, submission_id):
     try:
@@ -1302,7 +1289,6 @@ def author_save_submission_requirements(request, submission_id):
     return JsonResponse({'requirements': _submission_requirements_payload(item)})
 
 
-@csrf_exempt
 @require_POST
 def author_upload_submission_requirement(request, submission_id, requirement_key):
     try:
@@ -1390,7 +1376,6 @@ def author_upload_submission_requirement(request, submission_id, requirement_key
     })
 
 
-@csrf_exempt
 @require_POST
 def author_submit_packet(request, submission_id):
     try:
@@ -1460,7 +1445,6 @@ def author_submit_packet(request, submission_id):
     return JsonResponse({'submission': _submission_payload(item)})
 
 
-@csrf_exempt
 @require_POST
 @transaction.atomic
 def author_transfer_submission(request, submission_id):
@@ -1532,7 +1516,6 @@ def author_transfer_submission(request, submission_id):
     return JsonResponse({'submission': _submission_payload(target)}, status=201)
 
 
-@csrf_exempt
 @require_admin
 def admin_venues(request):
     if request.method == 'GET':
@@ -1601,7 +1584,6 @@ def admin_venues(request):
     return JsonResponse({'venue': _venue_payload(venue)}, status=201)
 
 
-@csrf_exempt
 @require_admin
 def admin_venue_config(request, venue_id):
     try:
@@ -1686,7 +1668,6 @@ def admin_venue_config(request, venue_id):
     }, status=201)
 
 
-@csrf_exempt
 @require_POST
 @require_admin
 def admin_editor_feedback(request, venue_id):

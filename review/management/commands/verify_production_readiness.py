@@ -1,4 +1,5 @@
 import os
+import importlib.util
 from pathlib import Path
 
 from django.conf import settings
@@ -49,6 +50,7 @@ class Command(BaseCommand):
         require(provider in {'anthropic', 'ollama'}, 'AI_PROVIDER must be explicitly set to anthropic or ollama in production.')
         if provider == 'anthropic':
             require(bool(os.getenv('ANTHROPIC_API_KEY', '').strip()), 'ANTHROPIC_API_KEY must be configured when AI_PROVIDER=anthropic.')
+            require(importlib.util.find_spec('anthropic') is not None, 'The anthropic Python SDK must be installed when AI_PROVIDER=anthropic.')
         elif provider == 'ollama':
             model = os.getenv('OLLAMA_MODEL', '').strip()
             require(bool(model), 'OLLAMA_MODEL must be configured when AI_PROVIDER=ollama.')

@@ -187,6 +187,52 @@ class AuthorAgentApiTests(TestCase):
         self.assertEqual(sanitized['contributions'], ['operational evidence'])
         self.assertEqual(sanitized['limitations'], ['single site'])
 
+    def test_aggregate_profile_derives_missing_fields_from_grounded_evidence(self):
+        from review.services.author_agents import _aggregate_profile
+
+        profile = _aggregate_profile([{
+            'summary': '',
+            'topics': [],
+            'methods': [],
+            'contributions': [],
+            'limitations': [],
+            'evidence_points': [
+                {'kind': 'topic', 'text': 'Generative AI adoption in mid-sized enterprises.', 'source': {'type': 'manuscript'}},
+                {'kind': 'method', 'text': 'Semi-structured interviews with 24 managers.', 'source': {'type': 'manuscript'}},
+                {'kind': 'contribution', 'text': 'Governance and cross-functional teams improve adoption outcomes.', 'source': {'type': 'manuscript'}},
+                {'kind': 'limitation', 'text': 'The study covers only 12 organizations.', 'source': {'type': 'manuscript'}},
+            ],
+            'findings': [],
+        }], total_chunks=1, analyzed_chunks=1)
+
+        self.assertEqual(profile['topics'], ['Generative AI adoption in mid-sized enterprises.'])
+        self.assertEqual(profile['methods'], ['Semi-structured interviews with 24 managers.'])
+        self.assertEqual(profile['contributions'], ['Governance and cross-functional teams improve adoption outcomes.'])
+        self.assertEqual(profile['limitations'], ['The study covers only 12 organizations.'])
+        self.assertIn('Generative AI adoption', profile['summary'])
+        self.assertEqual(profile['coverage']['coverage_percent'], 100)
+
+    def test_aggregate_profile_preserves_model_supplied_fields(self):
+        from review.services.author_agents import _aggregate_profile
+
+        profile = _aggregate_profile([{
+            'summary': 'Model supplied summary.',
+            'topics': ['AI governance'],
+            'methods': ['Mixed methods'],
+            'contributions': ['Model supplied contribution'],
+            'limitations': ['Model supplied limitation'],
+            'evidence_points': [
+                {'kind': 'topic', 'text': 'Different grounded topic.', 'source': {'type': 'manuscript'}},
+            ],
+            'findings': [],
+        }], total_chunks=1, analyzed_chunks=1)
+
+        self.assertEqual(profile['summary'], 'Model supplied summary.')
+        self.assertEqual(profile['topics'], ['AI governance'])
+        self.assertEqual(profile['methods'], ['Mixed methods'])
+        self.assertEqual(profile['contributions'], ['Model supplied contribution'])
+        self.assertEqual(profile['limitations'], ['Model supplied limitation'])
+
     @patch('review.services.author_agents.ai_chat_json')
     def test_semantic_matching_explains_each_venue_without_overriding_policy_gate(self, mock_chat):
         manuscript = self._create_manuscript()

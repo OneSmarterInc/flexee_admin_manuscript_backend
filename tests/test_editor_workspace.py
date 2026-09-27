@@ -215,6 +215,105 @@ class EditorWorkspaceApiTests(TestCase):
         refreshed = self.client.get(f'/api/admin/venue-submissions/{self.submission.id}/')
         self.assertEqual(len(refreshed.json()['submission']['feedback']), 1)
 
+    def test_feedback_can_create_inactive_venue_config_draft_without_mutating_live_config(self):
+        other_venue = Venue.objects.create(
+            organization=self.organization,
+            name='Other Journal',
+            slug='other-journal',
+            venue_type='journal',
+        )
+        other_config = VenueAgentConfig.objects.create(
+            venue=other_venue,
+            version=1,
+            active=True,
+            aims_scope='Unrelated venue scope.',
+            accepted_methods=['Survey'],
+        )
+
+        feedback = self.client.post(
+            f'/api/admin/venues/{self.venue.id}/feedback/',
+            data=json.dumps({
+                'venue_submission_id': str(self.submission.id),
+                'assessment_field': 'accepted_methods',
+                'agent_value': ['Case study'],
+                'editor_value': ['Case study', 'Mixed methods'],
+                'reason': 'Mixed methods should be recognized for this venue.',
+            }),
+            content_type='application/json',
+        )
+        self.assertEqual(feedback.status_code, 201, feedback.content)
+        feedback_id = feedback.json()['feedback']['id']
+        self.assertEqual(feedback.json()['feedback']['venue_config_version'], 1)
+
+        insights = self.client.get(f'/api/admin/venues/{self.venue.id}/feedback/')
+        self.assertEqual(insights.status_code, 200, insights.content)
+        row = next(item for item in insights.json()['feedback'] if item['id'] == feedback_id)
+        self.assertTrue(row['draftable'])
+        self.assertIsNone(row['applied_to_config_version'])
+
+        draft_response = self.client.post(
+            f'/api/admin/venues/{self.venue.id}/feedback/draft-config/',
+            data=json.dumps({'feedback_ids': [feedback_id]}),
+            content_type='application/json',
+        )
+        self.assertEqual(draft_response.status_code, 201, draft_response.content)
+        draft_payload = draft_response.json()
+        self.assertTrue(draft_payload['activation_required'])
+        self.assertEqual(draft_payload['source_config_version'], 1)
+        self.assertEqual(draft_payload['changed_fields'], ['accepted_methods'])
+
+        draft = VenueAgentConfig.objects.get(id=draft_payload['config']['id'])
+        self.config_v1.refresh_from_db()
+        other_config.refresh_from_db()
+        self.assertFalse(draft.active)
+        self.assertTrue(self.config_v1.active)
+        self.assertTrue(other_config.active)
+        self.assertEqual(draft.accepted_methods, ['Case study', 'Mixed methods'])
+        self.assertEqual(draft.aims_scope, self.config_v1.aims_scope)
+        self.assertEqual(other_config.accepted_methods, ['Survey'])
+
+        stored_feedback = EditorFeedback.objects.get(id=feedback_id)
+        self.assertEqual(stored_feedback.venue_config_id, self.config_v1.id)
+        self.assertEqual(stored_feedback.applied_to_config_id, draft.id)
+
+        activate = self.client.post(
+            f'/api/admin/venues/{self.venue.id}/configs/{draft.id}/activate/',
+            data='{}',
+            content_type='application/json',
+        )
+        self.assertEqual(activate.status_code, 200, activate.content)
+        self.config_v1.refresh_from_db()
+        draft.refresh_from_db()
+        other_config.refresh_from_db()
+        self.assertFalse(self.config_v1.active)
+        self.assertTrue(draft.active)
+        self.assertTrue(other_config.active)
+
+    def test_assessment_feedback_cannot_silently_change_venue_rules(self):
+        feedback = self.client.post(
+            f'/api/admin/venues/{self.venue.id}/feedback/',
+            data=json.dumps({
+                'venue_submission_id': str(self.submission.id),
+                'assessment_field': 'methods',
+                'agent_value': {'summary': 'Methods are visible.'},
+                'editor_value': {'summary': 'Sampling detail needs clarification.'},
+                'reason': 'Editorial assessment correction.',
+            }),
+            content_type='application/json',
+        )
+        self.assertEqual(feedback.status_code, 201, feedback.content)
+        feedback_id = feedback.json()['feedback']['id']
+
+        response = self.client.post(
+            f'/api/admin/venues/{self.venue.id}/feedback/draft-config/',
+            data=json.dumps({'feedback_ids': [feedback_id]}),
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn('cannot directly modify venue rules', response.json()['detail'])
+        self.assertEqual(self.venue.agent_configs.count(), 1)
+        self.assertTrue(self.config_v1.active)
+
     def test_rejection_and_revision_require_editor_note(self):
         self.client.post(
             f'/api/admin/venue-submissions/{self.submission.id}/start-review/',

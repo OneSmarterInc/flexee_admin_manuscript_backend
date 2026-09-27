@@ -968,32 +968,86 @@ VENUE-SPECIFIC EDITOR FEEDBACK
 DETERMINISTIC EXTERNAL REFERENCE CHECK
 {json.dumps(_bounded(citation_checks), ensure_ascii=False)}
 
-Return JSON only:
+Return JSON only with this structure and no instructional placeholder text:
 {{
-  "editor_summary": "<concise brief for a human editor>",
-  "outlet_fit": {{"summary": "<evaluate how well the manuscript matches the venue aims and scope>", "venue_fields": ["aims_scope"], "manuscript_evidence_ids": ["M001"]}},
-  "policy_compliance": {{"summary": "<evaluate adherence to venue policies>", "venue_fields": ["policies"], "manuscript_evidence_ids": ["M001"]}},
-  "contribution": {{"summary": "<evaluate the novelty and significance>", "venue_fields": ["quality_threshold"], "manuscript_evidence_ids": ["M001"]}},
-  "methods": {{"summary": "<evaluate the methodology used>", "venue_fields": ["accepted_methods"], "manuscript_evidence_ids": ["M001"]}},
-  "citation_integrity": {{"summary": "<evaluate the references and citations>", "venue_fields": [], "manuscript_evidence_ids": ["M001"]}},
-  "unresolved_risks": [
-    {{"risk": "<describe a specific risk or note none found>", "venue_fields": ["reporting_standards"], "manuscript_evidence_ids": ["M001"]}}
-  ],
-  "reviewer_expertise": ["<specific expertise area>"]
+  "editor_summary": "",
+  "outlet_fit": {{"summary": "", "venue_fields": [], "manuscript_evidence_ids": []}},
+  "policy_compliance": {{"summary": "", "venue_fields": [], "manuscript_evidence_ids": []}},
+  "contribution": {{"summary": "", "venue_fields": [], "manuscript_evidence_ids": []}},
+  "methods": {{"summary": "", "venue_fields": [], "manuscript_evidence_ids": []}},
+  "citation_integrity": {{"summary": "", "venue_fields": [], "manuscript_evidence_ids": []}},
+  "unresolved_risks": [],
+  "reviewer_expertise": []
 }}
 
-You MUST populate every section (outlet_fit, policy_compliance, contribution, methods, citation_integrity) with a meaningful summary replacing the <...> placeholders. If there are no issues, describe why it complies rather than leaving it empty. Unresolved risks must list any concerns; if none exist, you must still provide at least one item explaining that no major risks were found. Reviewer expertise must suggest 1-3 specific areas based on the manuscript.
+Populate every editorial section with manuscript- and venue-specific content. Never copy schema labels,
+instructional text, angle-bracket placeholders, or example wording into any field.
+
+For venue_fields, use only actual configuration field names relevant to the statement.
+For manuscript_evidence_ids, use only evidence IDs that exist in the grounded semantic profile.
+For unresolved_risks, include only concrete risks supported by the manuscript or venue configuration.
+If no concrete unresolved risk exists, return an empty unresolved_risks array.
+For reviewer_expertise, return 1-3 short plain-text expertise areas, not objects, JSON fragments, summaries,
+or instructional phrases.
+
 The Crossref check is deterministic input: summarize it accurately and do not upgrade "weak match" or
 "not found" to "verified". If a venue rule is not configured, say that it is not configured rather
 than inventing one. Editor feedback is outlet-specific guidance and must not be generalized to other venues.
 """
 
 
+ASSESSMENT_PLACEHOLDER_FRAGMENTS = (
+    '<',
+    '>',
+    'describe a specific risk',
+    'specific expertise area',
+    'evaluate how well',
+    'evaluate adherence',
+    'evaluate the novelty',
+    'evaluate the methodology',
+    'evaluate the references',
+    'concise brief for a human editor',
+)
+
+
+def _clean_assessment_text(value, limit=1200):
+    text = _clean_text(value, limit)
+    lowered = text.lower()
+    if not text:
+        return ''
+    if text.startswith('<') and text.endswith('>'):
+        return ''
+    if any(fragment in lowered for fragment in ASSESSMENT_PLACEHOLDER_FRAGMENTS[2:]):
+        return ''
+    return text
+
+
+def _clean_reviewer_expertise(value):
+    if not isinstance(value, list):
+        return []
+    out = []
+    seen = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        text = _clean_assessment_text(item, 180)
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+        if len(out) >= 3:
+            break
+    return out
+
+
 def _assessment_section(value, valid_evidence_ids, key='summary'):
     if not isinstance(value, dict):
         value = {}
     return {
-        key: _clean_text(value.get(key), 1200),
+        key: _clean_assessment_text(value.get(key), 1200),
         'venue_fields': _clean_string_list(value.get('venue_fields'), limit=10, item_limit=80),
         'manuscript_evidence_ids': [
             evidence_id for evidence_id in _clean_string_list(
@@ -1203,14 +1257,14 @@ def run_venue_assessment(submission):
         'model': model,
         'generated_at': timezone.now().isoformat(),
         'venue_config_version': config.version,
-        'editor_summary': _clean_text(data.get('editor_summary'), 1800),
+        'editor_summary': _clean_assessment_text(data.get('editor_summary'), 1800),
         'outlet_fit': _assessment_section(data.get('outlet_fit'), valid_evidence_ids),
         'policy_compliance': _assessment_section(data.get('policy_compliance'), valid_evidence_ids),
         'contribution': _assessment_section(data.get('contribution'), valid_evidence_ids),
         'methods': _assessment_section(data.get('methods'), valid_evidence_ids),
         'citation_integrity': _assessment_section(data.get('citation_integrity'), valid_evidence_ids),
         'unresolved_risks': [],
-        'reviewer_expertise': _clean_string_list(data.get('reviewer_expertise'), limit=16, item_limit=180),
+        'reviewer_expertise': _clean_reviewer_expertise(data.get('reviewer_expertise')),
         'external_reference_check': citations,
         'analysis_coverage': profile.get('coverage', {}),
         'human_decision_required': True,
@@ -1224,7 +1278,7 @@ def run_venue_assessment(submission):
     for item in risks[:20]:
         if not isinstance(item, dict):
             continue
-        risk = _clean_text(item.get('risk'), 700)
+        risk = _clean_assessment_text(item.get('risk'), 700)
         if not risk:
             continue
         brief['unresolved_risks'].append({

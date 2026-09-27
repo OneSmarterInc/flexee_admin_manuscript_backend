@@ -1,0 +1,22 @@
+[Unit]
+Description=Flexee Manuscript Django API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/flexee/flexee_admin_manuscript_backend
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/var/www/flexee/flexee_admin_manuscript_backend/.venv/bin/gunicorn config.wsgi:application --bind 127.0.0.1:8000 --workers 3 --timeout 120 --access-logfile - --error-logfile -
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGQUIT
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

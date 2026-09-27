@@ -1560,9 +1560,9 @@ def author_transfer_submission(request, submission_id):
         return JsonResponse({'detail': 'Active venue not found'}, status=404)
     if target_venue.id == source.venue_id:
         return JsonResponse({'detail': 'Transfer destination must be a different venue'}, status=400)
-    if source.status not in {'rejected', 'withdrawn'}:
+    if source.status not in {'rejected', 'revision_requested', 'withdrawn'}:
         return JsonResponse(
-            {'detail': 'Transfer is available after a rejection or withdrawal'},
+            {'detail': 'Transfer is available after a rejection, revision request, or withdrawal'},
             status=409,
         )
 
@@ -1762,14 +1762,44 @@ def admin_venue_config(request, venue_id):
     }, status=201)
 
 
-@require_POST
+@require_http_methods(['GET', 'POST'])
 @require_admin
 def admin_editor_feedback(request, venue_id):
     try:
         venue = Venue.objects.get(id=venue_id)
     except Venue.DoesNotExist:
         return JsonResponse({'detail': 'Venue not found'}, status=404)
-    if not check_org_access(request.editor_user, venue.organization_id, ['owner', 'editor']):
+
+    read_roles = ['owner', 'editor', 'viewer']
+    write_roles = ['owner', 'editor']
+    if request.method == 'GET':
+        if not check_org_access(request.editor_user, venue.organization_id, read_roles):
+            return JsonResponse({'detail': 'Forbidden'}, status=403)
+        rows = EditorFeedback.objects.filter(venue=venue).select_related(
+            'venue_config', 'applied_to_config', 'venue_submission'
+        )[:200]
+        draftable_fields = {
+            'aims_scope', 'article_types', 'accepted_methods', 'quality_threshold',
+            'reviewer_criteria', 'policies', 'disclosures', 'reporting_standards',
+            'desk_rejection_rules', 'deadlines', 'submission_capacity', 'current_demand',
+        }
+        return JsonResponse({
+            'venue_id': str(venue.id),
+            'feedback': [{
+                'id': str(item.id),
+                'venue_submission_id': str(item.venue_submission_id) if item.venue_submission_id else None,
+                'venue_config_version': item.venue_config.version if item.venue_config_id else None,
+                'assessment_field': item.assessment_field,
+                'agent_value': item.agent_value,
+                'editor_value': item.editor_value,
+                'reason': item.reason,
+                'created_at': item.created_at.isoformat(),
+                'draftable': item.assessment_field in draftable_fields,
+                'applied_to_config_version': item.applied_to_config.version if item.applied_to_config_id else None,
+            } for item in rows],
+        })
+
+    if not check_org_access(request.editor_user, venue.organization_id, write_roles):
         return JsonResponse({'detail': 'Forbidden'}, status=403)
 
     data = _json_body(request)
@@ -1781,13 +1811,17 @@ def admin_editor_feedback(request, venue_id):
     submission_id = data.get('venue_submission_id')
     if submission_id:
         try:
-            submission = VenueSubmission.objects.get(id=submission_id, venue=venue)
+            submission = VenueSubmission.objects.select_related('venue_config').get(
+                id=submission_id,
+                venue=venue,
+            )
         except (VenueSubmission.DoesNotExist, ValueError):
             return JsonResponse({'detail': 'Venue submission not found for this venue'}, status=404)
 
     feedback = EditorFeedback.objects.create(
         venue=venue,
         venue_submission=submission,
+        venue_config=submission.venue_config if submission else _active_config(venue),
         assessment_field=field,
         agent_value=data.get('agent_value'),
         editor_value=data.get('editor_value'),
@@ -1802,19 +1836,175 @@ def admin_editor_feedback(request, venue_id):
         venue_id=venue.id,
         venue_submission_id=submission.id if submission else None,
         manuscript_id=submission.manuscript_id if submission else None,
-        detail={'assessment_field': feedback.assessment_field},
+        detail={
+            'assessment_field': feedback.assessment_field,
+            'venue_config_version': feedback.venue_config.version if feedback.venue_config_id else None,
+        },
     )
     return JsonResponse({
         'feedback': {
             'id': str(feedback.id),
             'venue_id': str(feedback.venue_id),
             'venue_submission_id': str(feedback.venue_submission_id) if feedback.venue_submission_id else None,
+            'venue_config_version': feedback.venue_config.version if feedback.venue_config_id else None,
             'assessment_field': feedback.assessment_field,
             'agent_value': feedback.agent_value,
             'editor_value': feedback.editor_value,
             'reason': feedback.reason,
             'created_at': feedback.created_at.isoformat(),
         }
+    }, status=201)
+
+
+FEEDBACK_DRAFT_FIELDS = {
+    'aims_scope',
+    'article_types',
+    'accepted_methods',
+    'quality_threshold',
+    'reviewer_criteria',
+    'policies',
+    'disclosures',
+    'reporting_standards',
+    'desk_rejection_rules',
+    'deadlines',
+    'submission_capacity',
+    'current_demand',
+}
+FEEDBACK_LIST_FIELDS = {
+    'article_types',
+    'accepted_methods',
+    'reviewer_criteria',
+    'disclosures',
+    'reporting_standards',
+    'desk_rejection_rules',
+}
+FEEDBACK_OBJECT_FIELDS = {
+    'policies',
+    'deadlines',
+    'submission_capacity',
+    'current_demand',
+}
+
+
+def _normalise_feedback_config_value(field, value):
+    if field in FEEDBACK_LIST_FIELDS:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            return _json_list(value)
+        raise ValueError(f'{field} feedback must be a list or text value')
+    if field in FEEDBACK_OBJECT_FIELDS:
+        if not isinstance(value, dict):
+            raise ValueError(f'{field} feedback must be a JSON object')
+        return value
+    if field in {'aims_scope', 'quality_threshold'}:
+        if isinstance(value, dict) and set(value.keys()) == {'note'}:
+            value = value.get('note')
+        return str(value or '').strip()
+    raise ValueError(f'{field} cannot be applied to a Venue Agent configuration')
+
+
+@require_POST
+@require_admin
+@transaction.atomic
+def admin_feedback_draft_config(request, venue_id):
+    try:
+        venue = Venue.objects.select_for_update().get(id=venue_id)
+    except Venue.DoesNotExist:
+        return JsonResponse({'detail': 'Venue not found'}, status=404)
+    if not check_org_access(request.editor_user, venue.organization_id, ['owner']):
+        return JsonResponse({'detail': 'Forbidden'}, status=403)
+
+    data = _json_body(request)
+    feedback_ids = data.get('feedback_ids')
+    if not isinstance(feedback_ids, list) or not feedback_ids:
+        return JsonResponse({'detail': 'feedback_ids must be a non-empty list'}, status=400)
+
+    active = venue.agent_configs.filter(active=True).order_by('-version').first()
+    if not active:
+        return JsonResponse({'detail': 'Create and activate a Venue Agent configuration first'}, status=409)
+
+    feedback_rows = list(
+        EditorFeedback.objects.filter(
+            venue=venue,
+            id__in=feedback_ids,
+            applied_to_config__isnull=True,
+        ).order_by('created_at', 'id')
+    )
+    if len(feedback_rows) != len(set(str(item) for item in feedback_ids)):
+        return JsonResponse(
+            {'detail': 'One or more feedback items are invalid, belong to another venue, or were already applied'},
+            status=409,
+        )
+
+    updates = {}
+    for row in feedback_rows:
+        field = row.assessment_field
+        if field not in FEEDBACK_DRAFT_FIELDS:
+            return JsonResponse(
+                {'detail': f'Feedback field {field!r} is editorial assessment feedback and cannot directly modify venue rules'},
+                status=400,
+            )
+        try:
+            updates[field] = _normalise_feedback_config_value(field, row.editor_value)
+        except ValueError as exc:
+            return JsonResponse({'detail': str(exc)}, status=400)
+
+    latest = venue.agent_configs.order_by('-version').first()
+    next_version = (latest.version + 1) if latest else 1
+    clone_fields = {
+        'aims_scope': active.aims_scope,
+        'article_types': active.article_types,
+        'accepted_methods': active.accepted_methods,
+        'quality_threshold': active.quality_threshold,
+        'reviewer_criteria': active.reviewer_criteria,
+        'policies': active.policies,
+        'disclosures': active.disclosures,
+        'reporting_standards': active.reporting_standards,
+        'desk_rejection_rules': active.desk_rejection_rules,
+        'structured_desk_rejection_rules': active.structured_desk_rejection_rules,
+        'required_submission_items': active.required_submission_items,
+        'retention_days': active.retention_days,
+        'deadlines': active.deadlines,
+        'submission_capacity': active.submission_capacity,
+        'current_demand': active.current_demand,
+    }
+    clone_fields.update(updates)
+
+    draft = VenueAgentConfig.objects.create(
+        venue=venue,
+        version=next_version,
+        active=False,
+        config_notes=(
+            f'Feedback-derived draft from active config v{active.version}. '
+            f'Applied {len(feedback_rows)} editor feedback item(s).'
+        ),
+        **clone_fields,
+    )
+    EditorFeedback.objects.filter(id__in=[item.id for item in feedback_rows]).update(
+        applied_to_config=draft
+    )
+    record_audit_event(
+        request,
+        'venue_config.feedback_draft_created',
+        resource_type='venue_config',
+        resource_id=draft.id,
+        organization_id=venue.organization_id,
+        venue_id=venue.id,
+        detail={
+            'version': draft.version,
+            'source_version': active.version,
+            'feedback_ids': [str(item.id) for item in feedback_rows],
+            'changed_fields': sorted(updates.keys()),
+            'active': False,
+        },
+    )
+    return JsonResponse({
+        'config': _venue_config_payload(draft),
+        'source_config_version': active.version,
+        'feedback_ids': [str(item.id) for item in feedback_rows],
+        'changed_fields': sorted(updates.keys()),
+        'activation_required': True,
     }, status=201)
 
 

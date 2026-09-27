@@ -3,7 +3,7 @@ import tempfile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 
-from review.models import Manuscript, Organization, Venue, VenueAgentConfig, VenueSubmission
+from review.models import Manuscript, Organization, SubmissionTransfer, Venue, VenueAgentConfig, VenueSubmission
 
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(prefix='flexee-author-tests-'))
@@ -177,6 +177,44 @@ class AuthorWorkflowApiTests(TestCase):
 
         source = VenueSubmission.objects.get(id=submission['id'])
         self.assertEqual(source.status, 'transferred')
+
+    def test_revision_requested_transfer_reuses_manuscript_with_account_session(self):
+        venue_a, venue_b = self._create_venues()
+        manuscript = self._create_manuscript()
+        create_response = self.client.post(
+            f"/api/author/manuscripts/{manuscript['id']}/submissions/",
+            data=json.dumps({'venue_id': str(venue_a.id)}),
+            content_type='application/json',
+        )
+        self.assertEqual(create_response.status_code, 201, create_response.content)
+        source_id = create_response.json()['submission']['id']
+
+        source = VenueSubmission.objects.get(id=source_id)
+        source.status = 'revision_requested'
+        source.decision = {
+            'decision': 'revision_requested',
+            'note': 'Revise or consider another outlet.',
+            'human_decision': True,
+        }
+        source.save(update_fields=['status', 'decision'])
+
+        response = self.client.post(
+            f"/api/author/venue-submissions/{source_id}/transfer/",
+            data=json.dumps({'venue_id': str(venue_b.id), 'reason': 'Author chose another venue after revision request'}),
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+
+        target = VenueSubmission.objects.get(id=response.json()['submission']['id'])
+        source.refresh_from_db()
+        self.assertEqual(source.status, 'transferred')
+        self.assertEqual(target.manuscript_id, source.manuscript_id)
+        self.assertEqual(target.venue_id, venue_b.id)
+        self.assertEqual(target.status, 'draft')
+        self.assertEqual(target.packet['transferred_from_submission_id'], str(source.id))
+        transfer = SubmissionTransfer.objects.get(from_submission=source, to_submission=target)
+        self.assertEqual(transfer.manuscript_id, source.manuscript_id)
+        self.assertIn('revision request', transfer.reason)
 
     def test_manuscript_endpoints_require_the_issued_access_token(self):
         manuscript = self._create_manuscript()

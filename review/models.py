@@ -446,6 +446,22 @@ class EditorFeedback(models.Model):
         null=True,
         blank=True,
     )
+    venue_config = models.ForeignKey(
+        VenueAgentConfig,
+        on_delete=models.PROTECT,
+        related_name='editor_feedback',
+        null=True,
+        blank=True,
+        help_text='Venue Agent configuration the editor was correcting.',
+    )
+    applied_to_config = models.ForeignKey(
+        VenueAgentConfig,
+        on_delete=models.SET_NULL,
+        related_name='feedback_sources',
+        null=True,
+        blank=True,
+        help_text='Inactive draft configuration created from this feedback, if any.',
+    )
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     assessment_field = models.CharField(max_length=120)
     agent_value = models.JSONField(null=True, blank=True)

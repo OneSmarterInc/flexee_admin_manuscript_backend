@@ -397,6 +397,73 @@ class AuthorAgentApiTests(TestCase):
             self.assertTrue(finding.claim)
 
     @patch('review.services.author_agents.ai_chat_json')
+    def test_venue_assessment_fills_missing_required_sections_from_grounded_inputs(self, mock_chat):
+        manuscript = self._create_manuscript()
+        venue, _ = self._create_venues()
+        manuscript.parsed_profile = {
+            'semantic': {
+                'summary': 'Applied AI agents in manufacturing operations.',
+                'topics': ['AI agents'],
+                'methods': ['controlled pilot comparison'],
+                'contributions': ['operational implementation evidence'],
+                'limitations': ['single site'],
+                'evidence_points': [
+                    {'id': 'M001', 'kind': 'topic', 'text': 'AI agents', 'source': {'type': 'manuscript'}},
+                    {'id': 'M002', 'kind': 'method', 'text': 'controlled pilot comparison', 'source': {'type': 'manuscript'}},
+                    {'id': 'M003', 'kind': 'contribution', 'text': 'operational implementation evidence', 'source': {'type': 'manuscript'}},
+                ],
+                'coverage': {'complete': True},
+            }
+        }
+        manuscript.save(update_fields=['parsed_profile', 'updated_at'])
+
+        create = self.client.post(
+            f'/api/author/manuscripts/{manuscript.id}/submissions/',
+            data=json.dumps({'venue_id': str(venue.id)}),
+            content_type='application/json',
+            **self._auth(manuscript),
+        )
+        self.assertEqual(create.status_code, 201, create.content)
+        submission_id = create.json()['submission']['id']
+
+        mock_chat.return_value = ('mock-qwen', json.dumps({
+            'editor_summary': '',
+            'outlet_fit': {
+                'summary': 'The manuscript aligns with the configured applied AI scope.',
+                'venue_fields': ['aims_scope'],
+                'manuscript_evidence_ids': ['M001'],
+            },
+            'policy_compliance': {'summary': '', 'venue_fields': [], 'manuscript_evidence_ids': []},
+            'contribution': {'summary': '', 'venue_fields': [], 'manuscript_evidence_ids': []},
+            'methods': {'summary': '', 'venue_fields': [], 'manuscript_evidence_ids': []},
+            'citation_integrity': {'summary': '', 'venue_fields': [], 'manuscript_evidence_ids': []},
+            'unresolved_risks': [],
+            'reviewer_expertise': ['Applied AI'],
+        }))
+
+        response = self.client.post(
+            f'/api/author/venue-submissions/{submission_id}/assessment/run/',
+            **self._auth(manuscript),
+        )
+        self.assertEqual(response.status_code, 202, response.content)
+
+        job = ReviewJob.objects.get(id=response.json()['job_id'])
+        from review.tasks import run_venue_assessment_task
+        run_venue_assessment_task(job.id, submission_id)
+
+        submission = VenueSubmission.objects.get(id=submission_id)
+        brief = submission.editorial_brief
+
+        self.assertTrue(brief['outlet_fit']['summary'])
+        self.assertTrue(brief['policy_compliance']['summary'])
+        self.assertTrue(brief['contribution']['summary'])
+        self.assertTrue(brief['methods']['summary'])
+        self.assertTrue(brief['citation_integrity']['summary'])
+        self.assertIn('operational implementation evidence', brief['contribution']['summary'])
+        self.assertIn('controlled pilot comparison', brief['methods']['summary'])
+        self.assertTrue(brief['editor_summary'])
+
+    @patch('review.services.author_agents.ai_chat_json')
     def test_venue_assessment_filters_placeholder_risks_and_object_reviewer_expertise(self, mock_chat):
         manuscript = self._create_manuscript()
         venue, _ = self._create_venues()

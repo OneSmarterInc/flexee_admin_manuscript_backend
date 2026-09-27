@@ -249,45 +249,69 @@ Author AI-use disclosure: {_clean_text(manuscript.disclosure, 800)}
 CHUNK {chunk['index']} — manuscript lines {chunk['start_line']}-{chunk['end_line']}
 {chunk['text']}
 
-Return JSON only in this exact shape:
+Return JSON only with these keys and value types:
 {{
-  "summary": "1-3 concise sentences",
-  "topics": ["topic"],
-  "methods": ["method or study design actually visible in this chunk"],
-  "contributions": ["claim about contribution visible in this chunk"],
-  "limitations": ["limitation or unresolved issue visible in this chunk"],
-  "evidence_points": [
-    {{
-      "kind": "topic, method, contribution, or limitation",
-      "text": "short manuscript-grounded observation",
-      "line_start": {chunk['start_line']},
-      "line_end": {chunk['start_line']}
-    }}
-  ],
-  "findings": [
-    {{
-      "code": "short_machine_code",
-      "label": "short human label",
-      "status": "pass or warning",
-      "detail": "specific readiness observation",
-      "line_start": {chunk['start_line']},
-      "line_end": {chunk['start_line']}
-    }}
-  ]
+  "summary": "",
+  "topics": [],
+  "methods": [],
+  "contributions": [],
+  "limitations": [],
+  "evidence_points": [],
+  "findings": []
 }}
 
-Every finding must cite line numbers from this chunk. If there is no support for a category, use an empty list.
+Populate every non-empty value with manuscript-specific content taken from the supplied metadata or numbered
+chunk. Never copy schema labels, instruction text, generic placeholders, or example wording into the response.
+For example, do NOT return strings such as "topic", "method or study design actually visible in this chunk",
+"claim about contribution visible in this chunk", "limitation or unresolved issue visible in this chunk",
+"short manuscript-grounded observation", "short human label", or "specific readiness observation".
+
+Each evidence_points item, when supported, must be an object with:
+- "kind": exactly one of "topic", "method", "contribution", or "limitation"
+- "text": a specific observation grounded in the manuscript
+- "line_start": an actual line number from this chunk
+- "line_end": an actual line number from this chunk
+
+Each findings item, when supported, must be an object with:
+- "code": a concise machine-readable code describing the actual finding
+- "label": a concise human label describing the actual finding
+- "status": exactly "pass" or "warning"
+- "detail": a specific readiness observation grounded in the manuscript
+- "line_start": an actual line number from this chunk
+- "line_end": an actual line number from this chunk
+
+Every finding must cite line numbers from this chunk. If there is no manuscript support for a category, use an empty list.
 Do not output a score, ranking, accept/reject recommendation, or claims about author intent.
 """
+
+
+SCHEMA_PLACEHOLDER_VALUES = {
+    'topic',
+    'method or study design actually visible in this chunk',
+    'claim about contribution visible in this chunk',
+    'limitation or unresolved issue visible in this chunk',
+    'short manuscript-grounded observation',
+    'short human label',
+    'specific readiness observation',
+}
+
+
+def _semantic_values(value, *, limit, item_limit):
+    values = _clean_string_list(value, limit=limit, item_limit=item_limit)
+    return [
+        item for item in values
+        if item.lower() not in SCHEMA_PLACEHOLDER_VALUES
+        and not (item.startswith('<') and item.endswith('>'))
+    ]
 
 
 def _sanitize_chunk_result(data, chunk, full_text):
     result = {
         'summary': _clean_text(data.get('summary'), 900),
-        'topics': _clean_string_list(data.get('topics'), limit=12, item_limit=120),
-        'methods': _clean_string_list(data.get('methods'), limit=12, item_limit=220),
-        'contributions': _clean_string_list(data.get('contributions'), limit=12, item_limit=260),
-        'limitations': _clean_string_list(data.get('limitations'), limit=12, item_limit=260),
+        'topics': _semantic_values(data.get('topics'), limit=12, item_limit=120),
+        'methods': _semantic_values(data.get('methods'), limit=12, item_limit=220),
+        'contributions': _semantic_values(data.get('contributions'), limit=12, item_limit=260),
+        'limitations': _semantic_values(data.get('limitations'), limit=12, item_limit=260),
         'evidence_points': [],
         'findings': [],
     }

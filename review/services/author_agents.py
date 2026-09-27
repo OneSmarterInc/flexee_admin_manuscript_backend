@@ -1058,6 +1058,122 @@ def _assessment_section(value, valid_evidence_ids, key='summary'):
     }
 
 
+def _first_profile_evidence_id(manuscript, kind):
+    for evidence_id, point in _profile_evidence_map(manuscript).items():
+        if isinstance(point, dict) and point.get('kind') == kind:
+            return evidence_id
+    return None
+
+
+def _ensure_required_brief_sections(submission, config, brief, citations):
+    manuscript = submission.manuscript
+    profile = (manuscript.parsed_profile or {}).get('semantic', {})
+    if not isinstance(profile, dict):
+        profile = {}
+
+    match = manuscript.venue_matches.filter(venue=submission.venue).first()
+
+    if not brief.get('outlet_fit', {}).get('summary'):
+        summary = ''
+        if match and match.fit_summary:
+            summary = _clean_text(match.fit_summary, 1200)
+        if not summary:
+            summary = _clean_text(
+                f'The manuscript was evaluated against the configured aims and scope for {submission.venue.name}.',
+                1200,
+            )
+        brief['outlet_fit'] = {
+            'summary': summary,
+            'venue_fields': ['aims_scope'] if config.aims_scope else [],
+            'manuscript_evidence_ids': (
+                [_first_profile_evidence_id(manuscript, 'topic')]
+                if _first_profile_evidence_id(manuscript, 'topic') else []
+            ),
+        }
+
+    if not brief.get('policy_compliance', {}).get('summary'):
+        configured = []
+        if config.policies:
+            configured.append('policies')
+        if config.disclosures:
+            configured.append('disclosures')
+        if config.reporting_standards:
+            configured.append('reporting_standards')
+        if configured:
+            summary = (
+                'Venue-specific policy requirements are configured and require human editorial verification '
+                'against the submitted manuscript and disclosures.'
+            )
+        else:
+            summary = 'No venue-specific policy rules are currently configured beyond the deterministic submission checks.'
+        brief['policy_compliance'] = {
+            'summary': summary,
+            'venue_fields': configured,
+            'manuscript_evidence_ids': [],
+        }
+
+    if not brief.get('contribution', {}).get('summary'):
+        contributions = _clean_string_list(profile.get('contributions'), limit=3, item_limit=260)
+        if contributions:
+            summary = contributions[0]
+        elif profile.get('summary'):
+            summary = _clean_text(profile.get('summary'), 1200)
+        else:
+            summary = 'The contribution requires human editorial assessment from the manuscript evidence available.'
+        brief['contribution'] = {
+            'summary': summary,
+            'venue_fields': ['quality_threshold'] if config.quality_threshold else [],
+            'manuscript_evidence_ids': (
+                [_first_profile_evidence_id(manuscript, 'contribution')]
+                if _first_profile_evidence_id(manuscript, 'contribution') else []
+            ),
+        }
+
+    if not brief.get('methods', {}).get('summary'):
+        methods = _clean_string_list(profile.get('methods'), limit=3, item_limit=260)
+        if methods:
+            summary = methods[0]
+        else:
+            summary = 'No specific method was extracted into the semantic profile; methods require human review.'
+        brief['methods'] = {
+            'summary': summary,
+            'venue_fields': ['accepted_methods'] if config.accepted_methods else [],
+            'manuscript_evidence_ids': (
+                [_first_profile_evidence_id(manuscript, 'method')]
+                if _first_profile_evidence_id(manuscript, 'method') else []
+            ),
+        }
+
+    if not brief.get('citation_integrity', {}).get('summary'):
+        results = citations.get('results', []) if isinstance(citations, dict) else []
+        checked = int(citations.get('checked', 0) or 0) if isinstance(citations, dict) else 0
+        if checked:
+            verified = sum(1 for item in results if item.get('status') == 'verified')
+            unresolved = checked - verified
+            summary = (
+                f'Crossref verification checked {checked} sampled reference(s): '
+                f'{verified} verified and {unresolved} unresolved or not found.'
+            )
+        elif isinstance(citations, dict) and citations.get('unavailable'):
+            summary = 'External citation verification was unavailable; citation integrity requires human review.'
+        else:
+            summary = 'No sampled references were available for external citation verification.'
+        brief['citation_integrity'] = {
+            'summary': summary,
+            'venue_fields': [],
+            'manuscript_evidence_ids': [],
+        }
+
+    if not brief.get('editor_summary'):
+        parts = [
+            brief['outlet_fit']['summary'],
+            brief['contribution']['summary'],
+        ]
+        brief['editor_summary'] = _clean_text(' '.join(part for part in parts if part), 1800)
+
+    return brief
+
+
 def _persist_assessment_evidence(submission, config, brief, citation_checks, model):
     manuscript = submission.manuscript
     created = []
@@ -1273,6 +1389,8 @@ def run_venue_assessment(submission):
             'a manuscript. Every editorial decision is made by a human editor at the venue.'
         ),
     }
+
+    brief = _ensure_required_brief_sections(submission, config, brief, citations)
 
     risks = data.get('unresolved_risks') if isinstance(data.get('unresolved_risks'), list) else []
     for item in risks[:20]:

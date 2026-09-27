@@ -27,6 +27,11 @@ class Command(BaseCommand):
         )
         require(settings.DEBUG is False, 'Django DEBUG must be false.')
         require(bool(settings.ALLOWED_HOSTS) and '*' not in settings.ALLOWED_HOSTS, 'DJANGO_ALLOWED_HOSTS must be explicit and may not contain *.')
+        require(settings.SESSION_COOKIE_SECURE is True, 'Django session cookies must be Secure.')
+        require(settings.CSRF_COOKIE_SECURE is True, 'Django CSRF cookies must be Secure.')
+        require(os.getenv('COOKIE_SECURE', '').strip().lower() in {'1', 'true', 'yes', 'on'}, 'COOKIE_SECURE must be true for the custom author session cookie.')
+        require(settings.SECURE_SSL_REDIRECT is True, 'SECURE_SSL_REDIRECT must be enabled.')
+        require(settings.DATABASES['default']['ENGINE'] == 'django.db.backends.postgresql', 'Production must use PostgreSQL.')
 
         origins = [x.strip() for x in os.getenv('FRONTEND_ORIGINS', '').split(',') if x.strip()]
         require(bool(origins) and all(x.startswith('https://') for x in origins), 'FRONTEND_ORIGINS must contain only explicit https:// origins.')

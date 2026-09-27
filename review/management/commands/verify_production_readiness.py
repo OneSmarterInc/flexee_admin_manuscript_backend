@@ -21,10 +21,17 @@ class Command(BaseCommand):
             if not condition:
                 errors.append(message)
 
+        def configured(name):
+            value = os.getenv(name, '').strip()
+            return bool(value) and 'CHANGE_ME' not in value.upper()
+
         require(
             os.getenv('DJANGO_ENV', '').strip().lower() == 'production',
             'DJANGO_ENV must be production.',
         )
+        require(configured('DJANGO_SECRET_KEY'), 'DJANGO_SECRET_KEY must be a real production secret, not a template placeholder.')
+        require(configured('ADMIN_SESSION_SECRET'), 'ADMIN_SESSION_SECRET must be a real production secret, not a template placeholder.')
+        require(configured('DATABASE_URL'), 'DATABASE_URL must be a real production PostgreSQL URL, not a template placeholder.')
         require(settings.DEBUG is False, 'Django DEBUG must be false.')
         require(bool(settings.ALLOWED_HOSTS) and '*' not in settings.ALLOWED_HOSTS, 'DJANGO_ALLOWED_HOSTS must be explicit and may not contain *.')
         require(settings.SESSION_COOKIE_SECURE is True, 'Django session cookies must be Secure.')
@@ -46,15 +53,15 @@ class Command(BaseCommand):
                 outside_source = True
             require(outside_source, 'PRIVATE_MEDIA_ROOT must be outside the application source tree.')
 
-        require(bool(os.getenv('SMTP_HOST', '').strip()), 'SMTP_HOST must be configured for real production email.')
+        require(configured('SMTP_HOST'), 'SMTP_HOST must be configured for real production email.')
         require(bool(os.getenv('NOTIFY_FROM_EMAIL', '').strip()), 'NOTIFY_FROM_EMAIL must be configured.')
-        require(bool(os.getenv('SENTRY_DSN', '').strip()), 'SENTRY_DSN must be configured for production error reporting.')
+        require(configured('SENTRY_DSN'), 'SENTRY_DSN must be configured for production error reporting.')
         require(bool(os.getenv('BACKUP_ROOT', '').strip()), 'BACKUP_ROOT must be configured for durable backups.')
 
         provider = os.getenv('AI_PROVIDER', '').strip().lower()
         require(provider in {'anthropic', 'ollama'}, 'AI_PROVIDER must be explicitly set to anthropic or ollama in production.')
         if provider == 'anthropic':
-            require(bool(os.getenv('ANTHROPIC_API_KEY', '').strip()), 'ANTHROPIC_API_KEY must be configured when AI_PROVIDER=anthropic.')
+            require(configured('ANTHROPIC_API_KEY'), 'ANTHROPIC_API_KEY must be configured when AI_PROVIDER=anthropic.')
             require(importlib.util.find_spec('anthropic') is not None, 'The anthropic Python SDK must be installed when AI_PROVIDER=anthropic.')
         elif provider == 'ollama':
             model = os.getenv('OLLAMA_MODEL', '').strip()

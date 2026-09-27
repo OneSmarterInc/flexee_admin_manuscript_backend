@@ -156,6 +156,37 @@ class AuthorAgentApiTests(TestCase):
             ).exists()
         )
 
+    def test_semantic_prompt_does_not_seed_literal_schema_placeholders(self):
+        from review.services.author_agents import _chunk_prompt, _sanitize_chunk_result
+
+        manuscript = self._create_manuscript()
+        chunk = {
+            'index': 1,
+            'start_line': 1,
+            'end_line': 4,
+            'text': '[L1] # Agentic Operations\n[L2] ## Abstract\n[L3] This study evaluates AI agents.\n[L4] ## Methods',
+        }
+        prompt = _chunk_prompt(manuscript, chunk)
+
+        self.assertIn('"topics": []', prompt)
+        self.assertIn('Never copy schema labels', prompt)
+        self.assertNotIn('"topics": ["topic"]', prompt)
+
+        sanitized = _sanitize_chunk_result({
+            'summary': 'A manuscript-specific summary.',
+            'topics': ['topic', 'AI agents'],
+            'methods': ['method or study design actually visible in this chunk', 'controlled pilot'],
+            'contributions': ['claim about contribution visible in this chunk', 'operational evidence'],
+            'limitations': ['limitation or unresolved issue visible in this chunk', 'single site'],
+            'evidence_points': [],
+            'findings': [],
+        }, chunk, '# Agentic Operations\n## Abstract\nThis study evaluates AI agents.\n## Methods')
+
+        self.assertEqual(sanitized['topics'], ['AI agents'])
+        self.assertEqual(sanitized['methods'], ['controlled pilot'])
+        self.assertEqual(sanitized['contributions'], ['operational evidence'])
+        self.assertEqual(sanitized['limitations'], ['single site'])
+
     @patch('review.services.author_agents.ai_chat_json')
     def test_semantic_matching_explains_each_venue_without_overriding_policy_gate(self, mock_chat):
         manuscript = self._create_manuscript()

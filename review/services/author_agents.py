@@ -390,12 +390,51 @@ def _aggregate_profile(chunk_results, *, total_chunks, analyzed_chunks):
                 'id': f'M{len(evidence_points) + 1:03d}',
                 **point,
             })
+
+    topics = _unique((x for r in chunk_results for x in r['topics']), 24)
+    methods = _unique((x for r in chunk_results for x in r['methods']), 24)
+    contributions = _unique((x for r in chunk_results for x in r['contributions']), 24)
+    limitations = _unique((x for r in chunk_results for x in r['limitations']), 24)
+
+    # Small local models sometimes provide stronger grounded evidence_points than
+    # their repeated top-level arrays. Only fill a missing category from already
+    # validated manuscript-grounded evidence; never overwrite a model-supplied list.
+    if not topics:
+        topics = _unique(
+            (point.get('text') for point in evidence_points if point.get('kind') == 'topic'),
+            24,
+        )
+    if not methods:
+        methods = _unique(
+            (point.get('text') for point in evidence_points if point.get('kind') == 'method'),
+            24,
+        )
+    if not contributions:
+        contributions = _unique(
+            (point.get('text') for point in evidence_points if point.get('kind') == 'contribution'),
+            24,
+        )
+    if not limitations:
+        limitations = _unique(
+            (point.get('text') for point in evidence_points if point.get('kind') == 'limitation'),
+            24,
+        )
+
+    summary = _clean_text(' '.join(r['summary'] for r in chunk_results if r['summary']), 2600)
+    if not summary and evidence_points:
+        summary_parts = []
+        for kind in ('topic', 'method', 'contribution', 'limitation'):
+            point = next((item for item in evidence_points if item.get('kind') == kind and item.get('text')), None)
+            if point:
+                summary_parts.append(point['text'])
+        summary = _clean_text(' '.join(summary_parts), 2600)
+
     return {
-        'summary': _clean_text(' '.join(r['summary'] for r in chunk_results if r['summary']), 2600),
-        'topics': _unique((x for r in chunk_results for x in r['topics']), 24),
-        'methods': _unique((x for r in chunk_results for x in r['methods']), 24),
-        'contributions': _unique((x for r in chunk_results for x in r['contributions']), 24),
-        'limitations': _unique((x for r in chunk_results for x in r['limitations']), 24),
+        'summary': summary,
+        'topics': topics,
+        'methods': methods,
+        'contributions': contributions,
+        'limitations': limitations,
         'evidence_points': evidence_points[:120],
         'coverage': {
             'total_chunks': total_chunks,

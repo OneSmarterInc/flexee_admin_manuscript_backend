@@ -397,6 +397,75 @@ class AuthorAgentApiTests(TestCase):
             self.assertTrue(finding.claim)
 
     @patch('review.services.author_agents.ai_chat_json')
+    def test_venue_assessment_filters_placeholder_risks_and_object_reviewer_expertise(self, mock_chat):
+        manuscript = self._create_manuscript()
+        venue, _ = self._create_venues()
+        manuscript.parsed_profile = {
+            'semantic': {
+                'summary': 'Applied AI agents in manufacturing operations.',
+                'topics': ['AI agents'],
+                'methods': ['controlled pilot comparison'],
+                'contributions': ['operational evidence'],
+                'limitations': ['single site'],
+                'evidence_points': [{
+                    'id': 'M001',
+                    'kind': 'topic',
+                    'text': 'Applied AI agents in manufacturing operations.',
+                    'source': {'type': 'manuscript', 'locator': 'lines 1-3', 'excerpt': 'Applied AI agents.'},
+                }],
+                'coverage': {'complete': True},
+            }
+        }
+        manuscript.save(update_fields=['parsed_profile', 'updated_at'])
+
+        create = self.client.post(
+            f'/api/author/manuscripts/{manuscript.id}/submissions/',
+            data=json.dumps({'venue_id': str(venue.id)}),
+            content_type='application/json',
+            **self._auth(manuscript),
+        )
+        self.assertEqual(create.status_code, 201, create.content)
+        submission_id = create.json()['submission']['id']
+
+        mock_chat.return_value = ('mock-qwen', json.dumps({
+            'editor_summary': 'Human editors should review the venue-specific evidence.',
+            'outlet_fit': {'summary': 'The topic aligns with the configured applied AI scope.', 'venue_fields': ['aims_scope'], 'manuscript_evidence_ids': ['M001']},
+            'policy_compliance': {'summary': 'The configured policy requires a human check.', 'venue_fields': ['policies'], 'manuscript_evidence_ids': ['M001']},
+            'contribution': {'summary': 'The manuscript reports operational evidence.', 'venue_fields': ['quality_threshold'], 'manuscript_evidence_ids': ['M001']},
+            'methods': {'summary': 'The controlled pilot is visible in the manuscript.', 'venue_fields': ['accepted_methods'], 'manuscript_evidence_ids': ['M001']},
+            'citation_integrity': {'summary': 'Citation checks remain advisory.', 'venue_fields': [], 'manuscript_evidence_ids': []},
+            'unresolved_risks': [{
+                'risk': '<describe a specific risk or note that it is not configured>',
+                'venue_fields': ['reporting_standards'],
+                'manuscript_evidence_ids': ['M001'],
+            }],
+            'reviewer_expertise': [
+                {'summary': 'Applied AI'},
+                '<specific expertise area>',
+                'Enterprise AI governance',
+                'Mixed-methods research',
+            ],
+        }))
+
+        response = self.client.post(
+            f'/api/author/venue-submissions/{submission_id}/assessment/run/',
+            **self._auth(manuscript),
+        )
+        self.assertEqual(response.status_code, 202, response.content)
+
+        job = ReviewJob.objects.get(id=response.json()['job_id'])
+        from review.tasks import run_venue_assessment_task
+        run_venue_assessment_task(job.id, submission_id)
+
+        submission = VenueSubmission.objects.get(id=submission_id)
+        self.assertEqual(submission.editorial_brief['unresolved_risks'], [])
+        self.assertEqual(
+            submission.editorial_brief['reviewer_expertise'],
+            ['Enterprise AI governance', 'Mixed-methods research'],
+        )
+        self.assertNotIn('<', json.dumps(submission.editorial_brief))
+
+    @patch('review.services.author_agents.ai_chat_json')
     @patch('review.services.author_agents.ai_available')
     def test_semantic_readiness_failure_gracefully_degrades_to_deterministic_fallback(self, mock_available, mock_chat):
         manuscript = self._create_manuscript()

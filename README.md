@@ -1,6 +1,6 @@
 # Backend
 
-Django + SQLite manuscript review API.
+Django manuscript review API. Local development may use SQLite; production requires PostgreSQL.
 
 Windows PowerShell:
 
@@ -9,12 +9,12 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
-python scripts\generate_admin.py --username admin
 python manage.py migrate
+python manage.py create_editor_user admin@example.com --platform_superuser
 python manage.py runserver 0.0.0.0:8000
 ```
 
-Copy the generated `ADMIN_*` values into `.env`, install Ollama, and run `ollama pull qwen2.5:0.5b-instruct`. The review engine uses the local Ollama API; no cloud AI API key is required. The default 4096-token context is intentionally conservative for an 8 GB RAM development machine.
+Save the generated editor password and authenticator URI securely. For local Ollama development, install Ollama and run `ollama pull qwen2.5:0.5b-instruct`. The default 4096-token context is intentionally conservative for an 8 GB RAM development machine.
 
 
 ## Scholarly network venue setup
@@ -35,12 +35,12 @@ Editors can then maintain venue metadata, create new configuration versions, rea
 
 ## Production
 
-Production deployment requires two processes sharing the same `DATABASE_URL` (or using the same SQLite database file):
+Production deployment requires PostgreSQL plus two long-running application processes sharing the same production configuration:
 
 1. The Gunicorn/API process serving HTTP requests
 2. The Django-Q worker process running `python manage.py qcluster`
 
-See `flexee-qcluster.service` for an example systemd unit configuration for the worker process.
+The repository includes `flexee-api.service` and `flexee-qcluster.service`, plus backup and queue-health service/timer units. Copy `.env.production.example` to `.env` on the server, replace every `CHANGE_ME` value, and run `python manage.py verify_production_readiness` before enabling traffic. The Nginx same-origin template is in `deploy/nginx-flexee.conf`.
 
 ## Production-style scholarly-network E2E
 

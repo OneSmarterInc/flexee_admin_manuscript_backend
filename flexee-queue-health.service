@@ -7,7 +7,8 @@ Type=oneshot
 User=www-data
 Group=www-data
 WorkingDirectory=/var/www/flexee/flexee_admin_manuscript_backend
-EnvironmentFile=/var/www/flexee/flexee_admin_manuscript_backend/.env
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/var/www/flexee/flexee_admin_manuscript_backend/.venv/bin/python manage.py check_queue_health --alert --fail-on-unhealthy
 NoNewPrivileges=true
 PrivateTmp=true
+UMask=0077

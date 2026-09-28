@@ -5,11 +5,27 @@ from django.utils import timezone
 from ..models import SMTPSettings
 
 import html
+import re
 
 def build_html_email(subject, body):
     safe_subject = html.escape(subject)
     safe_body = html.escape(body)
-    paragraphs = "".join([f'<p style="margin: 0 0 16px 0;">{p.strip()}</p>' for p in safe_body.split('\n\n') if p.strip()])
+
+    def linkify(value):
+        return re.sub(
+            r'(https?://[^\\s<]+)',
+            lambda match: (
+                f'<a href="{match.group(1)}" style="color:#b45f2f;word-break:break-all;">'
+                f'{match.group(1)}</a>'
+            ),
+            value,
+        )
+
+    paragraphs = "".join([
+        f'<p style="margin: 0 0 16px 0;">{linkify(p.strip()).replace(chr(10), "<br>")}</p>'
+        for p in safe_body.split('\n\n')
+        if p.strip()
+    ])
     return f"""<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"></head>

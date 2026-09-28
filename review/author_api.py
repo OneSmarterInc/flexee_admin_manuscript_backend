@@ -666,12 +666,26 @@ def _send_author_verification(request, author):
     from django.core.signing import dumps
 
     token = dumps({'author_id': str(author.id)})
-    verify_url = request.build_absolute_uri(f'/api/author/verify-email/?token={token}')
-    _send_email(
+    path = f'/api/author/verify-email/?token={token}'
+    public_origin = (
+        os.getenv('AUTHOR_VERIFICATION_BASE_URL', '').strip()
+        or os.getenv('PUBLIC_BACKEND_URL', '').strip()
+    )
+    verify_url = f"{public_origin.rstrip('/')}{path}" if public_origin else request.build_absolute_uri(path)
+
+    result = _send_email(
         to=author.email,
         subject='Verify your author account',
-        body=f'Please verify your email by clicking: {verify_url}',
+        body=(
+            f'Hello {author.name},\n\n'
+            'Please verify your Flexee author account by opening the link below:\n\n'
+            f'{verify_url}\n\n'
+            'This verification link expires in 7 days. If you did not create this account, you can ignore this email.'
+        ),
     )
+    if not result or not result.get('sent'):
+        raise RuntimeError('Verification email was not accepted by the configured email backend.')
+    return result
 
 
 @require_POST

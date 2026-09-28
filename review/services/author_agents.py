@@ -1043,6 +1043,44 @@ def _clean_reviewer_expertise(value):
     return out
 
 
+def _fallback_reviewer_expertise(config, profile):
+    """Return 1-3 grounded expertise areas only when the model supplied none."""
+    candidates = []
+
+    candidates.extend(
+        _clean_string_list(getattr(config, 'reviewer_criteria', None), limit=6, item_limit=180)
+    )
+
+    current_demand = getattr(config, 'current_demand', None)
+    if isinstance(current_demand, dict):
+        candidates.extend(
+            _clean_string_list(current_demand.get('topics'), limit=6, item_limit=180)
+        )
+
+    if isinstance(profile, dict):
+        candidates.extend(
+            _clean_string_list(profile.get('topics'), limit=6, item_limit=180)
+        )
+        candidates.extend(
+            _clean_string_list(profile.get('methods'), limit=6, item_limit=180)
+        )
+
+    out = []
+    seen = set()
+    for item in candidates:
+        text = _clean_assessment_text(item, 180)
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+        if len(out) >= 3:
+            break
+    return out
+
+
 def _assessment_section(value, valid_evidence_ids, key='summary'):
     if not isinstance(value, dict):
         value = {}
@@ -1163,6 +1201,11 @@ def _ensure_required_brief_sections(submission, config, brief, citations):
             'venue_fields': [],
             'manuscript_evidence_ids': [],
         }
+
+    reviewer_expertise = _clean_reviewer_expertise(brief.get('reviewer_expertise'))
+    if not reviewer_expertise:
+        reviewer_expertise = _fallback_reviewer_expertise(config, profile)
+    brief['reviewer_expertise'] = reviewer_expertise
 
     if not brief.get('editor_summary'):
         parts = [

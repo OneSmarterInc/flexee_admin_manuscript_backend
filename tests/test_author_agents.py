@@ -438,7 +438,7 @@ class AuthorAgentApiTests(TestCase):
             'methods': {'summary': '', 'venue_fields': [], 'manuscript_evidence_ids': []},
             'citation_integrity': {'summary': '', 'venue_fields': [], 'manuscript_evidence_ids': []},
             'unresolved_risks': [],
-            'reviewer_expertise': ['Applied AI'],
+            'reviewer_expertise': [],
         }))
 
         response = self.client.post(
@@ -462,6 +462,10 @@ class AuthorAgentApiTests(TestCase):
         self.assertIn('operational implementation evidence', brief['contribution']['summary'])
         self.assertIn('controlled pilot comparison', brief['methods']['summary'])
         self.assertTrue(brief['editor_summary'])
+        self.assertEqual(
+            brief['reviewer_expertise'],
+            ['Applied AI', 'Operations management', 'AI agents'],
+        )
 
     @patch('review.services.author_agents.ai_chat_json')
     def test_venue_assessment_filters_placeholder_risks_and_object_reviewer_expertise(self, mock_chat):

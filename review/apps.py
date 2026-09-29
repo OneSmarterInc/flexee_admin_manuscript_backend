@@ -14,6 +14,12 @@ def register_sweeper_schedule(sender, **kwargs):
     )
 
 
+def register_retention_schedule(sender, **kwargs):
+    from django.core.management import call_command
+
+    call_command('install_retention_schedule', verbosity=0)
+
+
 class ReviewConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
     name = 'review'
@@ -21,5 +27,9 @@ class ReviewConfig(AppConfig):
     def ready(self):
         post_migrate.connect(
             register_sweeper_schedule,
+            sender=self
+        )
+        post_migrate.connect(
+            register_retention_schedule,
             sender=self
         )

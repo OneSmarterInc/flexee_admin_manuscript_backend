@@ -179,7 +179,7 @@ def _submission_summary(item):
 
 @require_GET
 def health(request):
-    return JsonResponse({'ok': True, 'service': 'flexee-manuscript-django-sqlite'})
+    return JsonResponse({'ok': True, 'service': 'flexee-manuscript-backend'})
 
 
 @require_POST

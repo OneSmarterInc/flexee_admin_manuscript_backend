@@ -24,6 +24,7 @@ from .auth import (
     check_org_access,
 )
 from .models import (
+    AuditEvent,
     Author,
     AuthorAuthEvent,
     EditorFeedback,
@@ -944,6 +945,62 @@ def author_login(request):
         'name': author.name,
         'email_verified': author.email_verified,
     })
+    set_author_session_cookie(response, token, max_age)
+    return response
+
+
+AUTHOR_PASSWORD_MIN_LENGTH = 8  # same rule as author registration
+
+
+@require_POST
+@require_author
+def author_change_password(request):
+    """Change the signed-in author's password. Other sessions are signed out."""
+    from .auth import (
+        PASSWORD_CHANGE_MAX_FAILURES, PASSWORD_CHANGE_WINDOW_MINUTES,
+        hash_password, validate_password_change, verify_password,
+    )
+    try:
+        author = Author.objects.get(id=request.flexee_author['aid'])
+    except Author.DoesNotExist:
+        return JsonResponse({'detail': 'Author not found'}, status=401)
+    try:
+        data = json.loads(request.body or b'{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'detail': 'Invalid JSON'}, status=400)
+    current = str(data.get('current_password', ''))
+    new = str(data.get('new_password', ''))
+    confirm = str(data.get('confirm_password', ''))
+
+    def audit(action, detail=None):
+        AuditEvent.objects.create(
+            actor_email=author.email, actor_role='author', action=action,
+            resource_type='author_account', resource_id=str(author.id),
+            remote_hash=remote_hash(request), detail=detail or {},
+        )
+
+    window_start = timezone.now() - timedelta(minutes=PASSWORD_CHANGE_WINDOW_MINUTES)
+    recent_failures = AuditEvent.objects.filter(
+        resource_type='author_account', resource_id=str(author.id),
+        action='author.password_change_failed', occurred_at__gte=window_start,
+    ).count()
+    if recent_failures >= PASSWORD_CHANGE_MAX_FAILURES:
+        return JsonResponse({'detail': 'Too many attempts. Try again in a few minutes.'}, status=429)
+
+    error = validate_password_change(current, new, confirm, min_length=AUTHOR_PASSWORD_MIN_LENGTH)
+    if error:
+        return JsonResponse({'detail': error, 'field': 'new_password'}, status=400)
+    if not verify_password(current, author.password_hash):
+        audit('author.password_change_failed', {'reason': 'wrong_current_password'})
+        return JsonResponse({'detail': 'Your current password is incorrect.', 'field': 'current_password'}, status=400)
+
+    author.password_hash = hash_password(new)
+    author.password_changed_at = timezone.now()
+    author.save(update_fields=['password_hash', 'password_changed_at', 'updated_at'])
+    audit('author.password_changed')
+
+    token, max_age = issue_author_session(author.id)
+    response = JsonResponse({'ok': True})
     set_author_session_cookie(response, token, max_age)
     return response
 

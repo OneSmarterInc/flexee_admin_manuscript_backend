@@ -13,6 +13,8 @@ from django.views.decorators.http import require_GET, require_POST
 from .auth import (
     clear_session_cookie, issue_session, read_session, remote_hash, require_admin,
     set_session_cookie, verify_password, verify_totp, require_platform_superuser,
+    hash_password, validate_password_change,
+    PASSWORD_CHANGE_MAX_FAILURES, PASSWORD_CHANGE_WINDOW_MINUTES,
 )
 from .models import AdminAuthEvent, ReviewEvent, Submission, SMTPSettings
 from .services.email_service import send_review_emails, send_acceptance_email, send_rejection_email
@@ -452,6 +454,50 @@ def admin_login(request):
     response = JsonResponse({'ok': True, 'username': username})
     set_session_cookie(response, token, max_age)
     response['Cache-Control'] = 'no-store'
+    return response
+
+
+ADMIN_PASSWORD_MIN_LENGTH = 12
+
+
+@require_POST
+@require_admin
+def admin_change_password(request):
+    """Change the signed-in admin's password. Other sessions are signed out."""
+    from .models import AuditEvent
+    user = request.editor_user
+    try:
+        data = json.loads(request.body or b'{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'detail': 'Invalid JSON'}, status=400)
+    current = str(data.get('current_password', ''))
+    new = str(data.get('new_password', ''))
+    confirm = str(data.get('confirm_password', ''))
+
+    window_start = timezone.now() - timedelta(minutes=PASSWORD_CHANGE_WINDOW_MINUTES)
+    recent_failures = AuditEvent.objects.filter(
+        actor_id=user.id, action='admin.password_change_failed', occurred_at__gte=window_start,
+    ).count()
+    if recent_failures >= PASSWORD_CHANGE_MAX_FAILURES:
+        return JsonResponse({'detail': 'Too many attempts. Try again in a few minutes.'}, status=429)
+
+    error = validate_password_change(current, new, confirm, min_length=ADMIN_PASSWORD_MIN_LENGTH)
+    if error:
+        return JsonResponse({'detail': error, 'field': 'new_password'}, status=400)
+    if not verify_password(current, user.password_hash):
+        record_audit_event(request, 'admin.password_change_failed', resource_type='admin_session',
+                           resource_id=user.id, detail={'reason': 'wrong_current_password'})
+        return JsonResponse({'detail': 'Your current password is incorrect.', 'field': 'current_password'}, status=400)
+
+    user.password_hash = hash_password(new)
+    user.password_changed_at = timezone.now()
+    user.save(update_fields=['password_hash', 'password_changed_at', 'updated_at'])
+    record_audit_event(request, 'admin.password_changed', resource_type='admin_session', resource_id=user.id)
+
+    # Keep this browser signed in with a fresh session; older sessions stop working.
+    token, max_age = issue_session(user.email)
+    response = JsonResponse({'ok': True})
+    set_session_cookie(response, token, max_age)
     return response
 
 

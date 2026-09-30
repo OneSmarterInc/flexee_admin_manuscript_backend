@@ -29,3 +29,14 @@ class AIProviderDispatcherTests(TestCase):
         self.assertEqual(model, "claude-haiku")
         self.assertEqual(result, '{"status": "ok"}')
         mock_anthropic.assert_called_once()
+
+class SharedQwenProviderDispatcherTests(TestCase):
+    @patch.dict(os.environ, {'AI_PROVIDER': 'shared_qwen', 'SHARED_QWEN_QUEUE_ENABLED': 'true'})
+    @patch('review.services.ai_provider.shared_qwen_chat_json')
+    def test_shared_qwen_provider_routing(self, mock_shared):
+        mock_shared.return_value = ("qwen2.5-shared", '{"status": "ok"}')
+        model, result = ai_chat_json("Test prompt")
+        self.assertEqual(model, "qwen2.5-shared")
+        self.assertEqual(result, '{"status": "ok"}')
+        mock_shared.assert_called_once()
+

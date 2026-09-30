@@ -430,9 +430,7 @@ def admin_submission_requirement_download(request, submission_id, requirement_ke
         return JsonResponse({'detail': 'Requirement file is unavailable'}, status=404)
 
 
-@require_GET
-@require_admin
-def admin_venue_submission_download(request, submission_id):
+def _venue_submission_manuscript_response(request, submission_id, audit_action):
     try:
         item = VenueSubmission.objects.select_related('manuscript', 'venue').get(id=submission_id)
     except VenueSubmission.DoesNotExist:
@@ -450,7 +448,7 @@ def admin_venue_submission_download(request, submission_id):
         manuscript.manuscript_file.open('rb')
         record_audit_event(
             request,
-            'venue_submission.manuscript_downloaded',
+            audit_action,
             resource_type='venue_submission',
             resource_id=item.id,
             organization_id=item.venue.organization_id,
@@ -459,12 +457,28 @@ def admin_venue_submission_download(request, submission_id):
             manuscript_id=manuscript.id,
             detail={'filename': manuscript.manuscript_filename},
         )
+        # Always served as an opaque, sandboxed attachment. The admin portal
+        # renders the bytes itself, so the file never opens as a page here.
         return secure_download_response(
             manuscript.manuscript_file,
             filename=manuscript.manuscript_filename,
         )
     except (FileNotFoundError, OSError):
         return JsonResponse({'detail': 'Manuscript file is unavailable'}, status=404)
+
+
+@require_GET
+@require_admin
+def admin_venue_submission_download(request, submission_id):
+    return _venue_submission_manuscript_response(request, submission_id, 'venue_submission.manuscript_downloaded')
+
+
+@require_GET
+@require_admin
+def admin_venue_submission_view(request, submission_id):
+    """Same file and access rules as download, audited as a view in the portal."""
+    return _venue_submission_manuscript_response(request, submission_id, 'venue_submission.manuscript_viewed')
+
 
 @require_GET
 @require_admin

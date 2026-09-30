@@ -60,6 +60,45 @@ def record_audit_event(
     )
 
 
+ADMIN_AUTH_RESOURCE_TYPE = 'admin_session'
+
+
+def record_admin_auth_event(request, action: str, *, user=None, username: str = '', detail: dict | None = None):
+    """Record an admin sign-in, sign-out, or failed attempt in the audit log.
+
+    Sign-in happens before request.editor_user exists, so the actor is passed
+    in explicitly. For attempts against an unknown account there is no actor;
+    the attempted username is kept in detail so failed attempts can still be
+    reviewed. Passwords and authenticator codes are never stored.
+    """
+    actor_email = ''
+    actor_id = None
+    actor_role = ''
+    if user is not None:
+        actor_email = str(user.email or '').strip()
+        actor_id = user.id
+        if getattr(user, 'platform_superuser', False):
+            actor_role = 'platform_superuser'
+        else:
+            membership = user.memberships.order_by('role').first()
+            actor_role = membership.role if membership else ''
+
+    payload = {'username': str(username or actor_email or '').strip()[:320]}
+    if isinstance(detail, dict):
+        payload.update(detail)
+
+    return AuditEvent.objects.create(
+        actor_id=actor_id,
+        actor_email=actor_email,
+        actor_role=actor_role,
+        action=str(action or '').strip()[:120],
+        resource_type=ADMIN_AUTH_RESOURCE_TYPE,
+        resource_id=str(actor_id or '')[:100],
+        remote_hash=remote_hash(request),
+        detail=payload,
+    )
+
+
 def audit_event_payload(event):
     return {
         'id': str(event.id),

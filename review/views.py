@@ -17,7 +17,7 @@ from .auth import (
 from .models import AdminAuthEvent, ReviewEvent, Submission, SMTPSettings
 from .services.email_service import send_review_emails, send_acceptance_email, send_rejection_email
 from .services.review_engine import run_review
-from .audit import record_audit_event
+from .audit import record_admin_auth_event, record_audit_event
 from .monitoring import capture_exception
 from .queue_health import queue_health_snapshot
 from .ai_usage import ai_usage_snapshot
@@ -348,11 +348,12 @@ def admin_verify_password(request):
     recent_failures = AdminAuthEvent.objects.filter(
         remote_hash=rh, success=False, occurred_at__gte=timezone.now() - timedelta(minutes=window_minutes)
     ).count()
+    username = str(data.get('username', '')).strip()
     if recent_failures >= max_failures:
         AdminAuthEvent.objects.create(remote_hash=rh, success=False, detail={'reason': 'rate_limited'})
+        record_admin_auth_event(request, 'admin.login_rate_limited', username=username, detail={'stage': 'password', 'reason': 'rate_limited'})
         return JsonResponse({'detail': 'Too many failed login attempts. Try again later.'}, status=429)
 
-    username = str(data.get('username', '')).strip()
     password = str(data.get('password', ''))
 
     from .models import EditorUser
@@ -361,6 +362,13 @@ def admin_verify_password(request):
 
     if not ok:
         AdminAuthEvent.objects.create(remote_hash=rh, success=False, detail={'username': username, 'reason': 'invalid_credentials'})
+        record_admin_auth_event(
+            request,
+            'admin.login_failed',
+            user=user,
+            username=username,
+            detail={'stage': 'password', 'reason': 'invalid_credentials' if user else 'unknown_account'},
+        )
         return JsonResponse({'detail': 'Invalid username or password.'}, status=401)
 
     requires_totp = user.memberships.filter(role__in=['owner', 'editor']).exists() or user.platform_superuser
@@ -393,11 +401,12 @@ def admin_login(request):
     recent_failures = AdminAuthEvent.objects.filter(
         remote_hash=rh, success=False, occurred_at__gte=timezone.now() - timedelta(minutes=window_minutes)
     ).count()
+    username = str(data.get('username', '')).strip()
     if recent_failures >= max_failures:
         AdminAuthEvent.objects.create(remote_hash=rh, success=False, detail={'reason': 'rate_limited'})
+        record_admin_auth_event(request, 'admin.login_rate_limited', username=username, detail={'stage': 'authenticator', 'reason': 'rate_limited'})
         return JsonResponse({'detail': 'Too many failed login attempts. Try again later.'}, status=429)
 
-    username = str(data.get('username', '')).strip()
     password = str(data.get('password', ''))
     code = str(data.get('totp', '')).strip()
     
@@ -406,8 +415,10 @@ def admin_login(request):
     
     ok = False
     totp_missing_error = False
+    password_ok = False
     
     if user and os.getenv('ADMIN_SESSION_SECRET', '') and verify_password(password, user.password_hash):
+        password_ok = True
         requires_totp = user.memberships.filter(role__in=['owner', 'editor']).exists() or user.platform_superuser
         if requires_totp:
             if not user.totp_secret:
@@ -420,11 +431,23 @@ def admin_login(request):
                 
     if totp_missing_error:
         AdminAuthEvent.objects.create(remote_hash=rh, success=False, detail={'username': username, 'reason': 'totp_required'})
+        record_admin_auth_event(request, 'admin.totp_not_configured', user=user, username=username, detail={'stage': 'authenticator', 'reason': 'totp_required'})
         return JsonResponse({'detail': 'Two-factor authentication is required for this account, but no authenticator has been configured.'}, status=403)
         
     AdminAuthEvent.objects.create(remote_hash=rh, success=ok, detail={'username': username, 'reason': 'ok' if ok else 'invalid_credentials'})
     if not ok:
+        if password_ok:
+            record_admin_auth_event(request, 'admin.totp_failed', user=user, username=username, detail={'stage': 'authenticator', 'reason': 'invalid_totp'})
+        else:
+            record_admin_auth_event(
+                request,
+                'admin.login_failed',
+                user=user,
+                username=username,
+                detail={'stage': 'authenticator', 'reason': 'invalid_credentials' if user else 'unknown_account'},
+            )
         return JsonResponse({'detail': 'Invalid username, password, or authenticator code.'}, status=401)
+    record_admin_auth_event(request, 'admin.login_succeeded', user=user, username=username, detail={'stage': 'authenticator', 'method': 'password_totp' if user.totp_secret else 'password'})
     token, max_age = issue_session(username)
     response = JsonResponse({'ok': True, 'username': username})
     set_session_cookie(response, token, max_age)
@@ -434,6 +457,11 @@ def admin_login(request):
 
 @require_POST
 def admin_logout(request):
+    session = read_session(request)
+    if session:
+        from .models import EditorUser
+        user = EditorUser.objects.filter(email=session.get('u')).first()
+        record_admin_auth_event(request, 'admin.logout', user=user, username=str(session.get('u') or ''))
     response = JsonResponse({'ok': True})
     clear_session_cookie(response)
     response['Cache-Control'] = 'no-store'

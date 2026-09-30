@@ -1012,6 +1012,125 @@ def author_logout(request):
     return response
 
 
+PASSWORD_RESET_SALT = 'flexee.author.password-reset'
+PASSWORD_RESET_MAX_AGE_SECONDS = 30 * 60
+PASSWORD_RESET_GENERIC_REPLY = (
+    'If an author account exists for that email, a password reset link has been sent. '
+    'The link expires in 30 minutes.'
+)
+
+
+def _password_fingerprint(author):
+    # Changes whenever the password changes, so a reset link works only once.
+    return hashlib.sha256(f'{author.id}:{author.password_hash}'.encode('utf-8')).hexdigest()[:24]
+
+
+def _author_portal_origin(request):
+    configured = os.getenv('AUTHOR_PORTAL_BASE_URL', '').strip().rstrip('/')
+    if configured:
+        return configured
+    from .auth import allowed_frontend_origins
+    allowed = allowed_frontend_origins()
+    origin = (request.headers.get('Origin') or '').strip().rstrip('/')
+    if origin and origin in allowed:
+        return origin
+    return sorted(allowed)[0] if allowed else ''
+
+
+@require_POST
+def author_password_reset_request(request):
+    """Email a single-use reset link. The reply never reveals whether the email exists."""
+    from django.core.signing import dumps
+    data = _json_body(request)
+    email = str(data.get('email', '')).strip().lower()
+    if not email or '@' not in email or len(email) > 254:
+        return JsonResponse({'detail': 'Enter the email address you use to sign in.'}, status=400)
+
+    rh = remote_hash(request)
+    since = timezone.now() - timedelta(minutes=int(os.getenv('AUTHOR_RESET_WINDOW_MINUTES', '60')))
+    recent = AuthorAuthEvent.objects.filter(detail__action='password_reset_request', occurred_at__gte=since)
+    per_network = recent.filter(remote_hash=rh).count()
+    per_email = recent.filter(detail__email=email).count()
+    AuthorAuthEvent.objects.create(remote_hash=rh, success=True, detail={'action': 'password_reset_request', 'email': email})
+    if per_network >= int(os.getenv('AUTHOR_RESET_MAX_PER_NETWORK', '10')) or per_email >= int(os.getenv('AUTHOR_RESET_MAX_PER_EMAIL', '3')):
+        # Same reply as success: throttling must not reveal whether the account exists.
+        return JsonResponse({'ok': True, 'detail': PASSWORD_RESET_GENERIC_REPLY})
+
+    author = Author.objects.filter(email=email).first()
+    if author:
+        token = dumps({'aid': str(author.id), 'fp': _password_fingerprint(author)}, salt=PASSWORD_RESET_SALT)
+        reset_url = f'{_author_portal_origin(request)}/author/reset-password?token={token}'
+        try:
+            _send_email(
+                to=author.email,
+                subject='Reset your Flexee author password',
+                body=(
+                    f'Hello {author.name},\n\n'
+                    'We received a request to reset the password for your Flexee author account. '
+                    'Open the link below to choose a new password:\n\n'
+                    f'{reset_url}\n\n'
+                    'This link expires in 30 minutes and can be used once. '
+                    'If you did not ask for this, you can ignore this email; your password will not change.'
+                ),
+            )
+        except Exception as exc:  # never reveal delivery problems to the requester
+            capture_exception(exc)
+        AuditEvent.objects.create(
+            actor_email=author.email, actor_role='author', action='author.password_reset_requested',
+            resource_type='author_account', resource_id=str(author.id), remote_hash=rh, detail={},
+        )
+    return JsonResponse({'ok': True, 'detail': PASSWORD_RESET_GENERIC_REPLY})
+
+
+def _author_from_reset_token(token):
+    from django.core.signing import BadSignature, SignatureExpired, loads
+    try:
+        data = loads(token or '', salt=PASSWORD_RESET_SALT, max_age=PASSWORD_RESET_MAX_AGE_SECONDS)
+        author = Author.objects.get(id=data.get('aid'))
+    except (BadSignature, SignatureExpired, Author.DoesNotExist, ValueError, TypeError):
+        return None
+    if data.get('fp') != _password_fingerprint(author):
+        return None  # already used, or the password changed since the link was sent
+    return author
+
+
+@require_http_methods(['GET', 'POST'])
+def author_password_reset_confirm(request):
+    """GET ?token= checks a link; POST {token, new_password, confirm_password} sets the password."""
+    if request.method == 'GET':
+        author = _author_from_reset_token(request.GET.get('token'))
+        if not author:
+            return JsonResponse({'valid': False, 'detail': 'This reset link is invalid or has expired. Request a new one.'}, status=400)
+        return JsonResponse({'valid': True, 'email': author.email})
+
+    from .auth import hash_password
+    data = _json_body(request)
+    author = _author_from_reset_token(str(data.get('token', '')))
+    if not author:
+        return JsonResponse({'detail': 'This reset link is invalid or has expired. Request a new one.', 'code': 'invalid_token'}, status=400)
+    new = str(data.get('new_password', ''))
+    confirm = str(data.get('confirm_password', ''))
+    if not new or not confirm:
+        return JsonResponse({'detail': 'Enter the new password twice.'}, status=400)
+    if new != confirm:
+        return JsonResponse({'detail': 'The new password and the confirmation do not match.'}, status=400)
+    if len(new) < AUTHOR_PASSWORD_MIN_LENGTH:
+        return JsonResponse({'detail': f'The new password must be at least {AUTHOR_PASSWORD_MIN_LENGTH} characters.'}, status=400)
+    if len(new) > 256:
+        return JsonResponse({'detail': 'The new password must be 256 characters or fewer.'}, status=400)
+
+    author.password_hash = hash_password(new)
+    author.password_changed_at = timezone.now()
+    # Opening the emailed link proves the author controls this address.
+    author.email_verified = True
+    author.save(update_fields=['password_hash', 'password_changed_at', 'email_verified', 'updated_at'])
+    AuditEvent.objects.create(
+        actor_email=author.email, actor_role='author', action='author.password_reset_completed',
+        resource_type='author_account', resource_id=str(author.id), remote_hash=remote_hash(request), detail={},
+    )
+    return JsonResponse({'ok': True, 'detail': 'Your password has been reset. Sign in with your new password.'})
+
+
 @require_GET
 def author_verify_email(request):
     token = request.GET.get('token')

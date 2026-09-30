@@ -17,7 +17,7 @@ from ..ai_usage import (
     fail_ai_call,
     reserve_ai_call,
 )
-from .local_llm import estimate_prompt_tokens, ollama_chat_json
+from .local_llm import estimate_prompt_tokens, ollama_chat_json, shared_qwen_chat_json
 
 
 ANTHROPIC_SYSTEM = (
@@ -98,6 +98,8 @@ def _model_hint(provider: str) -> str:
         return os.getenv('ANTHROPIC_MODEL', 'claude-haiku-4-5-20251001').strip()
     if provider == 'ollama':
         return os.getenv('OLLAMA_MODEL', 'qwen2.5:0.5b-instruct').strip()
+    if provider == 'shared_qwen':
+        return 'qwen2.5-shared'
     if provider == 'mock':
         return 'mock'
     return 'unknown'
@@ -165,8 +167,15 @@ def _tracked_call(provider, prompt, *, max_tokens, timeout, operation):
                 timeout=timeout,
                 return_usage=True,
             )
-        elif provider == 'ollama':
+            elif provider == 'ollama':
             result = ollama_chat_json(
+                prompt,
+                max_tokens=max_tokens,
+                timeout=timeout,
+                return_usage=True,
+            )
+        elif provider == 'shared_qwen':
+            result = shared_qwen_chat_json(
                 prompt,
                 max_tokens=max_tokens,
                 timeout=timeout,
@@ -238,6 +247,11 @@ def ai_chat_json(
     if provider == 'ollama':
         return _tracked_call(
             'ollama', prompt, max_tokens=max_tokens, timeout=timeout, operation=operation
+        )
+
+    if provider == 'shared_qwen':
+        return _tracked_call(
+            'shared_qwen', prompt, max_tokens=max_tokens, timeout=timeout, operation=operation
         )
 
     errors: list[str] = []

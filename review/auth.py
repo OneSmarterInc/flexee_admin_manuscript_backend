@@ -108,6 +108,21 @@ def _session_secret():
     return os.getenv('ADMIN_SESSION_SECRET', '').encode('utf-8')
 
 
+def _issued_before_password_change(payload, kind):
+    """True when the session predates the account's last password change."""
+    try:
+        from .models import Author, EditorUser
+        if kind == 'admin':
+            changed_at = EditorUser.objects.filter(email=payload.get('u')).values_list('password_changed_at', flat=True).first()
+        else:
+            changed_at = Author.objects.filter(id=payload.get('aid')).values_list('password_changed_at', flat=True).first()
+    except Exception:
+        return False
+    if not changed_at:
+        return False
+    return int(payload.get('iat', 0)) < int(changed_at.timestamp())
+
+
 def issue_session(username):
     secret = _session_secret()
     if not secret:
@@ -133,6 +148,8 @@ def read_session(request):
         if int(payload.get('exp', 0)) < int(time.time()):
             return None
         if not payload.get('u'):
+            return None
+        if _issued_before_password_change(payload, 'admin'):
             return None
         return payload
     except Exception:
@@ -228,6 +245,8 @@ def read_author_session(request):
             return None
         if not payload.get('aid'):
             return None
+        if _issued_before_password_change(payload, 'author'):
+            return None
         return payload
     except Exception:
         return None
@@ -256,3 +275,22 @@ def require_author(view):
         request.flexee_author = session
         return view(request, *args, **kwargs)
     return wrapped
+
+
+PASSWORD_CHANGE_MAX_FAILURES = 5
+PASSWORD_CHANGE_WINDOW_MINUTES = 15
+
+
+def validate_password_change(current, new, confirm, *, min_length):
+    """Return an error message for a change-password request, or ''."""
+    if not current or not new or not confirm:
+        return 'Enter your current password, a new password, and the confirmation.'
+    if new != confirm:
+        return 'The new password and the confirmation do not match.'
+    if len(new) < min_length:
+        return f'The new password must be at least {min_length} characters.'
+    if len(new) > 256:
+        return 'The new password must be 256 characters or fewer.'
+    if new == current:
+        return 'The new password must be different from the current password.'
+    return ''

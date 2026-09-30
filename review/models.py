@@ -9,6 +9,8 @@ class Author(models.Model):
     password_hash = models.CharField(max_length=200)
     name = models.CharField(max_length=200)
     email_verified = models.BooleanField(default=False)
+    # Sessions issued before this moment are rejected (set when the password changes).
+    password_changed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-created_at']
@@ -21,6 +23,8 @@ class EditorUser(models.Model):
     password_hash = models.CharField(max_length=200)
     totp_secret = models.CharField(max_length=64, blank=True)
     platform_superuser = models.BooleanField(default=False)
+    # Sessions issued before this moment are rejected (set when the password changes).
+    password_changed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['email']

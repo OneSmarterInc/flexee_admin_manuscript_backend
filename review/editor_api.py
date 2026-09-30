@@ -9,7 +9,7 @@ from django.views.decorators.http import require_GET, require_POST
 from .auth import check_org_access, require_admin
 from .models import AuditEvent, EditorFeedback, SubmissionRequirementFile, Venue, VenueAgentConfig, VenueSubmission
 from .services.email_service import send_acceptance_email, send_rejection_email, _send
-from .audit import audit_event_payload, record_audit_event
+from .audit import ADMIN_AUTH_RESOURCE_TYPE, audit_event_payload, record_audit_event
 from .monitoring import capture_exception
 from .storage_security import secure_download_response
 from .author_api import _active_config, _json_body, _submission_payload, _venue_config_payload, _venue_payload
@@ -474,7 +474,11 @@ def admin_audit_events(request):
 
     if not user.platform_superuser:
         org_ids = list(user.memberships.values_list('organization_id', flat=True))
-        queryset = queryset.filter(organization_id__in=org_ids)
+        # Sign-in events carry no organization; editors see only their own.
+        queryset = queryset.filter(
+            Q(organization_id__in=org_ids)
+            | Q(resource_type=ADMIN_AUTH_RESOURCE_TYPE, actor_id=user.id)
+        )
 
     organization_id = str(request.GET.get('organization_id', '')).strip()
     venue_id = str(request.GET.get('venue_id', '')).strip()

@@ -82,7 +82,7 @@ INSTALLED_APPS = ['review', 'django_q']
 
 Q_CLUSTER = {
     'name': 'flexee_q',
-    'workers': 4,
+    'workers': int(os.getenv('FLEXEE_Q_WORKERS', '1')),
     'recycle': 500,
     'timeout': 1800,  # 30 mins
     'retry': 1860,

@@ -164,13 +164,13 @@ def set_session_cookie(response, token, max_age):
         max_age=max_age,
         httponly=True,
         secure=secure,
-        samesite='Strict',
+        samesite='None',
         path='/',
     )
 
 
 def clear_session_cookie(response):
-    response.delete_cookie(COOKIE_NAME, path='/', samesite='Strict')
+    response.delete_cookie(COOKIE_NAME, path='/', samesite='None')
 
 
 def require_admin(view):
@@ -259,12 +259,12 @@ def set_author_session_cookie(response, token, max_age):
         max_age=max_age,
         httponly=True,
         secure=secure,
-        samesite='Strict',
+        samesite='None',
         path='/',
     )
 
 def clear_author_session_cookie(response):
-    response.delete_cookie(AUTHOR_COOKIE_NAME, path='/', samesite='Strict')
+    response.delete_cookie(AUTHOR_COOKIE_NAME, path='/', samesite='None')
 
 def require_author(view):
     @wraps(view)

@@ -146,6 +146,8 @@ if PRODUCTION:
     if not SECURE_SSL_REDIRECT:
         raise RuntimeError('SECURE_SSL_REDIRECT must remain enabled in production')
     SESSION_COOKIE_SECURE = True
+    SESSION_COOKIE_SAMESITE = 'None'
+    CSRF_COOKIE_SAMESITE = 'None'
     CSRF_COOKIE_SECURE = True
     SECURE_HSTS_SECONDS = int(os.getenv('SECURE_HSTS_SECONDS', '31536000'))
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True

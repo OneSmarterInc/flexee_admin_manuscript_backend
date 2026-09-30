@@ -167,7 +167,7 @@ def _tracked_call(provider, prompt, *, max_tokens, timeout, operation):
                 timeout=timeout,
                 return_usage=True,
             )
-            elif provider == 'ollama':
+        elif provider == 'ollama':
             result = ollama_chat_json(
                 prompt,
                 max_tokens=max_tokens,

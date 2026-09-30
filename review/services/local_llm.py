@@ -82,15 +82,24 @@ def shared_qwen_chat_json(
     if not SHARED_QWEN_QUEUE_ENABLED:
         raise RuntimeError("Shared Qwen queue is disabled.")
 
-    max_tokens = int(
-        max_tokens if max_tokens is not None else os.getenv(
-            "OLLAMA_NUM_PREDICT", str(DEFAULT_OLLAMA_NUM_PREDICT)
-        )
+    max_tokens = min(
+        int(
+            max_tokens if max_tokens is not None else os.getenv(
+                "OLLAMA_NUM_PREDICT", str(DEFAULT_OLLAMA_NUM_PREDICT)
+            )
+        ),
+        DEFAULT_OLLAMA_NUM_PREDICT,
     )
-    num_ctx = int(
-        num_ctx if num_ctx is not None else os.getenv(
-            "OLLAMA_NUM_CTX", str(DEFAULT_OLLAMA_NUM_CTX)
-        )
+    num_ctx = max(
+        512,
+        min(
+            int(
+                num_ctx if num_ctx is not None else os.getenv(
+                    "OLLAMA_NUM_CTX", str(DEFAULT_OLLAMA_NUM_CTX)
+                )
+            ),
+            8192,
+        ),
     )
     request_timeout = float(timeout if timeout is not None else SHARED_QWEN_WAIT_TIMEOUT)
     assert_prompt_fits_context(prompt, num_ctx=num_ctx, num_predict=max_tokens)
@@ -112,6 +121,7 @@ def shared_qwen_chat_json(
     client.rpush(SHARED_QWEN_QUEUE, json.dumps(job))
 
     result = _wait_for_shared_result(client, job_id, request_timeout)
+    client.delete(f"{SHARED_QWEN_RESULT_PREFIX}{job_id}")
 
     model = str(result.get("model") or "qwen2.5-shared")
     content = _strip_thinking(result.get("content", ""))

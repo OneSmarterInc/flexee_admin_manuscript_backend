@@ -461,6 +461,9 @@ def _manuscript_payload(item):
         'parsed_profile': item.parsed_profile,
         'content_purged_at': item.content_purged_at.isoformat() if item.content_purged_at else None,
         'latest_readiness': _readiness_payload(latest_readiness) if latest_readiness else None,
+        'editable': not item.content_purged_at and not item.venue_submissions.exclude(
+            status__in=EDITABLE_SUBMISSION_STATUSES
+        ).exists(),
     }
 
 
@@ -661,6 +664,159 @@ def author_manuscripts(request):
         'manuscript': _manuscript_payload(item),
         'access_token': access_token,
     }, status=201)
+
+EDITABLE_SUBMISSION_STATUSES = {'draft', 'packet_ready'}
+
+
+def _manuscript_edit_block(manuscript):
+    """Return a JsonResponse explaining why the manuscript cannot be edited, or None."""
+    if manuscript.content_purged_at:
+        return JsonResponse(
+            {'detail': 'This manuscript content was removed under the retention policy and can no longer be edited.',
+             'code': 'manuscript_purged'},
+            status=409,
+        )
+    locked = manuscript.venue_submissions.exclude(status__in=EDITABLE_SUBMISSION_STATUSES)
+    if locked.exists():
+        return JsonResponse(
+            {'detail': 'This manuscript has been submitted to a venue and can no longer be edited. '
+                       'Start a new manuscript to prepare a revised version.',
+             'code': 'manuscript_locked'},
+            status=409,
+        )
+    submission_ids = [str(pk) for pk in manuscript.venue_submissions.values_list('id', flat=True)]
+    active_jobs = ReviewJob.objects.filter(
+        status__in=['queued', 'processing'],
+        reference_id__in=[str(manuscript.id), *submission_ids],
+    )
+    if active_jobs.exists():
+        return JsonResponse(
+            {'detail': 'An analysis for this manuscript is still running. Try again when it finishes.',
+             'code': 'manuscript_busy'},
+            status=409,
+        )
+    return None
+
+
+@require_http_methods(['POST'])
+def author_update_manuscript(request, manuscript_id):
+    """Edit an uploaded manuscript while it has not been submitted to a venue.
+
+    Accepts the same multipart fields as creation. The file is optional: when it
+    is omitted the stored file is kept. Every successful edit makes earlier
+    analysis stale, so venue matches are removed, draft/packet-ready venue
+    packets are reset to draft, and the parsed profile is cleared. The caller
+    re-runs readiness afterwards.
+    """
+    try:
+        manuscript = Manuscript.objects.get(id=manuscript_id)
+    except Manuscript.DoesNotExist:
+        return JsonResponse({'detail': 'Manuscript not found'}, status=404)
+    access_error = _author_access_error(request, manuscript)
+    if access_error:
+        return access_error
+    blocked = _manuscript_edit_block(manuscript)
+    if blocked:
+        return blocked
+
+    max_bytes = int(os.getenv('MAX_MANUSCRIPT_BYTES', str(20 * 1024 * 1024)))
+    upload = request.FILES.get('manuscript')
+    title = request.POST.get('title', '').strip()
+    author_name = request.POST.get('author', request.POST.get('author_name', '')).strip()
+    author_email = request.POST.get('email', request.POST.get('author_email', '')).strip()
+    manuscript_type = request.POST.get('manuscript_type', request.POST.get('type', 'other')).strip()
+    disclosure = request.POST.get('disclosure', '').strip()
+    attestation = request.POST.get('attestation', '').strip().lower()
+
+    errors = []
+    if not title:
+        errors.append('title is required')
+    if not author_name:
+        errors.append('author is required')
+    if manuscript_type not in ALLOWED_MANUSCRIPT_TYPES:
+        errors.append('unsupported manuscript_type')
+    if not disclosure:
+        errors.append('disclosure is required')
+    if attestation not in {'true', '1', 'yes', 'on', 'human-authored-with-ai-assistance'}:
+        errors.append('authorship attestation is required')
+    if upload is not None:
+        if upload.size <= 0:
+            errors.append('manuscript is empty')
+        elif upload.size > max_bytes:
+            errors.append(f'manuscript exceeds the {max_bytes // 1024 // 1024} MB upload limit')
+        else:
+            try:
+                validate_manuscript_filename(upload.name)
+            except UploadSecurityError as exc:
+                errors.append(str(exc))
+    if errors:
+        return JsonResponse({'detail': errors[0], 'errors': errors}, status=400)
+
+    content = None
+    if upload is not None:
+        content = upload.read()
+        upload.seek(0)
+        upload.name = sanitize_original_filename(upload.name, default='manuscript')
+        if upload.name.lower().endswith('.zip'):
+            try:
+                validate_manuscript_zip(content)
+            except UploadSecurityError as exc:
+                return JsonResponse({'detail': str(exc), 'errors': [str(exc)]}, status=400)
+
+    old_file_name = manuscript.manuscript_file.name if upload is not None else None
+    try:
+        with storage_quota_guard(
+            author=manuscript.author_account,
+            incoming_bytes=len(content) if content is not None else 0,
+            replacing_bytes=manuscript.manuscript_bytes if content is not None else 0,
+        ):
+            manuscript = Manuscript.objects.select_for_update().get(id=manuscript.id)
+            # Re-check inside the lock so a submission made meanwhile still wins.
+            blocked = _manuscript_edit_block(manuscript)
+            if blocked:
+                return blocked
+
+            manuscript.title = title
+            manuscript.author_name = author_name
+            manuscript.author_email = author_email
+            manuscript.coauthors = request.POST.get('coauthors', '').strip()
+            manuscript.manuscript_type = manuscript_type
+            manuscript.abstract = request.POST.get('abstract', '').strip()
+            manuscript.keywords = _clean_keywords(request.POST.get('keywords', ''))
+            manuscript.disclosure = disclosure
+            manuscript.notes = request.POST.get('notes', '').strip()
+            manuscript.attestation = True
+            manuscript.parsed_profile = {}
+            if content is not None:
+                manuscript.manuscript_filename = upload.name
+                manuscript.manuscript_file = upload
+                manuscript.manuscript_bytes = len(content)
+                manuscript.manuscript_sha256 = hashlib.sha256(content).hexdigest()
+            manuscript.save()
+
+            removed_matches, _ = VenueMatch.objects.filter(manuscript=manuscript).delete()
+            reset_submissions = 0
+            for submission in manuscript.venue_submissions.filter(status__in=EDITABLE_SUBMISSION_STATUSES):
+                EvidenceFinding.objects.filter(venue_submission=submission).delete()
+                submission.status = 'draft'
+                submission.editorial_brief = {}
+                submission.packet = {}
+                submission.save(update_fields=['status', 'editorial_brief', 'packet', 'updated_at'])
+                reset_submissions += 1
+    except StorageQuotaExceeded as exc:
+        return JsonResponse(exc.payload(), status=413)
+
+    if old_file_name and old_file_name != manuscript.manuscript_file.name:
+        storage = manuscript.manuscript_file.storage
+        transaction.on_commit(lambda: storage.delete(old_file_name) if storage.exists(old_file_name) else None)
+
+    return JsonResponse({
+        'manuscript': _manuscript_payload(manuscript),
+        'file_replaced': content is not None,
+        'removed_matches': removed_matches,
+        'reset_submissions': reset_submissions,
+    })
+
 
 def _send_author_verification(request, author):
     from django.core.signing import dumps
@@ -1042,6 +1198,10 @@ def author_readiness(request, manuscript_id):
     semantic = manuscript.readiness_assessments.filter(
         engine_version__startswith='author-agents-v1:semantic-readiness'
     ).first()
+    if semantic and mechanical and semantic.created_at < mechanical.created_at:
+        # The manuscript was re-checked after this semantic run (for example after
+        # an edit), so the semantic result describes an older version.
+        semantic = None
     return JsonResponse({
         'readiness': _readiness_payload(item),
         'mechanical_readiness': _readiness_payload(mechanical) if mechanical else None,

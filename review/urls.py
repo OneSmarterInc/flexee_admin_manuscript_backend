@@ -22,6 +22,7 @@ urlpatterns = [
     path('author/manuscripts/list/', author_api.author_manuscripts_list),
     path('author/manuscripts/', author_api.author_manuscripts),
     path('author/manuscripts/<uuid:manuscript_id>/', author_api.author_manuscript_detail),
+    path('author/manuscripts/<uuid:manuscript_id>/update/', author_api.author_update_manuscript),
     path('author/manuscripts/<uuid:manuscript_id>/readiness/', author_api.author_readiness),
     path('author/manuscripts/<uuid:manuscript_id>/readiness/run/', author_api.author_run_readiness),
     path('author/manuscripts/<uuid:manuscript_id>/readiness/semantic/', author_api.author_run_semantic_readiness),

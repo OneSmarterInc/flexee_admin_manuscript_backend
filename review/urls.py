@@ -69,6 +69,7 @@ urlpatterns = [
     path('admin/venue-submissions/<uuid:submission_id>/start-review/', editor_api.admin_start_venue_review),
     path('admin/venue-submissions/<uuid:submission_id>/decision/', editor_api.admin_venue_submission_decision),
     path('admin/venue-submissions/<uuid:submission_id>/download/', editor_api.admin_venue_submission_download),
+    path('admin/venue-submissions/<uuid:submission_id>/view/', editor_api.admin_venue_submission_view),
     path('admin/venue-submissions/<uuid:submission_id>/requirements/<str:requirement_key>/download/', editor_api.admin_submission_requirement_download),
 
     path('admin/smtp/', views.admin_smtp_settings),

@@ -18,6 +18,8 @@ urlpatterns = [
     path('author/login/', author_api.author_login),
     path('author/logout/', author_api.author_logout),
     path('author/change-password/', author_api.author_change_password),
+    path('author/password-reset/', author_api.author_password_reset_request),
+    path('author/password-reset/confirm/', author_api.author_password_reset_confirm),
     path('author/session/', author_api.author_session),
     path('author/jobs/<int:job_id>/', author_api.author_job_status),
     path('author/manuscripts/list/', author_api.author_manuscripts_list),

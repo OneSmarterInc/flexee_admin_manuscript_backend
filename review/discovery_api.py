@@ -89,8 +89,18 @@ def discovery_settings_payload(config):
         agent = agent_settings()
         return {'enabled': config.enabled, 'mode': 'claude_agent', 'search_provider': f"Claude agent ({agent['model']})",
                 'search_configured': bool(agent['api_key']), 'missing_key': 'ANTHROPIC_API_KEY'}
-    return {'enabled': config.enabled, 'mode': config.mode, 'search_provider': config.provider,
-            'search_configured': bool(config.api_key), 'missing_key': 'VENUE_SEARCH_API_KEY'}
+    names = [n.strip() for n in (config.provider or '').split(',') if n.strip()]
+    missing = []
+    if 'tavily' in names and not config.api_key:
+        missing.append('VENUE_SEARCH_API_KEY')
+    if 'searxng' in names and not os.getenv('VENUE_SEARXNG_URL', '').strip():
+        missing.append('VENUE_SEARXNG_URL')
+    label = ' + '.join(names) or '—'
+    if config.ai_provider == 'ollama':
+        from .services.venue_discovery import local_ai_settings
+        label += f" · local {local_ai_settings()['model']}"
+    return {'enabled': config.enabled, 'mode': config.mode, 'search_provider': label,
+            'search_configured': not missing and bool(names), 'missing_key': ', '.join(missing) or 'VENUE_SEARCH_PROVIDER'}
 
 
 def run_payload(run):

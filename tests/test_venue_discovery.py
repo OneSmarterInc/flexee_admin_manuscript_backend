@@ -823,3 +823,188 @@ def test_claude_agent_recheck_flags_changes_and_missing_venues(monkeypatch):
     assert record.discovery_status == 'changed'
     assert VenueAgentConfig.objects.get().structured_desk_rejection_rules[0]['value'] == 8000  # live untouched
     assert 'did not return this venue' in other.last_error
+
+
+# ---------------------------------------------------------------------------
+# Free mode: SearXNG + DOAJ search, local Ollama extraction (all faked)
+# ---------------------------------------------------------------------------
+
+class FakeHttp:
+    """Stands in for httpx.get / httpx.post inside the discovery module."""
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.calls = []
+
+    def __call__(self, url, **kwargs):
+        self.calls.append({'url': url, **kwargs})
+        for prefix, response in self.routes.items():
+            if url.startswith(prefix):
+                return response(url, kwargs) if callable(response) else response
+        return httpx.Response(404, json={})
+
+
+def _req(method, url):
+    return httpx.Request(method, url)
+
+
+def searxng_json(urls):
+    return httpx.Response(200, json={'results': [{'url': u, 'title': 'T', 'content': 'snippet'} for u in urls]},
+                          request=_req('GET', 'http://127.0.0.1:8888/search'))
+
+
+DOAJ_RESULT = {'results': [{'bibjson': {
+    'title': 'Journal of Applied AI in Organizations',
+    'publisher': {'name': 'Meridian Academic Publishing'},
+    'ref': {'journal': 'https://www.meridian-academic.example/jaaio',
+            'author_instructions': 'https://www.meridian-academic.example/jaaio/author-guidelines'},
+    'subject': [{'term': 'Information technology'}, {'term': 'Management'}],
+    'editorial': {'review_process': ['Double blind peer review']},
+    'apc': {'has_apc': False},
+}}]}
+
+
+def ollama_reply(content, model='qwen2.5:0.5b-instruct'):
+    return httpx.Response(200, json={'model': model, 'message': {'role': 'assistant', 'content': content},
+                                     'prompt_eval_count': 2100, 'eval_count': 300},
+                          request=_req('POST', 'http://127.0.0.1:11434/api/chat'))
+
+
+def free_env(monkeypatch, provider='searxng,doaj'):
+    monkeypatch.setenv('VENUE_DISCOVERY_MODE', 'search_api')
+    monkeypatch.setenv('VENUE_SEARCH_PROVIDER', provider)
+    monkeypatch.setenv('VENUE_SEARXNG_URL', 'http://127.0.0.1:8888')
+    monkeypatch.setenv('VENUE_DISCOVERY_AI_PROVIDER', 'ollama')
+    monkeypatch.setenv('VENUE_DISCOVERY_OLLAMA_MODEL', 'qwen2.5:0.5b-instruct')
+    monkeypatch.setenv('VENUE_DISCOVERY_FOCUS', 'information systems, management')
+
+
+def test_searxng_provider_parses_results_and_explains_json_errors(monkeypatch):
+    fake = FakeHttp({'http://127.0.0.1:8888/search': searxng_json(['https://a.example/journal'])})
+    monkeypatch.setattr(vd.httpx, 'get', fake)
+    provider = vd.SearxngSearchProvider('http://127.0.0.1:8888/')
+    assert [r.url for r in provider.search('journal submit', max_results=5)] == ['https://a.example/journal']
+    assert fake.calls[0]['params']['format'] == 'json'
+
+    monkeypatch.setattr(vd.httpx, 'get', FakeHttp({'http://127.0.0.1:8888': httpx.Response(403)}))
+    with pytest.raises(vd.DiscoveryFetchError, match='json'):
+        provider.search('x')
+
+
+def test_doaj_provider_returns_author_instructions_with_hints(monkeypatch):
+    fake = FakeHttp({'https://doaj.org/api/search/journals/': httpx.Response(200, json=DOAJ_RESULT)})
+    monkeypatch.setattr(vd.httpx, 'get', fake)
+    free_env(monkeypatch)
+    provider = vd.DoajSearchProvider()
+    assert provider.queries(vd.DiscoveryConfig.from_env()) == [('journal', 'information systems'), ('journal', 'management')]
+    [result] = provider.search('information systems', max_results=3)
+    assert result.url.endswith('/author-guidelines')
+    assert result.hints['name'] == 'Journal of Applied AI in Organizations'
+    assert result.hints['organization_name'] == 'Meridian Academic Publishing'
+    assert result.hints['policies'] == {'listed_in_doaj': True, 'peer_review': 'Double blind peer review',
+                                        'article_processing_charge': 'no'}
+    assert 'subject.term' in fake.calls[0]['url'] or 'subject.term' in str(fake.calls[0])
+
+
+def test_provider_list_parsing(monkeypatch):
+    free_env(monkeypatch)
+    names = [p.name for p in vd.get_search_providers(vd.DiscoveryConfig.from_env())]
+    assert names == ['searxng', 'doaj']
+    monkeypatch.setenv('VENUE_SEARXNG_URL', '')
+    with pytest.raises(vd.DiscoveryConfigError, match='VENUE_SEARXNG_URL'):
+        vd.get_search_providers(vd.DiscoveryConfig.from_env())
+    monkeypatch.setenv('VENUE_SEARCH_PROVIDER', 'bing')
+    with pytest.raises(vd.DiscoveryConfigError, match='Unknown'):
+        vd.get_search_providers(vd.DiscoveryConfig.from_env())
+
+
+@pytest.mark.django_db
+def test_local_ollama_extraction_uses_discovery_model_and_logs_free_usage(monkeypatch):
+    free_env(monkeypatch)
+    monkeypatch.setenv('OLLAMA_MODEL', 'qwen2.5:0.5b-instruct')
+    monkeypatch.setenv('VENUE_DISCOVERY_OLLAMA_MODEL', 'qwen2.5:7b-instruct')
+    fake = FakeHttp({'http://127.0.0.1:11434/api/chat': ollama_reply(json.dumps({'name': 'X'}), 'qwen2.5:7b-instruct')})
+    monkeypatch.setattr(vd.httpx, 'post', fake)
+    page = vd.FetchedPage(url='https://a.example/j', title='J', text='word ' * 50_000)
+    raw = vd.extract_with_ai([page], vd.DiscoveryConfig.from_env())
+    assert raw == {'name': 'X'}
+    body = fake.calls[0]['json']
+    assert body['model'] == 'qwen2.5:7b-instruct' and body['format'] == 'json'
+    # The prompt is trimmed to fit the configured local context window.
+    local = vd.local_ai_settings()
+    assert len(body['messages'][0]['content']) // 4 < local['num_ctx'] - local['num_predict']
+    from review.models import AIUsageEvent
+    usage = AIUsageEvent.objects.get(operation='venue_discovery_extraction')
+    assert usage.provider == 'ollama' and usage.actual_cost_usd == 0
+
+
+def test_local_ollama_missing_model_gives_a_clear_message(monkeypatch):
+    free_env(monkeypatch)
+    monkeypatch.setattr(vd.httpx, 'post', FakeHttp({'http://127.0.0.1:11434': httpx.Response(404, json={})}))
+    with pytest.raises(vd.DiscoveryModelUnavailable, match='ollama pull'):
+        vd.extract_with_ai([vd.FetchedPage(url='https://a.example', title='', text='x')], vd.DiscoveryConfig.from_env())
+
+
+@pytest.mark.django_db
+def test_free_run_end_to_end_with_searxng_doaj_and_ollama(monkeypatch):
+    free_env(monkeypatch)
+    publisher_pages = {
+        'https://press.example/proposals': (
+            '<title>Book proposals</title><p>We welcome proposals for textbooks and professional books.</p>'),
+    }
+    monkeypatch.setattr(vd.httpx, 'get', FakeHttp({
+        'http://127.0.0.1:8888/search': searxng_json(['https://press.example/proposals',
+                                                      'https://en.wikipedia.org/wiki/Some_press']),
+        'https://doaj.org/api/search/journals/': httpx.Response(200, json=DOAJ_RESULT),
+    }))
+    good = json.dumps({
+        'name': 'Northfield Press', 'organization_name': 'Northfield Press', 'venue_type': 'publisher',
+        'acceptance_status': 'accepting', 'website_url': 'https://press.example',
+        'submission_url': 'https://press.example/proposals', 'submission_types': ['Textbook'],
+        'source_evidence': [{'field': 'acceptance_status', 'claim': 'Open to proposals.',
+                             'url': 'https://press.example/proposals', 'evidence_text': 'We welcome proposals'}]})
+    def ollama(url, kwargs):
+        text = kwargs['json']['messages'][0]['content']
+        return ollama_reply(good if 'press.example' in text else 'not json at all')  # 0.5B fails on the journal
+    monkeypatch.setattr(vd.httpx, 'post', FakeHttp({'http://127.0.0.1:11434/api/chat': ollama}))
+
+    fetcher, config = make_fetcher({**JOURNAL_PAGES, **publisher_pages})
+    run = VenueDiscoveryRun.objects.create()
+    vd.run_discovery(run, config=config, fetcher=fetcher)
+    run.refresh_from_db()
+    assert run.status == 'completed', run.summary
+    assert run.candidates_created == 2 and run.queries_run >= 3
+
+    press = DiscoveredVenue.objects.get(name='Northfield Press')
+    assert press.acceptance_status == 'accepting' and press.submission_types == ['book']
+    # The journal came from DOAJ; the model failed, so directory data fills in and it stays unclear.
+    journal = DiscoveredVenue.objects.get(name='Journal of Applied AI in Organizations')
+    assert journal.acceptance_status == 'unclear' and journal.organization_name == 'Meridian Academic Publishing'
+    assert journal.policies['listed_in_doaj'] is True and journal.confidence < 60
+
+
+@pytest.mark.django_db
+def test_settings_payload_for_free_mode(monkeypatch):
+    free_env(monkeypatch)
+    client, _ = admin_client()
+    settings = client.get('/api/admin/venue-discovery/').json()['settings']
+    assert settings['mode'] == 'search_api' and settings['search_configured'] is True
+    assert 'searxng + doaj' in settings['search_provider'] and 'qwen2.5:0.5b-instruct' in settings['search_provider']
+    monkeypatch.setenv('VENUE_SEARXNG_URL', '')
+    settings = client.get('/api/admin/venue-discovery/').json()['settings']
+    assert settings['search_configured'] is False and settings['missing_key'] == 'VENUE_SEARXNG_URL'
+
+
+@pytest.mark.django_db
+def test_ollama_down_does_not_create_thin_records(monkeypatch):
+    free_env(monkeypatch, provider='doaj')
+    monkeypatch.setattr(vd.httpx, 'get', FakeHttp({'https://doaj.org/api/search/journals/': httpx.Response(200, json=DOAJ_RESULT)}))
+    def down(url, **kwargs):
+        raise httpx.ConnectError('refused', request=_req('POST', url))
+    monkeypatch.setattr(vd.httpx, 'post', down)
+    fetcher, config = make_fetcher(JOURNAL_PAGES)
+    run = VenueDiscoveryRun.objects.create()
+    vd.run_discovery(run, config=config, fetcher=fetcher)
+    run.refresh_from_db()
+    assert DiscoveredVenue.objects.count() == 0
+    assert any('Could not reach Ollama' in e['message'] for e in run.errors)

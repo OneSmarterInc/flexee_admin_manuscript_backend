@@ -106,6 +106,10 @@ class DiscoveryExtractionError(Exception):
     """The AI output could not be turned into a valid candidate."""
 
 
+class DiscoveryModelUnavailable(Exception):
+    """The AI model could not be reached at all (not the same as a bad answer)."""
+
+
 # ---------------------------------------------------------------------------
 # Query bank (one place to change what we search for)
 # ---------------------------------------------------------------------------
@@ -151,6 +155,7 @@ class SearchResult:
     url: str
     title: str = ''
     snippet: str = ''
+    hints: dict = field(default_factory=dict)
 
 
 class VenueSearchProvider:
@@ -191,16 +196,133 @@ class TavilySearchProvider(VenueSearchProvider):
         return results
 
 
-SEARCH_PROVIDERS = {'tavily': TavilySearchProvider}
+class SearxngSearchProvider(VenueSearchProvider):
+    """Self-hosted SearXNG (free, no API key). Its JSON output must be enabled in settings.yml."""
+    name = 'searxng'
+
+    def __init__(self, base_url, *, timeout=15.0, user_agent=''):
+        base_url = (base_url or '').strip().rstrip('/')
+        if not base_url:
+            raise DiscoveryConfigError('VENUE_SEARXNG_URL is not set (for example http://127.0.0.1:8888).')
+        self.base_url = base_url
+        self.timeout = timeout
+        self.user_agent = user_agent
+
+    def search(self, query, *, max_results=10):
+        try:
+            response = httpx.get(
+                f'{self.base_url}/search',
+                params={'q': query, 'format': 'json', 'language': 'en', 'safesearch': 1, 'categories': 'general'},
+                headers={'User-Agent': self.user_agent or 'FlexeeVenueDiscovery/1.0', 'Accept': 'application/json'},
+                timeout=self.timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise DiscoveryFetchError(f'Could not reach SearXNG at {self.base_url}. Is it running?') from exc
+        if response.status_code == 403:
+            raise DiscoveryFetchError("SearXNG refused JSON output. Add 'json' under search: formats: in its settings.yml.")
+        if response.status_code == 429:
+            raise DiscoveryFetchError('SearXNG rate limit reached (its limiter is on).')
+        if response.status_code >= 400:
+            raise DiscoveryFetchError(f'SearXNG returned HTTP {response.status_code}.')
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise DiscoveryFetchError("SearXNG did not return JSON. Add 'json' under search: formats: in settings.yml.") from exc
+        results = []
+        for item in payload.get('results', [])[:max_results]:
+            url = str(item.get('url', '')).strip()
+            if url:
+                results.append(SearchResult(url=url, title=str(item.get('title', ''))[:300],
+                                            snippet=str(item.get('content', ''))[:600]))
+        return results
 
 
-def get_search_provider(config):
-    provider_class = SEARCH_PROVIDERS.get(config.provider)
-    if not provider_class:
-        raise DiscoveryConfigError(
-            f'Unknown VENUE_SEARCH_PROVIDER {config.provider!r}. Supported: {", ".join(sorted(SEARCH_PROVIDERS))}.'
-        )
-    return provider_class(config.api_key, timeout=config.http_timeout)
+class DoajSearchProvider(VenueSearchProvider):
+    """Directory of Open Access Journals public API (free, no API key). Journals only."""
+    name = 'doaj'
+    endpoint = 'https://doaj.org/api/search/journals/'
+
+    def __init__(self, *, timeout=15.0, user_agent=''):
+        self.timeout = timeout
+        self.user_agent = user_agent
+
+    def queries(self, config):
+        """One query per subject area in VENUE_DISCOVERY_FOCUS."""
+        focus = os.getenv('VENUE_DISCOVERY_FOCUS', '') or (
+            'information systems, management, supply chain, artificial intelligence, education')
+        terms = [t.strip() for t in re.split(r',|\band\b|;', focus) if t.strip()]
+        out = []
+        for term in terms:
+            term = re.sub(r'^(and|or)\s+', '', term).strip()
+            if term and term not in out:
+                out.append(term)
+        return [('journal', term) for term in out[: config.max_queries_per_run]]
+
+    def search(self, query, *, max_results=10):
+        from urllib.parse import quote
+        search = quote(f'bibjson.subject.term:"{query}" OR bibjson.keywords:"{query}"', safe='')
+        try:
+            response = httpx.get(
+                self.endpoint + search,
+                params={'page': 1, 'pageSize': max_results},
+                headers={'User-Agent': self.user_agent or 'FlexeeVenueDiscovery/1.0', 'Accept': 'application/json'},
+                timeout=self.timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise DiscoveryFetchError('Could not reach the DOAJ API.') from exc
+        if response.status_code >= 400:
+            raise DiscoveryFetchError(f'DOAJ returned HTTP {response.status_code}.')
+        results = []
+        for item in (response.json().get('results') or [])[:max_results]:
+            bib = item.get('bibjson') or {}
+            ref = bib.get('ref') or {}
+            homepage = str(ref.get('journal') or '').strip()
+            instructions = str(ref.get('author_instructions') or '').strip()
+            entry = instructions or homepage
+            if not entry:
+                continue
+            hints = {
+                'name': str(bib.get('title') or '')[:300],
+                'organization_name': str((bib.get('publisher') or {}).get('name') or '')[:300],
+                'website_url': homepage,
+                'venue_type': 'journal',
+                'subjects': [str(s.get('term')) for s in (bib.get('subject') or []) if isinstance(s, dict) and s.get('term')][:8],
+                'policies': {k: v for k, v in {
+                    'listed_in_doaj': True,
+                    'peer_review': ', '.join((bib.get('editorial') or {}).get('review_process') or []),
+                    'article_processing_charge': 'yes' if (bib.get('apc') or {}).get('has_apc') else
+                                                 'no' if (bib.get('apc') or {}).get('has_apc') is False else '',
+                }.items() if v not in ('', None)},
+            }
+            results.append(SearchResult(url=entry, title=hints['name'], snippet='', hints=hints))
+        return results
+
+
+SEARCH_PROVIDERS = {'tavily': TavilySearchProvider, 'searxng': SearxngSearchProvider, 'doaj': DoajSearchProvider}
+
+
+def get_search_providers(config):
+    """Providers named in VENUE_SEARCH_PROVIDER (comma-separated), e.g. 'searxng,doaj'."""
+    names = [n.strip() for n in (config.provider or '').split(',') if n.strip()]
+    if not names:
+        raise DiscoveryConfigError('VENUE_SEARCH_PROVIDER is empty. Use searxng, doaj, tavily or a combination.')
+    providers = []
+    for name in names:
+        if name == 'tavily':
+            providers.append(TavilySearchProvider(config.api_key, timeout=config.http_timeout))
+        elif name == 'searxng':
+            providers.append(SearxngSearchProvider(os.getenv('VENUE_SEARXNG_URL', ''), timeout=config.http_timeout,
+                                                   user_agent=config.user_agent))
+        elif name == 'doaj':
+            providers.append(DoajSearchProvider(timeout=config.http_timeout, user_agent=config.user_agent))
+        else:
+            raise DiscoveryConfigError(
+                f'Unknown VENUE_SEARCH_PROVIDER {name!r}. Supported: {", ".join(sorted(SEARCH_PROVIDERS))}.')
+    return providers
+
+
+def get_search_provider(config):  # kept for compatibility: first configured provider
+    return get_search_providers(config)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -588,7 +710,95 @@ def build_extraction_prompt(pages, config):
     )
 
 
+LOCAL_SCHEMA_HINT = {
+    'name': '', 'organization_name': '', 'venue_type': 'journal|publisher|conference',
+    'acceptance_status': 'accepting|unclear|closed', 'website_url': '', 'submission_url': '',
+    'submission_types': [], 'description': '', 'aims_scope': '', 'required_submission_items': [
+        {'label': '', 'type': 'text|textarea|url|checkbox|file', 'required': False}],
+    'structured_desk_rejection_rules': [{'field': 'word_count', 'operator': '>', 'value': 0, 'message': ''}],
+    'source_evidence': [{'field': 'acceptance_status', 'claim': '', 'url': '', 'evidence_text': ''}],
+}
+
+
+def local_ai_settings():
+    def num(name, default, low, high):
+        try:
+            return max(low, min(int(os.getenv(name, str(default))), high))
+        except (TypeError, ValueError):
+            return default
+    return {
+        'base_url': os.getenv('OLLAMA_BASE_URL', 'http://127.0.0.1:11434').strip().rstrip('/'),
+        'model': (os.getenv('VENUE_DISCOVERY_OLLAMA_MODEL', '').strip()
+                  or os.getenv('OLLAMA_MODEL', '').strip() or 'qwen2.5:0.5b-instruct'),
+        'num_ctx': num('VENUE_DISCOVERY_OLLAMA_NUM_CTX', 8192, 2048, 131072),
+        'num_predict': num('VENUE_DISCOVERY_OLLAMA_NUM_PREDICT', 1200, 256, 8192),
+        'timeout': float(num('VENUE_DISCOVERY_OLLAMA_TIMEOUT_SECONDS', 300, 30, 3600)),
+    }
+
+
+def build_local_prompt(pages, local):
+    """A short prompt that fits a small local model's context window."""
+    budget = max(1500, (local['num_ctx'] - local['num_predict']) * 3 - 2500)  # ~3 chars per token, safety margin
+    blocks = []
+    for page in pages:
+        if budget <= 200:
+            break
+        text = page.text[: budget]
+        budget -= len(text)
+        blocks.append(f'URL: {page.url}\nTITLE: {page.title}\n{text}')
+    return (
+        'Read the web pages below about one academic journal, book publisher or conference. '
+        'Answer with ONE JSON object using exactly these keys. Use only facts from the pages; leave unknown '
+        'values empty. acceptance_status is "accepting" only if a page says you can submit now, "closed" if it '
+        'says submissions are closed, else "unclear". evidence_text must be copied exactly from the page.\n'
+        + json.dumps(LOCAL_SCHEMA_HINT) + '\n\n' + '\n\n'.join(blocks)
+    )
+
+
+def extract_with_local_ollama(pages, config):
+    """Rule extraction with a local Ollama model (free). Recorded in AI usage at zero cost."""
+    from ..ai_usage import complete_ai_call
+    local = local_ai_settings()
+    prompt = build_local_prompt(pages, local)
+    try:
+        response = httpx.post(
+            f"{local['base_url']}/api/chat",
+            json={
+                'model': local['model'],
+                'messages': [{'role': 'user', 'content': prompt}],
+                'stream': False,
+                'format': 'json',
+                'keep_alive': '5m',
+                'options': {'temperature': 0.1, 'num_ctx': local['num_ctx'], 'num_predict': local['num_predict']},
+            },
+            timeout=local['timeout'],
+        )
+    except httpx.HTTPError as exc:
+        raise DiscoveryModelUnavailable(
+            f"Could not reach Ollama at {local['base_url']}. Start Ollama and run: ollama pull {local['model']}") from exc
+    if response.status_code == 404:
+        raise DiscoveryModelUnavailable(f"Ollama does not have {local['model']}. Run: ollama pull {local['model']}")
+    if response.status_code >= 400:
+        raise DiscoveryModelUnavailable(f"Ollama returned HTTP {response.status_code} for {local['model']}.")
+    try:
+        payload = response.json()
+        content = (payload.get('message') or {}).get('content', '')
+    except ValueError as exc:
+        raise DiscoveryExtractionError('Ollama returned an unreadable response.') from exc
+    try:
+        complete_ai_call(None, provider='ollama', model=local['model'], operation='venue_discovery_extraction',
+                         input_tokens=int(payload.get('prompt_eval_count') or len(prompt) // 4),
+                         output_tokens=int(payload.get('eval_count') or len(content) // 4),
+                         usage_estimated=not payload.get('prompt_eval_count'))
+    except Exception:
+        pass  # usage logging must never break discovery
+    content = re.sub(r'<think>.*?</think>', '', content or '', flags=re.I | re.S).strip()
+    return parse_ai_json(content)
+
+
 def extract_with_ai(pages, config):
+    if config.ai_provider == 'ollama':
+        return extract_with_local_ollama(pages, config)
     from .ai_provider import ai_chat_json
     prompt = build_extraction_prompt(pages, config)
     last_error = None
@@ -986,8 +1196,24 @@ def gather_pages(entry_url, fetcher, config):
     return pages
 
 
-def process_candidate(entry_url, fetcher, config, *, extractor=None):
+def _apply_hints(raw, hints):
+    """Fill fields the model left empty from structured directory data (never overrides the model)."""
+    merged = dict(raw or {})
+    for key in ('name', 'organization_name', 'website_url', 'venue_type'):
+        if hints.get(key) and not str(merged.get(key) or '').strip():
+            merged[key] = hints[key]
+    if hints.get('policies'):
+        policies = dict(hints['policies'])
+        policies.update(merged.get('policies') if isinstance(merged.get('policies'), dict) else {})
+        merged['policies'] = policies
+    if hints.get('subjects') and not str(merged.get('aims_scope') or '').strip():
+        merged['aims_scope'] = 'Subject areas (DOAJ): ' + ', '.join(hints['subjects'])
+    return merged
+
+
+def process_candidate(entry_url, fetcher, config, *, extractor=None, hints=None):
     extractor = extractor or extract_with_ai
+    hints = hints or {}
     pages = gather_pages(entry_url, fetcher, config)
     if not any(page.text for page in pages):
         raise DiscoveryExtractionError('The page has no readable text (it may need JavaScript).')
@@ -1000,7 +1226,13 @@ def process_candidate(entry_url, fetcher, config, *, extractor=None):
         previous.save(update_fields=['last_checked_at', 'updated_at'])
         return previous, 'unchanged'
 
-    candidate = validate_extraction(extractor(pages, config), pages)
+    try:
+        raw = extractor(pages, config)
+    except DiscoveryExtractionError:
+        if not hints.get('name'):
+            raise
+        raw = {}  # the model failed, but the directory still tells us which journal this is
+    candidate = validate_extraction(_apply_hints(raw, hints) if hints else raw, pages)
     return upsert_candidate(candidate, fingerprint)
 
 
@@ -1032,29 +1264,32 @@ def run_discovery(run, *, config=None, provider=None, fetcher=None, extractor=No
             return run
         if config.mode not in {'claude_agent', 'search_api'}:
             raise DiscoveryConfigError(f'Unknown VENUE_DISCOVERY_MODE {config.mode!r}. Use claude_agent or search_api.')
-        provider = provider or get_search_provider(config)
+        providers = [provider] if provider is not None else get_search_providers(config)
         fetcher = fetcher or SafeFetcher(config)
 
         entries, seen_keys = [], set()
-        for _category, query in query_bank()[: config.max_queries_per_run]:
-            try:
-                results = provider.search(query, max_results=config.max_results_per_query)
-            except Exception as exc:  # one failing query must not stop the run
-                _record_error(run, query, 'search', exc)
-                continue
-            run.queries_run += 1
-            run.results_seen += len(results)
-            for result in results:
-                if not canonical_url(result.url) or is_third_party(result.url):
+        for search_provider in providers:
+            queries = (search_provider.queries(config) if hasattr(search_provider, 'queries')
+                       else query_bank()[: config.max_queries_per_run])
+            for _category, query in queries:
+                try:
+                    results = search_provider.search(query, max_results=config.max_results_per_query)
+                except Exception as exc:  # one failing query must not stop the run
+                    _record_error(run, f'{getattr(search_provider, "name", "search")}: {query}', 'search', exc)
                     continue
-                key = _entry_key(result.url)
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                entries.append(result.url)
+                run.queries_run += 1
+                run.results_seen += len(results)
+                for result in results:
+                    if not canonical_url(result.url) or is_third_party(result.url):
+                        continue
+                    key = _entry_key(result.url)
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    entries.append((result.url, getattr(result, 'hints', {}) or {}))
 
-        for url in entries[: config.max_candidates_per_run]:
-            _process_and_count(run, url, fetcher, config, extractor)
+        for url, hints in entries[: config.max_candidates_per_run]:
+            _process_and_count(run, url, fetcher, config, extractor, hints=hints)
 
         _recheck_existing(run, fetcher, config, extractor, skip=set(seen_keys))
 
@@ -1079,10 +1314,10 @@ def run_discovery(run, *, config=None, provider=None, fetcher=None, extractor=No
     return run
 
 
-def _process_and_count(run, url, fetcher, config, extractor):
+def _process_and_count(run, url, fetcher, config, extractor, hints=None):
     try:
-        _record, outcome = process_candidate(url, fetcher, config, extractor=extractor)
-    except (DiscoveryFetchError, DiscoveryExtractionError) as exc:
+        _record, outcome = process_candidate(url, fetcher, config, extractor=extractor, hints=hints)
+    except (DiscoveryFetchError, DiscoveryExtractionError, DiscoveryModelUnavailable) as exc:
         _record_error(run, url, 'candidate', exc)
         return
     except Exception as exc:  # e.g. AI provider failure or database constraint

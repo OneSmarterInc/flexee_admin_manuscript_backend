@@ -39,6 +39,57 @@ Alternative (`VENUE_DISCOVERY_MODE=search_api`): fixed queries through a search 
 (`VENUE_SEARCH_PROVIDER=tavily`, `VENUE_SEARCH_API_KEY`) and this server's own safe fetcher,
 with the AI used only to extract rules.
 
+## 1b. Free setup: SearXNG + DOAJ + local Ollama (no API keys)
+
+This mode costs nothing per run. Venues are found with **DOAJ** (Directory of Open Access
+Journals, a free public API; journals only, and it links each journal's author instructions)
+and **SearXNG** (a free search engine you run yourself). This server fetches the official
+pages safely and a **local Ollama model** reads them. Every claim is checked against the
+pages exactly as in the other modes.
+
+1. Ollama: `ollama pull qwen2.5:0.5b-instruct` (testing) or `ollama pull qwen2.5:7b-instruct`
+   (recommended for real results; needs about 8 GB RAM).
+2. SearXNG with Docker, from any folder:
+
+   ```
+   docker run -d --name searxng -p 8888:8080 -v "${PWD}/searxng:/etc/searxng" searxng/searxng
+   ```
+
+   It creates `searxng/settings.yml` in that folder on first start. Edit it so that it has
+
+   ```yaml
+   search:
+     formats:
+       - html
+       - json
+   server:
+     limiter: false
+   ```
+
+   then `docker restart searxng`. Test it: open
+   `http://127.0.0.1:8888/search?q=journal+author+guidelines&format=json` in a browser; you
+   should see JSON, not an error page.
+3. Backend `.env`:
+
+   ```
+   VENUE_DISCOVERY_ENABLED=true
+   VENUE_DISCOVERY_MODE=search_api
+   VENUE_SEARCH_PROVIDER=searxng,doaj
+   VENUE_SEARXNG_URL=http://127.0.0.1:8888
+   VENUE_DISCOVERY_AI_PROVIDER=ollama
+   VENUE_DISCOVERY_OLLAMA_MODEL=qwen2.5:0.5b-instruct
+   VENUE_DISCOVERY_MAX_CANDIDATES_PER_RUN=5
+   ```
+
+   DOAJ searches use the subject areas in `VENUE_DISCOVERY_FOCUS` (comma-separated).
+
+What to expect from `qwen2.5:0.5b-instruct`: search and page fetching work fully, but the
+model reads rules poorly, so many venues come back "Unclear" with thin details. When the model
+returns unusable output for a DOAJ journal, the journal is still staged as "Unclear" using
+DOAJ's own data (name, publisher, subjects, peer review, APC). If Ollama itself is not
+reachable, nothing is staged and the run lists the error. Switch to `qwen2.5:7b-instruct`
+(one `.env` line) for useful results.
+
 ## 2. Schedule it (once per environment, idempotent)
 
 ```

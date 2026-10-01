@@ -18,6 +18,7 @@ urlpatterns = [
     path('author/login/', author_api.author_login),
     path('author/logout/', author_api.author_logout),
     path('author/change-password/', author_api.author_change_password),
+    path('author/password-change/', author_api.author_change_password_direct),
     path('author/password-reset/', author_api.author_password_reset_request),
     path('author/password-reset/confirm/', author_api.author_password_reset_confirm),
     path('author/session/', author_api.author_session),

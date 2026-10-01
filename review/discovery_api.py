@@ -121,6 +121,8 @@ def run_payload(run):
         'candidates_updated': run.candidates_updated,
         'candidates_changed': run.candidates_changed,
         'error_count': len(run.errors or []),
+        'errors': [{'stage': e.get('stage', ''), 'url': str(e.get('url', ''))[:200], 'message': str(e.get('message', ''))[:240]}
+                   for e in (run.errors or [])[:15]],
         'summary': run.summary,
     }
 

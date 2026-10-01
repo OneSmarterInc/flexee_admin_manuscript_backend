@@ -427,10 +427,18 @@ def country_of(url, hint=''):
     return tld.upper() if len(tld) == 2 and tld not in GENERIC_TLDS else ''
 
 
+_RUN_PAGE_OFFSET = 0
+
+
+def set_run_page_offset(offset):
+    global _RUN_PAGE_OFFSET
+    _RUN_PAGE_OFFSET = max(0, int(offset or 0))
+
+
 def results_page_for_today(rotation):
-    """Directory results page to use today, so daily runs do not keep returning the same venues."""
+    """Directory results page for this run: changes every day AND with every run on the same day."""
     rotation = max(1, int(rotation or 1))
-    return (timezone.localdate().toordinal() % rotation) + 1
+    return ((timezone.localdate().toordinal() + _RUN_PAGE_OFFSET) % rotation) + 1
 
 
 def is_third_party(url):
@@ -1454,6 +1462,8 @@ def run_discovery(run, *, config=None, provider=None, fetcher=None, extractor=No
         if config.mode not in {'claude_agent', 'search_api'}:
             raise DiscoveryConfigError(f'Unknown VENUE_DISCOVERY_MODE {config.mode!r}. Use claude_agent or search_api.')
         providers = [provider] if provider is not None else get_search_providers(config)
+        today_start = timezone.localtime().replace(hour=0, minute=0, second=0, microsecond=0)
+        set_run_page_offset(VenueDiscoveryRun.objects.filter(created_at__gte=today_start).exclude(id=run.id).count())
         fetcher = fetcher or SafeFetcher(config)
 
         per_provider, seen_keys = [], set()
@@ -1506,8 +1516,32 @@ def run_discovery(run, *, config=None, provider=None, fetcher=None, extractor=No
     return run
 
 
+def _known_venue_keys():
+    """Identities of venues already staged, so a run spends its budget on venues it has not seen."""
+    names_by_domain, urls = set(), set()
+    for name, domain, website, submission, sources in DiscoveredVenue.objects.values_list(
+            'normalized_name', 'canonical_domain', 'website_url', 'submission_url', 'source_urls'):
+        names_by_domain.add((domain, name))
+        for url in [website, submission, *(sources or [])]:
+            if url:
+                urls.add(canonical_url(url))
+    return names_by_domain, urls
+
+
+def is_known_venue(url, hints, known):
+    names_by_domain, urls = known
+    if canonical_url(url) in urls:
+        return True
+    name = normalize_name(hints.get('name'))
+    if name:
+        domain = registrable_domain(canonical_host(hints.get('website_url') or url))
+        return (domain, name) in names_by_domain
+    return False
+
+
 def pick_varied_entries(per_provider, config):
-    """Take candidates round-robin across sources, with per-country and per-site limits."""
+    """Take NEW candidates round-robin across sources, with per-country and per-site limits."""
+    known = _known_venue_keys()
     max_per_country = _env_int('VENUE_DISCOVERY_MAX_PER_COUNTRY', 2, 1, 1000)
     max_per_site = _env_int('VENUE_DISCOVERY_MAX_PER_SITE', 1, 1, 1000)
     by_country, by_site, picked = {}, {}, []
@@ -1518,6 +1552,8 @@ def pick_varied_entries(per_provider, config):
                 queues.remove(queue)
                 continue
             url, hints = queue.pop(0)
+            if is_known_venue(url, hints, known):
+                continue  # already staged: the daily re-check keeps it fresh
             country = country_of(url, hints.get('country', ''))
             site = registrable_domain(canonical_host(url))
             if country and by_country.get(country, 0) >= max_per_country:

@@ -1108,6 +1108,7 @@ def test_openalex_provider_returns_homepages_with_hints(monkeypatch):
     assert params['filter'] == 'type:journal' and params['sort'] == 'cited_by_count:desc' and params['page'] >= 1
 
 
+@pytest.mark.django_db
 def test_varied_entries_limit_country_and_site_and_mix_sources(monkeypatch):
     monkeypatch.setenv('VENUE_DISCOVERY_MAX_PER_COUNTRY', '2')
     config = vd.DiscoveryConfig.from_env()
@@ -1172,3 +1173,29 @@ def test_list_sorting_newest_first_by_default():
     names = lambda q: [i['name'] for i in client.get('/api/admin/venue-discovery/?status=new' + q).json()['items']]
     assert names('') == ['New low', 'Middle', 'Old high']
     assert names('&sort=confidence') == ['Old high', 'Middle', 'New low']
+
+
+
+@pytest.mark.django_db
+def test_runs_skip_known_venues_and_move_to_new_results_pages(monkeypatch):
+    stage_journal()  # Journal of Applied AI in Organizations is already known
+    config = vd.DiscoveryConfig.from_env()
+    known_entry = ('https://www.meridian-academic.example/jaaio',
+                   {'name': 'Journal of Applied AI in Organizations', 'website_url': 'https://www.meridian-academic.example/jaaio'})
+    fresh_entry = ('https://misq.umn.edu', {'name': 'MIS Quarterly', 'website_url': 'https://misq.umn.edu', 'country': 'US'})
+    picked = vd.pick_varied_entries([[known_entry, fresh_entry]], config)
+    assert [url for url, _ in picked] == ['https://misq.umn.edu']
+
+    vd.set_run_page_offset(0); first = vd.results_page_for_today(5)
+    vd.set_run_page_offset(1); second = vd.results_page_for_today(5)
+    vd.set_run_page_offset(0)
+    assert first != second  # a second run on the same day asks for a different page
+
+
+@pytest.mark.django_db
+def test_run_payload_lists_skip_reasons():
+    client, _ = admin_client()
+    VenueDiscoveryRun.objects.create(status='completed', errors=[
+        {'url': 'openalex: management', 'stage': 'search', 'message': 'Could not reach the OpenAlex API.'}])
+    run = client.get('/api/admin/venue-discovery/').json()['last_run']
+    assert run['error_count'] == 1 and run['errors'][0]['message'] == 'Could not reach the OpenAlex API.'

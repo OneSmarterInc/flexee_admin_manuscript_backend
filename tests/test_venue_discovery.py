@@ -1,0 +1,825 @@
+import json
+from unittest.mock import patch
+
+import httpx
+import pytest
+from django.db import IntegrityError
+from django.test import Client
+
+from review.auth import AUTHOR_COOKIE_NAME, COOKIE_NAME, issue_author_session, issue_session
+from review.models import (
+    AuditEvent, Author, DiscoveredVenue, EditorUser, Manuscript, Membership, Organization, Venue,
+    VenueAgentConfig, VenueDiscoveryRun,
+)
+from review.services import venue_discovery as vd
+
+
+# ---------------------------------------------------------------------------
+# Fixtures and fakes (no real network, search or AI is ever used)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def env(monkeypatch):
+    monkeypatch.setenv('ADMIN_SESSION_SECRET', 'discovery-secret')
+    monkeypatch.setenv('TEST_BYPASS_ORIGIN', '1')
+    monkeypatch.setenv('VENUE_DISCOVERY_ENABLED', 'true')
+    monkeypatch.setenv('VENUE_SEARCH_API_KEY', 'test-key')
+    monkeypatch.setenv('ANTHROPIC_API_KEY', 'test-anthropic-key')
+    monkeypatch.setenv('VENUE_DISCOVERY_MODEL', 'claude-test-model')
+    monkeypatch.setenv('VENUE_DISCOVERY_PER_DOMAIN_DELAY_SECONDS', '0')
+    # Every test hostname resolves to a public documentation address.
+    monkeypatch.setattr(vd, '_resolve', lambda host: {'93.184.216.34'})
+
+
+JOURNAL_HOME = """<html><head><title>Journal of Applied AI in Organizations</title></head><body>
+<nav>Home | About</nav>
+<h1>Journal of Applied AI in Organizations</h1>
+<p>Published by Meridian Academic Publishing.</p>
+<p>Aims and scope: empirical research on applied AI in organizations.</p>
+<a href="/jaaio/author-guidelines">Author guidelines</a>
+<a href="https://other-site.example/elsewhere">Partner</a>
+<script>var tracking = 1;</script></body></html>"""
+
+JOURNAL_GUIDE = """<html><head><title>Author guidelines</title></head><body>
+<h1>Instructions for authors</h1>
+<p>We publish original research articles and review articles.</p>
+<p>Manuscripts should not exceed 8,000 words, including references.</p>
+<p>Submit your manuscript through our online system at any time.</p>
+<p>A conflict of interest statement is required.</p></body></html>"""
+
+
+def site_handler(pages):
+    def handler(request):
+        url = str(request.url).rstrip('/')
+        if url.endswith('/robots.txt'):
+            return httpx.Response(200, text='User-agent: *\nAllow: /\n', headers={'content-type': 'text/plain'})
+        body = pages.get(url)
+        if body is None:
+            return httpx.Response(404, text='not found', headers={'content-type': 'text/html'})
+        if isinstance(body, httpx.Response):
+            return body
+        return httpx.Response(200, text=body, headers={'content-type': 'text/html; charset=utf-8'})
+    return handler
+
+
+def make_fetcher(pages, **config_overrides):
+    config = vd.DiscoveryConfig.from_env()
+    for key, value in config_overrides.items():
+        setattr(config, key, value)
+    client = httpx.Client(transport=httpx.MockTransport(site_handler(pages)), follow_redirects=False)
+    return vd.SafeFetcher(config, client=client), config
+
+
+JOURNAL_PAGES = {
+    'https://www.meridian-academic.example/jaaio': JOURNAL_HOME,
+    'https://www.meridian-academic.example/jaaio/author-guidelines': JOURNAL_GUIDE,
+}
+
+
+def journal_extraction(pages=None, config=None):
+    return {
+        'name': 'Journal of Applied AI in Organizations',
+        'organization_name': 'Meridian Academic Publishing',
+        'venue_type': 'journal',
+        'acceptance_status': 'accepting',
+        'website_url': 'https://www.meridian-academic.example/jaaio',
+        'submission_url': 'https://www.meridian-academic.example/jaaio/author-guidelines',
+        'submission_types': ['Original Research', 'Review Paper'],
+        'description': 'Applied AI in organizations.',
+        'aims_scope': 'Empirical research on applied AI in organizations.',
+        'article_types': ['Research article', 'Review article'],
+        'accepted_methods': [],
+        'quality_threshold': 'Manuscripts should make a significant contribution.',
+        'reviewer_criteria': ['Applied AI'],
+        'policies': {'peer_review': 'Double-blind'},
+        'disclosures': ['Conflict of interest statement'],
+        'reporting_standards': [],
+        'desk_rejection_rules': [],
+        'structured_desk_rejection_rules': [
+            {'field': 'word_count', 'operator': '>', 'value': 8000, 'message': 'Over the 8,000-word limit.'},
+            {'field': 'word_count', 'operator': '>', 'value': 5000, 'message': 'Invented limit.'},
+            {'field': 'disclosure', 'operator': 'empty', 'message': 'Subjective rule.'},
+        ],
+        'required_submission_items': [
+            {'label': 'Conflict of interest statement', 'type': 'textarea', 'required': True},
+            {'label': 'Cover letter', 'type': 'file'},
+            {'label': 'Broken', 'type': 'video'},
+        ],
+        'retention_days': None,
+        'deadlines': {}, 'submission_capacity': {}, 'current_demand': {},
+        'config_notes': '',
+        'source_evidence': [
+            {'field': 'acceptance_status', 'claim': 'Online submission is open.',
+             'url': 'https://www.meridian-academic.example/jaaio/author-guidelines', 'source_title': 'Author guidelines',
+             'evidence_text': 'Submit your manuscript through our online system at any time.'},
+            {'field': 'word_limit', 'claim': 'Maximum 8,000 words.',
+             'url': 'https://www.meridian-academic.example/jaaio/author-guidelines', 'source_title': 'Author guidelines',
+             'evidence_text': 'should not exceed 8,000 words'},
+            {'field': 'accepted_types', 'claim': 'Fabricated quote.',
+             'url': 'https://www.meridian-academic.example/jaaio/author-guidelines', 'source_title': 'Author guidelines',
+             'evidence_text': 'We also accept poetry and film scripts of any length.'},
+        ],
+    }
+
+
+class FakeProvider:
+    def __init__(self, results_by_query=None, fail=False):
+        self.results_by_query = results_by_query or {}
+        self.fail = fail
+        self.calls = 0
+
+    def search(self, query, *, max_results=10):
+        self.calls += 1
+        if self.fail:
+            raise vd.DiscoveryFetchError('provider timeout')
+        return self.results_by_query.get(query, [])
+
+
+def admin_client(email='root@example.com', superuser=True):
+    user = EditorUser.objects.create(email=email, password_hash='x', platform_superuser=superuser)
+    client = Client()
+    token, _ = issue_session(user.email)
+    client.cookies[COOKIE_NAME] = token
+    return client, user
+
+
+def stage_journal():
+    fetcher, config = make_fetcher(JOURNAL_PAGES)
+    record, outcome = vd.process_candidate('https://www.meridian-academic.example/jaaio', fetcher, config,
+                                           extractor=journal_extraction)
+    assert outcome == 'created'
+    return record
+
+
+# ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+def test_candidate_model_persists_evidence_and_status():
+    item = DiscoveredVenue.objects.create(name='X', normalized_name='x', venue_type='journal',
+                                          source_evidence=[{'field': 'f', 'url': 'https://a.example'}])
+    item.refresh_from_db()
+    assert item.discovery_status == 'new' and item.acceptance_status == 'unclear'
+    assert item.source_evidence[0]['field'] == 'f'
+
+
+# ---------------------------------------------------------------------------
+# Safe fetching
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('url', [
+    'http://127.0.0.1/admin', 'http://localhost:8000/', 'http://169.254.169.254/latest/meta-data/',
+    'http://10.0.0.5/', 'http://192.168.1.1/', 'http://[::1]/', 'http://100.64.1.1/', 'file:///etc/passwd',
+    'ftp://example.org/', 'http://user:pw@example.org/', 'http://intranet.local/',
+])
+def test_private_and_unsafe_urls_are_blocked(url):
+    with pytest.raises(vd.DiscoveryFetchError):
+        vd.validate_public_url(url)
+
+
+def test_hostname_resolving_to_private_ip_is_blocked(monkeypatch):
+    monkeypatch.setattr(vd, '_resolve', lambda host: {'10.1.2.3'})
+    with pytest.raises(vd.DiscoveryFetchError):
+        vd.validate_public_url('https://looks-public.example/')
+
+
+@pytest.mark.django_db
+def test_fetch_valid_official_page_strips_scripts_and_nav():
+    fetcher, _ = make_fetcher(JOURNAL_PAGES)
+    page = fetcher.fetch('https://www.meridian-academic.example/jaaio')
+    assert page.title == 'Journal of Applied AI in Organizations'
+    assert 'Aims and scope' in page.text
+    assert 'tracking' not in page.text and 'Home | About' not in page.text
+    assert vd.find_submission_links(page, 2) == ['https://www.meridian-academic.example/jaaio/author-guidelines']
+
+
+def test_redirect_to_private_address_is_blocked():
+    pages = {'https://pub.example/start': httpx.Response(302, headers={'location': 'http://127.0.0.1/secret'})}
+    fetcher, _ = make_fetcher(pages)
+    with pytest.raises(vd.DiscoveryFetchError, match='Blocked'):
+        fetcher.fetch('https://pub.example/start')
+
+
+def test_non_html_and_oversized_responses_are_rejected():
+    pages = {
+        'https://pub.example/file.pdf': httpx.Response(200, content=b'%PDF', headers={'content-type': 'application/pdf'}),
+        'https://pub.example/huge': httpx.Response(200, text='x' * 50_000, headers={'content-type': 'text/html'}),
+    }
+    fetcher, _ = make_fetcher(pages, page_max_bytes=10_000)
+    with pytest.raises(vd.DiscoveryFetchError, match='non-HTML'):
+        fetcher.fetch('https://pub.example/file.pdf')
+    with pytest.raises(vd.DiscoveryFetchError, match='larger'):
+        fetcher.fetch('https://pub.example/huge')
+
+
+def test_timeout_is_reported_as_fetch_error():
+    def boom(request):
+        if str(request.url).endswith('/robots.txt'):
+            return httpx.Response(404)
+        raise httpx.ReadTimeout('slow', request=request)
+    config = vd.DiscoveryConfig.from_env()
+    fetcher = vd.SafeFetcher(config, client=httpx.Client(transport=httpx.MockTransport(boom)))
+    with pytest.raises(vd.DiscoveryFetchError, match='Timed out'):
+        fetcher.fetch('https://slow.example/page')
+
+
+def test_robots_disallow_is_respected():
+    def handler(request):
+        if str(request.url).endswith('/robots.txt'):
+            return httpx.Response(200, text='User-agent: *\nDisallow: /\n', headers={'content-type': 'text/plain'})
+        return httpx.Response(200, text='<p>hi</p>', headers={'content-type': 'text/html'})
+    config = vd.DiscoveryConfig.from_env()
+    fetcher = vd.SafeFetcher(config, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(vd.DiscoveryFetchError, match='robots'):
+        fetcher.fetch('https://private-site.example/journal')
+
+
+# ---------------------------------------------------------------------------
+# Extraction and validation
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+def test_valid_extraction_is_normalised_and_verified():
+    record = stage_journal()
+    assert record.acceptance_status == 'accepting'
+    assert record.submission_types == ['research_article', 'review_article']
+    assert record.article_types[:2] == ['Research article', 'Review article']
+    # Only the objective 8,000-word rule that appears on the page survives.
+    assert record.structured_desk_rejection_rules == [
+        {'field': 'word_count', 'operator': '>', 'value': 8000, 'message': 'Over the 8,000-word limit.'}]
+    # Requirements: invalid type dropped; "required" only when stated.
+    items = {i['label']: i for i in record.required_submission_items}
+    assert set(items) == {'Conflict of interest statement', 'Cover letter'}
+    assert items['Conflict of interest statement']['required'] is True and items['Cover letter']['required'] is False
+    # The fabricated quote was dropped; real quotes kept with timestamps.
+    assert len(record.source_evidence) == 2 and all('checked_at' in e for e in record.source_evidence)
+    assert record.confidence >= 80
+    assert record.retention_days is None and record.current_demand == {}
+
+
+def test_malformed_ai_json_is_rejected():
+    with pytest.raises(vd.DiscoveryExtractionError):
+        vd.parse_ai_json('this is not json')
+    assert vd.parse_ai_json('```json\n{"name": "X"}\n```') == {'name': 'X'}
+
+
+@pytest.mark.parametrize('label,expected', [
+    ('Original Research', 'research_article'), ('Systematic Review', 'review_article'), ('Case Study', 'case_study'),
+    ('Conference Paper', 'conference_paper'), ('Textbook Proposal', 'book'), ('Research monograph', 'book'),
+    ('Practitioner perspective', 'practitioner_article'), ('Letters to the editor', 'other'),
+])
+def test_submission_type_mapping(label, expected):
+    assert vd.normalize_submission_type(label) == expected
+
+
+@pytest.mark.django_db
+def test_accepting_without_official_evidence_becomes_unclear():
+    raw = journal_extraction()
+    raw['source_evidence'] = []
+    fetcher, config = make_fetcher(JOURNAL_PAGES)
+    pages = vd.gather_pages('https://www.meridian-academic.example/jaaio', fetcher, config)
+    assert vd.validate_extraction(raw, pages)['acceptance_status'] == 'unclear'
+
+
+@pytest.mark.django_db
+def test_explicitly_closed_venue_is_closed():
+    closed = {'https://press.example/qlt': '<title>QLT</title><p>We are not accepting new submissions at this time.</p>'}
+    raw = {'name': 'Quarterly of Learning Technologies', 'venue_type': 'journal', 'acceptance_status': 'closed',
+           'website_url': 'https://press.example/qlt',
+           'source_evidence': [{'field': 'acceptance_status', 'claim': 'Submissions suspended.',
+                                'url': 'https://press.example/qlt',
+                                'evidence_text': 'We are not accepting new submissions at this time.'}]}
+    fetcher, config = make_fetcher(closed)
+    pages = vd.gather_pages('https://press.example/qlt', fetcher, config)
+    assert vd.validate_extraction(raw, pages)['acceptance_status'] == 'closed'
+
+
+@pytest.mark.django_db
+def test_third_party_blog_is_never_high_confidence_accepting():
+    blog = {'https://someblog.example/post': '<title>Top journals</title><p>The Annals of X now accepts submissions!</p>'}
+    raw = {'name': 'Annals of X', 'venue_type': 'journal', 'acceptance_status': 'accepting',
+           'website_url': 'https://annals-x.example',
+           'source_evidence': [{'field': 'acceptance_status', 'claim': 'Accepting.', 'url': 'https://someblog.example/post',
+                                'evidence_text': 'The Annals of X now accepts submissions!'}]}
+    fetcher, config = make_fetcher(blog)
+    candidate = vd.validate_extraction(raw, vd.gather_pages('https://someblog.example/post', fetcher, config))
+    assert candidate['acceptance_status'] == 'unclear'
+    assert candidate['confidence'] <= 30
+
+
+# ---------------------------------------------------------------------------
+# Deduplication and re-checks
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+def test_same_venue_found_twice_updates_one_record():
+    stage_journal()
+    candidate = vd.validate_extraction(journal_extraction(), [])  # same identity, different (empty) pages
+    candidate['submission_url'] = 'https://Meridian-Academic.example/jaaio/author-guidelines/?utm_source=x'
+    record, outcome = vd.upsert_candidate(candidate, 'other-fingerprint')
+    assert outcome == 'updated'
+    assert DiscoveredVenue.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_unchanged_content_skips_the_ai():
+    stage_journal()
+    fetcher, config = make_fetcher(JOURNAL_PAGES)
+    def must_not_run(*args):
+        raise AssertionError('AI should not be called for unchanged pages')
+    _record, outcome = vd.process_candidate('https://www.meridian-academic.example/jaaio', fetcher, config,
+                                            extractor=must_not_run)
+    assert outcome == 'unchanged'
+
+
+@pytest.mark.django_db
+def test_changed_sources_never_overwrite_the_live_config():
+    client, _ = admin_client()
+    record = stage_journal()
+    client.post(f'/api/admin/venue-discovery/{record.id}/add-to-venue-agent/')
+    live = VenueAgentConfig.objects.get()
+
+    changed_guide = JOURNAL_GUIDE.replace('8,000', '7,500')
+    fetcher, config = make_fetcher({**JOURNAL_PAGES,
+                                    'https://www.meridian-academic.example/jaaio/author-guidelines': changed_guide})
+    raw = journal_extraction()
+    raw['structured_desk_rejection_rules'] = [{'field': 'word_count', 'operator': '>', 'value': 7500, 'message': 'Over 7,500.'}]
+    raw['source_evidence'][1]['evidence_text'] = 'should not exceed 7,500 words'
+    updated, outcome = vd.process_candidate('https://www.meridian-academic.example/jaaio', fetcher, config,
+                                            extractor=lambda *a: raw)
+    assert outcome == 'changed' and updated.discovery_status == 'changed'
+    assert 'live Venue Agent was not changed' in updated.change_summary
+    live.refresh_from_db()
+    assert live.structured_desk_rejection_rules[0]['value'] == 8000
+    assert AuditEvent.objects.filter(action='venue_discovery.candidate_changed').exists()
+
+
+# ---------------------------------------------------------------------------
+# One-click Add
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+def test_add_creates_active_venue_and_config_with_all_fields():
+    client, _ = admin_client()
+    record = stage_journal()
+    response = client.post(f'/api/admin/venue-discovery/{record.id}/add-to-venue-agent/')
+    assert response.status_code == 201, response.content
+    body = response.json()
+    assert body['already_added'] is False
+
+    venue = Venue.objects.get()
+    config = VenueAgentConfig.objects.get()
+    record.refresh_from_db()
+    assert venue.active and config.active and config.version == 1
+    assert venue.name == 'Journal of Applied AI in Organizations' and venue.venue_type == 'journal'
+    assert venue.organization.name == 'Meridian Academic Publishing' and venue.organization.organization_type == 'journal'
+    assert config.aims_scope == record.aims_scope
+    assert config.article_types == record.article_types
+    assert config.policies == {'peer_review': 'Double-blind'}
+    assert config.structured_desk_rejection_rules == record.structured_desk_rejection_rules
+    assert config.required_submission_items == record.required_submission_items
+    assert config.disclosures == ['Conflict of interest statement']
+    assert 'Discovered automatically on' in config.config_notes
+    assert record.discovery_status == 'added' and record.added_venue == venue and record.added_venue_config == config
+    actions = set(AuditEvent.objects.values_list('action', flat=True))
+    assert {'venue.created_from_discovery', 'venue_config.created_from_discovery',
+            'venue_discovery.candidate_added'} <= actions
+
+
+@pytest.mark.django_db
+def test_add_twice_is_idempotent():
+    client, _ = admin_client()
+    record = stage_journal()
+    first = client.post(f'/api/admin/venue-discovery/{record.id}/add-to-venue-agent/')
+    second = client.post(f'/api/admin/venue-discovery/{record.id}/add-to-venue-agent/')
+    assert first.status_code == 201 and second.status_code == 200
+    assert second.json()['already_added'] is True
+    assert second.json()['venue']['id'] == first.json()['venue']['id']
+    assert Venue.objects.count() == 1 and VenueAgentConfig.objects.count() == 1 and Organization.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_add_rolls_back_everything_when_config_creation_fails():
+    client, _ = admin_client()
+    record = stage_journal()
+    with patch('review.discovery_api.VenueAgentConfig.objects.create', side_effect=IntegrityError('boom')):
+        with pytest.raises(IntegrityError):
+            client.post(f'/api/admin/venue-discovery/{record.id}/add-to-venue-agent/')
+    record.refresh_from_db()
+    assert Venue.objects.count() == 0 and Organization.objects.count() == 0
+    assert record.discovery_status == 'new' and record.added_venue_id is None
+
+
+@pytest.mark.django_db
+def test_invalid_staged_config_is_rejected_without_side_effects():
+    client, _ = admin_client()
+    record = stage_journal()
+    record.retention_days = 99999
+    record.save()
+    response = client.post(f'/api/admin/venue-discovery/{record.id}/add-to-venue-agent/')
+    assert response.status_code == 422
+    assert Venue.objects.count() == 0 and Organization.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_closed_and_ignored_candidates_cannot_be_added():
+    client, _ = admin_client()
+    record = stage_journal()
+    record.acceptance_status = 'closed'
+    record.save()
+    assert client.post(f'/api/admin/venue-discovery/{record.id}/add-to-venue-agent/').status_code == 409
+    record.acceptance_status = 'accepting'
+    record.save()
+    client.post(f'/api/admin/venue-discovery/{record.id}/ignore/')
+    assert client.post(f'/api/admin/venue-discovery/{record.id}/add-to-venue-agent/').status_code == 409
+    assert client.post(f'/api/admin/venue-discovery/{record.id}/restore/').status_code == 200
+    assert client.post(f'/api/admin/venue-discovery/{record.id}/add-to-venue-agent/').status_code == 201
+
+
+@pytest.mark.django_db
+def test_existing_organization_is_reused_on_exact_name_only():
+    existing = Organization.objects.create(name='meridian academic publishing', organization_type='publisher')
+    Organization.objects.create(name='Meridian Academic', organization_type='publisher')
+    client, _ = admin_client()
+    record = stage_journal()
+    client.post(f'/api/admin/venue-discovery/{record.id}/add-to-venue-agent/')
+    assert Venue.objects.get().organization_id == existing.id
+
+
+@pytest.mark.django_db
+def test_book_publisher_scenario_matches_book_manuscripts():
+    publisher = {'https://press.example/proposals': (
+        '<title>Submitting a book proposal</title><p>We welcome proposals for research monographs, textbooks and '
+        'professional books.</p><p>Please include a book overview, target audience, table of contents, competing '
+        'titles, author biography and a sample chapter.</p>')}
+    raw = {'name': 'Northfield Academic Press', 'organization_name': 'Northfield Academic Press',
+           'venue_type': 'publisher', 'acceptance_status': 'accepting', 'website_url': 'https://press.example',
+           'submission_url': 'https://press.example/proposals',
+           'submission_types': ['Research monograph', 'Textbook', 'Professional book'],
+           'policies': {'book_submission_stage': 'proposal', 'accepted_book_types': ['Textbook', 'Professional book']},
+           'required_submission_items': [{'label': 'Table of contents', 'type': 'file', 'required': True},
+                                         {'label': 'Sample chapter', 'type': 'file', 'required': True}],
+           'source_evidence': [{'field': 'acceptance_status', 'claim': 'Invites proposals.',
+                                'url': 'https://press.example/proposals', 'evidence_text': 'We welcome proposals'}]}
+    fetcher, config = make_fetcher(publisher)
+    record, _ = vd.process_candidate('https://press.example/proposals', fetcher, config, extractor=lambda *a: raw)
+    assert record.submission_types == ['book'] and record.article_types[0] == 'Book manuscript'
+
+    client, _ = admin_client()
+    assert client.post(f'/api/admin/venue-discovery/{record.id}/add-to-venue-agent/').status_code == 201
+    from review.author_api import _normalise_label
+    config_obj = VenueAgentConfig.objects.get()
+    accepted = {_normalise_label(x) for x in config_obj.article_types}
+    assert _normalise_label(dict(Manuscript.TYPE_CHOICES)['book']) in accepted
+    assert config_obj.policies['book_submission_stage'] == 'proposal'
+
+
+# ---------------------------------------------------------------------------
+# Author integration
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+def test_only_added_venues_reach_authors():
+    record = stage_journal()
+    public = Client().get('/api/author/venues/').json()['venues']
+    assert public == []  # staged candidates are invisible to authors
+
+    client, _ = admin_client()
+    client.post(f'/api/admin/venue-discovery/{record.id}/add-to-venue-agent/')
+    names = [v['name'] for v in Client().get('/api/author/venues/').json()['venues']]
+    assert names == ['Journal of Applied AI in Organizations']
+
+
+@pytest.mark.django_db
+def test_added_journal_is_matched_for_a_research_article(tmp_path, settings):
+    from django.core.files.uploadedfile import SimpleUploadedFile
+    from review.models import ReadinessAssessment
+    settings.MEDIA_ROOT = str(tmp_path)
+    client, _ = admin_client()
+    record = stage_journal()
+    client.post(f'/api/admin/venue-discovery/{record.id}/add-to-venue-agent/')
+
+    author = Author.objects.create(email='a@example.com', name='A', email_verified=True)
+    author_client = Client()
+    token, _ = issue_author_session(author.id)
+    author_client.cookies[AUTHOR_COOKIE_NAME] = token
+    created = author_client.post('/api/author/manuscripts/', {
+        'title': 'Paper', 'author': 'A', 'email': 'a@example.com', 'manuscript_type': 'research_article',
+        'disclosure': 'None.', 'attestation': 'true',
+        'manuscript': SimpleUploadedFile('p.md', b'# Paper\n\n## Abstract\nText.\n', content_type='text/markdown'),
+    })
+    manuscript_id = created.json()['manuscript']['id']
+    ReadinessAssessment.objects.create(manuscript_id=manuscript_id, status='completed',
+                                       summary={'ready_for_matching': True, 'word_count': 500})
+    response = author_client.post(f'/api/author/manuscripts/{manuscript_id}/matches/run/')
+    assert response.status_code in (200, 201, 202), response.content
+    matches = author_client.get(f'/api/author/manuscripts/{manuscript_id}/matches/').json()['matches']
+    match = next(m for m in matches if m['venue']['name'] == 'Journal of Applied AI in Organizations')
+    assert match['eligibility'] == 'eligible'
+
+
+# ---------------------------------------------------------------------------
+# Permissions and API
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+def test_permissions():
+    record = stage_journal()
+    url = f'/api/admin/venue-discovery/{record.id}/add-to-venue-agent/'
+    assert Client().post(url).status_code == 401
+    assert Client().get('/api/admin/venue-discovery/').status_code == 401
+
+    author = Author.objects.create(email='a@example.com', name='A', email_verified=True)
+    author_client = Client()
+    token, _ = issue_author_session(author.id)
+    author_client.cookies[AUTHOR_COOKIE_NAME] = token
+    assert author_client.post(url).status_code == 401
+
+    owner_client, owner = admin_client('owner@example.com', superuser=False)
+    Membership.objects.create(user=owner, organization=Organization.objects.create(name='Org'), role='owner')
+    assert owner_client.post(url).status_code == 403
+    assert owner_client.get('/api/admin/venue-discovery/').status_code == 403
+    assert owner_client.post('/api/admin/venue-discovery/run/').status_code == 403
+    assert Venue.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_list_filters_counts_and_detail():
+    client, _ = admin_client()
+    record = stage_journal()
+    DiscoveredVenue.objects.create(name='Closed J', normalized_name='closed j', venue_type='journal',
+                                   acceptance_status='closed')
+    body = client.get('/api/admin/venue-discovery/?status=new&acceptance=accepting').json()
+    assert [i['name'] for i in body['items']] == ['Journal of Applied AI in Organizations']
+    assert body['counts']['new'] == 2 and body['settings']['search_configured'] is True
+    item = body['items'][0]
+    assert item['confidence_label'] == 'high' and item['primary_source_url'].startswith('https://')
+    detail = client.get(f'/api/admin/venue-discovery/{record.id}/').json()['item']
+    assert detail['aims_scope'] and detail['source_evidence']
+    assert 'test-key' not in json.dumps(body) and 'test-anthropic-key' not in json.dumps(body)
+    assert body['settings']['mode'] == 'claude_agent' and body['settings']['missing_key'] == 'ANTHROPIC_API_KEY'
+
+
+@pytest.mark.django_db
+def test_run_now_enqueues_the_scheduled_task_once(monkeypatch):
+    client, _ = admin_client()
+    queued = []
+    monkeypatch.setattr('django_q.tasks.async_task', lambda *args, **kw: queued.append(args))
+    first = client.post('/api/admin/venue-discovery/run/')
+    second = client.post('/api/admin/venue-discovery/run/')
+    assert first.status_code == 202 and second.json()['already_running'] is True
+    assert queued == [('review.tasks.run_venue_discovery_task', first.json()['run']['id'])]
+
+
+@pytest.mark.django_db
+def test_run_now_when_disabled_makes_no_network_call(monkeypatch):
+    monkeypatch.setenv('VENUE_DISCOVERY_ENABLED', 'false')
+    client, _ = admin_client()
+    response = client.post('/api/admin/venue-discovery/run/')
+    assert response.status_code == 409 and response.json()['code'] == 'discovery_disabled'
+    assert VenueDiscoveryRun.objects.count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Daily run
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+def test_run_processes_candidates_and_survives_one_failure():
+    query = vd.query_bank()[0][1]
+    provider = FakeProvider({query: [
+        vd.SearchResult(url='https://www.meridian-academic.example/jaaio'),
+        vd.SearchResult(url='https://broken.example/journal'),
+        vd.SearchResult(url='https://en.wikipedia.org/wiki/Some_journal'),
+        vd.SearchResult(url='http://127.0.0.1/evil'),
+    ]})
+    fetcher, config = make_fetcher(JOURNAL_PAGES)
+    run = VenueDiscoveryRun.objects.create()
+    vd.run_discovery(run, config=config, provider=provider, fetcher=fetcher, extractor=journal_extraction)
+    run.refresh_from_db()
+    assert run.status == 'completed'
+    assert run.candidates_created == 1
+    assert DiscoveredVenue.objects.count() == 1
+    stages = [e['url'] for e in run.errors]
+    assert 'https://broken.example/journal' in stages and 'http://127.0.0.1/evil' in stages
+    assert not any('wikipedia' in u for u in stages)  # third-party sources are skipped, not fetched
+
+
+@pytest.mark.django_db
+def test_run_without_api_key_fails_clearly(monkeypatch):
+    monkeypatch.setenv('VENUE_DISCOVERY_MODE', 'search_api')
+    monkeypatch.setenv('VENUE_SEARCH_API_KEY', '')
+    run = VenueDiscoveryRun.objects.create()
+    vd.run_discovery(run)
+    run.refresh_from_db()
+    assert run.status == 'failed' and 'VENUE_SEARCH_API_KEY' in run.summary
+
+
+@pytest.mark.django_db
+def test_disabled_run_makes_no_calls(monkeypatch):
+    monkeypatch.setenv('VENUE_DISCOVERY_ENABLED', 'false')
+    provider = FakeProvider()
+    run = VenueDiscoveryRun.objects.create()
+    vd.run_discovery(run, provider=provider)
+    run.refresh_from_db()
+    assert run.status == 'failed' and 'disabled' in run.summary and provider.calls == 0
+
+
+@pytest.mark.django_db
+def test_search_provider_errors_do_not_crash_the_run():
+    fetcher, config = make_fetcher({})
+    run = VenueDiscoveryRun.objects.create()
+    vd.run_discovery(run, config=config, provider=FakeProvider(fail=True), fetcher=fetcher)
+    run.refresh_from_db()
+    assert run.status == 'completed' and run.errors and run.errors[0]['stage'] == 'search'
+
+
+@pytest.mark.django_db
+def test_schedule_command_is_idempotent():
+    from django.core.management import call_command
+    from django_q.models import Schedule
+    call_command('ensure_venue_discovery_schedule')
+    call_command('ensure_venue_discovery_schedule', hour=3)
+    schedules = Schedule.objects.filter(func='review.tasks.run_venue_discovery_task')
+    assert schedules.count() == 1 and schedules.first().schedule_type == Schedule.DAILY
+
+
+# ---------------------------------------------------------------------------
+# Claude agent mode (Anthropic web_search + web_fetch; all responses faked)
+# ---------------------------------------------------------------------------
+
+GUIDE_URL = 'https://www.meridian-academic.example/jaaio/author-guidelines'
+GUIDE_TEXT = ('Instructions for authors. We publish original research articles and review articles. '
+              'Manuscripts should not exceed 8,000 words, including references. '
+              'Submit your manuscript through our online system at any time. '
+              'A conflict of interest statement is required.')
+
+
+def agent_answer(venues):
+    return json.dumps({'venues': venues})
+
+
+def fetch_block(url, text, title='Author guidelines'):
+    return {'type': 'web_fetch_tool_result', 'tool_use_id': 'srvtoolu_f1',
+            'content': {'type': 'web_fetch_result', 'url': url,
+                        'content': {'type': 'document', 'title': title,
+                                    'source': {'type': 'text', 'media_type': 'text/plain', 'data': text}},
+                        'retrieved_at': '2026-10-01T02:00:00Z'}}
+
+
+def agent_response(final_text, *, fetched=None, stop_reason='end_turn', searches=2):
+    content = [
+        {'type': 'text', 'text': 'Searching for journals.'},
+        {'type': 'server_tool_use', 'id': 'srvtoolu_s1', 'name': 'web_search', 'input': {'query': 'journal submit'}},
+        {'type': 'web_search_tool_result', 'tool_use_id': 'srvtoolu_s1',
+         'content': [{'type': 'web_search_result', 'url': GUIDE_URL, 'title': 'Guidelines', 'encrypted_content': 'x'}]},
+        {'type': 'server_tool_use', 'id': 'srvtoolu_f1', 'name': 'web_fetch', 'input': {'url': GUIDE_URL}},
+    ]
+    for url, text in (fetched or {}).items():
+        content.append(fetch_block(url, text))
+    if final_text:
+        content.append({'type': 'text', 'text': final_text})
+    return {'content': content, 'stop_reason': stop_reason,
+            'usage': {'input_tokens': 12000, 'output_tokens': 900,
+                      'server_tool_use': {'web_search_requests': searches, 'web_fetch_requests': len(fetched or {})}}}
+
+
+class FakeClaude:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def __call__(self, settings, messages):
+        self.calls.append({'settings': settings, 'messages': [dict(m) for m in messages]})
+        return self.responses.pop(0) if self.responses else agent_response(agent_answer([]))
+
+
+def journal_venue(**overrides):
+    venue = journal_extraction()
+    venue['submission_url'] = GUIDE_URL
+    venue.update(overrides)
+    return venue
+
+
+@pytest.mark.django_db
+def test_claude_agent_run_creates_verified_candidate(monkeypatch):
+    monkeypatch.setenv('VENUE_DISCOVERY_CATEGORIES', 'journal')
+    claude = FakeClaude([agent_response(agent_answer([journal_venue()]), fetched={GUIDE_URL: GUIDE_TEXT})])
+    run = VenueDiscoveryRun.objects.create()
+    vd.run_discovery(run, create_message=claude)
+    run.refresh_from_db()
+    assert run.status == 'completed', run.summary
+    assert run.candidates_created == 1 and run.queries_run == 2 and run.official_pages_checked == 1
+    record = DiscoveredVenue.objects.get()
+    assert record.acceptance_status == 'accepting' and record.confidence >= 70
+    assert record.structured_desk_rejection_rules[0]['value'] == 8000
+    assert all(e['url'] == GUIDE_URL for e in record.source_evidence)
+
+    # The agent got the web tools with limits and third-party domains blocked.
+    tools = {t['name']: t for t in vd_agent_tools()}
+    assert tools['web_search']['type'] == 'web_search_20250305' and tools['web_search']['max_uses'] >= 1
+    assert 'wikipedia.org' in tools['web_fetch']['blocked_domains']
+    assert claude.calls[0]['settings']['model'] == 'claude-test-model'
+
+    from review.models import AIUsageEvent
+    usage = AIUsageEvent.objects.get(operation='venue_discovery_agent')
+    assert usage.status == 'completed' and usage.input_tokens == 12000 and usage.output_tokens == 900
+
+
+def vd_agent_tools():
+    from review.services.venue_discovery_agent import agent_settings, tools_for
+    return tools_for(agent_settings())
+
+
+@pytest.mark.django_db
+def test_claude_agent_claims_without_fetched_pages_are_not_trusted(monkeypatch):
+    monkeypatch.setenv('VENUE_DISCOVERY_CATEGORIES', 'journal')
+    claude = FakeClaude([agent_response(agent_answer([journal_venue()]), fetched={})])  # nothing fetched
+    run = VenueDiscoveryRun.objects.create()
+    vd.run_discovery(run, create_message=claude)
+    record = DiscoveredVenue.objects.get()
+    assert record.acceptance_status == 'unclear'
+    assert record.source_evidence == [] and record.structured_desk_rejection_rules == []
+    assert record.confidence <= 25
+
+
+@pytest.mark.django_db
+def test_claude_agent_pause_turn_is_continued(monkeypatch):
+    monkeypatch.setenv('VENUE_DISCOVERY_CATEGORIES', 'journal')
+    first = agent_response('', fetched={GUIDE_URL: GUIDE_TEXT}, stop_reason='pause_turn')
+    second = {'content': [{'type': 'text', 'text': agent_answer([journal_venue()])}], 'stop_reason': 'end_turn',
+              'usage': {'input_tokens': 500, 'output_tokens': 300}}
+    claude = FakeClaude([first, second])
+    run = VenueDiscoveryRun.objects.create()
+    vd.run_discovery(run, create_message=claude)
+    assert len(claude.calls) == 2
+    assert claude.calls[1]['messages'][-1]['role'] == 'assistant'  # paused content sent back unchanged
+    assert DiscoveredVenue.objects.get().acceptance_status == 'accepting'
+
+
+@pytest.mark.django_db
+def test_claude_agent_bad_json_is_recorded_and_run_completes(monkeypatch):
+    monkeypatch.setenv('VENUE_DISCOVERY_CATEGORIES', 'journal,publisher')
+    claude = FakeClaude([agent_response('I could not find anything useful.'),
+                         agent_response(agent_answer([]))])
+    run = VenueDiscoveryRun.objects.create()
+    vd.run_discovery(run, create_message=claude)
+    run.refresh_from_db()
+    assert run.status == 'completed' and any(e['stage'] == 'agent' for e in run.errors)
+    assert len(claude.calls) == 2
+
+
+@pytest.mark.django_db
+def test_claude_agent_without_anthropic_key_fails_clearly(monkeypatch):
+    monkeypatch.setenv('ANTHROPIC_API_KEY', '')
+    claude = FakeClaude([])
+    run = VenueDiscoveryRun.objects.create()
+    vd.run_discovery(run, create_message=claude)
+    run.refresh_from_db()
+    assert run.status == 'failed' and 'ANTHROPIC_API_KEY' in run.summary and claude.calls == []
+
+
+@pytest.mark.django_db
+def test_claude_agent_stops_when_ai_budget_is_reached(monkeypatch):
+    from review.ai_usage import AIBudgetExceeded
+    def blocked(**kwargs):
+        raise AIBudgetExceeded('Daily AI cost ceiling would be exceeded.')
+    monkeypatch.setattr('review.ai_usage.reserve_ai_call', blocked)
+    claude = FakeClaude([])
+    run = VenueDiscoveryRun.objects.create()
+    vd.run_discovery(run, create_message=claude)
+    run.refresh_from_db()
+    assert run.status == 'completed' and claude.calls == []
+    assert run.errors[0]['stage'] == 'budget'
+
+
+@pytest.mark.django_db
+def test_claude_agent_recheck_flags_changes_and_missing_venues(monkeypatch):
+    from datetime import timedelta
+    from django.utils import timezone
+    monkeypatch.setenv('VENUE_DISCOVERY_CATEGORIES', 'journal')
+    claude = FakeClaude([agent_response(agent_answer([journal_venue()]), fetched={GUIDE_URL: GUIDE_TEXT})])
+    vd.run_discovery(VenueDiscoveryRun.objects.create(), create_message=claude)
+    monkeypatch.setenv('VENUE_DISCOVERY_CATEGORIES', 'none')  # second run: rechecks only
+    client, _ = admin_client()
+    record = DiscoveredVenue.objects.get()
+    client.post(f'/api/admin/venue-discovery/{record.id}/add-to-venue-agent/')
+    other = DiscoveredVenue.objects.create(name='Quiet Journal', normalized_name='quiet journal', venue_type='journal',
+                                           website_url='https://quiet.example/journal')
+    DiscoveredVenue.objects.update(last_checked_at=timezone.now() - timedelta(days=2))
+
+    changed_text = GUIDE_TEXT.replace('8,000', '7,500')
+    changed = journal_venue(structured_desk_rejection_rules=[
+        {'field': 'word_count', 'operator': '>', 'value': 7500, 'message': 'Over 7,500.'}])
+    changed['source_evidence'][1]['evidence_text'] = 'should not exceed 7,500 words'
+    claude2 = FakeClaude([agent_response(agent_answer([changed]), fetched={GUIDE_URL: changed_text})])
+    run = VenueDiscoveryRun.objects.create()
+    vd.run_discovery(run, create_message=claude2)
+
+    prompt = claude2.calls[0]['messages'][0]['content']
+    assert GUIDE_URL in prompt and 'https://quiet.example/journal' in prompt
+    record.refresh_from_db(); other.refresh_from_db()
+    assert record.discovery_status == 'changed'
+    assert VenueAgentConfig.objects.get().structured_desk_rejection_rules[0]['value'] == 8000  # live untouched
+    assert 'did not return this venue' in other.last_error

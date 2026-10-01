@@ -1,5 +1,5 @@
 from django.urls import path
-from . import views
+from . import views, discovery_api
 from . import author_api
 from . import editor_api
 from .api_summary import admin_submission_api_summary
@@ -74,6 +74,12 @@ urlpatterns = [
     path('admin/venue-submissions/<uuid:submission_id>/start-review/', editor_api.admin_start_venue_review),
     path('admin/venue-submissions/<uuid:submission_id>/decision/', editor_api.admin_venue_submission_decision),
     path('admin/venue-submissions/<uuid:submission_id>/download/', editor_api.admin_venue_submission_download),
+    path('admin/venue-discovery/', discovery_api.discovery_list),
+    path('admin/venue-discovery/run/', discovery_api.discovery_run_now),
+    path('admin/venue-discovery/<uuid:discovered_id>/', discovery_api.discovery_detail),
+    path('admin/venue-discovery/<uuid:discovered_id>/add-to-venue-agent/', discovery_api.discovery_add_to_venue_agent),
+    path('admin/venue-discovery/<uuid:discovered_id>/ignore/', discovery_api.discovery_ignore),
+    path('admin/venue-discovery/<uuid:discovered_id>/restore/', discovery_api.discovery_restore),
     path('admin/venue-submissions/<uuid:submission_id>/view/', editor_api.admin_venue_submission_view),
     path('admin/venue-submissions/<uuid:submission_id>/requirements/<str:requirement_key>/download/', editor_api.admin_submission_requirement_download),
 

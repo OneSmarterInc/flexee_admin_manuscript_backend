@@ -203,6 +203,52 @@ def _normalise_required_submission_items(value):
     return normalised
 
 
+def unique_venue_slug(name, requested=''):
+    """Slug for a new Venue, suffixed -2, -3, ... until it is unused."""
+    base_slug = slugify(str(requested or '').strip() or name)[:160] or 'venue'
+    candidate = base_slug
+    suffix = 2
+    while Venue.objects.filter(slug=candidate).exists():
+        candidate = f'{base_slug[:150]}-{suffix}'
+        suffix += 1
+    return candidate
+
+
+def build_venue_config_fields(data):
+    """Validate and normalise VenueAgentConfig fields from a request-like dict.
+
+    Shared by manual configuration and by venue discovery, so both apply the
+    same rules. Raises ValueError/TypeError with a user-facing message.
+    """
+    required_submission_items = _normalise_required_submission_items(data.get('required_submission_items', []))
+    structured_desk_rejection_rules = _normalise_structured_desk_rules(data.get('structured_desk_rejection_rules', []))
+    raw_retention_days = data.get('retention_days')
+    if raw_retention_days in (None, ''):
+        retention_days = None
+    else:
+        retention_days = int(raw_retention_days)
+        if retention_days < 1 or retention_days > 3650:
+            raise ValueError('retention_days must be between 1 and 3650 days, or blank to disable automatic expiry')
+    return {
+        'aims_scope': str(data.get('aims_scope', '') or '').strip(),
+        'article_types': _json_list(data.get('article_types')),
+        'accepted_methods': _json_list(data.get('accepted_methods')),
+        'quality_threshold': str(data.get('quality_threshold', '') or '').strip(),
+        'reviewer_criteria': _json_list(data.get('reviewer_criteria')),
+        'policies': data.get('policies') if isinstance(data.get('policies'), dict) else {},
+        'disclosures': _json_list(data.get('disclosures')),
+        'reporting_standards': _json_list(data.get('reporting_standards')),
+        'desk_rejection_rules': _json_list(data.get('desk_rejection_rules')),
+        'structured_desk_rejection_rules': structured_desk_rejection_rules,
+        'required_submission_items': required_submission_items,
+        'retention_days': retention_days,
+        'deadlines': data.get('deadlines') if isinstance(data.get('deadlines'), dict) else {},
+        'submission_capacity': data.get('submission_capacity') if isinstance(data.get('submission_capacity'), dict) else {},
+        'current_demand': data.get('current_demand') if isinstance(data.get('current_demand'), dict) else {},
+        'config_notes': str(data.get('config_notes', '') or '').strip(),
+    }
+
+
 def _normalise_structured_desk_rules(value):
     rules = _json_list(value)
     if len(rules) > 30:
@@ -2071,12 +2117,7 @@ def admin_venues(request):
     elif not request.editor_user.platform_superuser:
         return JsonResponse({'detail': 'organization_id is required'}, status=400)
 
-    base_slug = slugify(str(data.get('slug', '')).strip() or name)[:160] or 'venue'
-    candidate = base_slug
-    suffix = 2
-    while Venue.objects.filter(slug=candidate).exists():
-        candidate = f'{base_slug[:150]}-{suffix}'
-        suffix += 1
+    candidate = unique_venue_slug(name, data.get('slug', ''))
 
     venue = Venue.objects.create(
         organization=organization,
@@ -2119,19 +2160,7 @@ def admin_venue_config(request, venue_id):
 
     data = _json_body(request)
     try:
-        required_submission_items = _normalise_required_submission_items(
-            data.get('required_submission_items', [])
-        )
-        structured_desk_rejection_rules = _normalise_structured_desk_rules(
-            data.get('structured_desk_rejection_rules', [])
-        )
-        raw_retention_days = data.get('retention_days')
-        if raw_retention_days in (None, ''):
-            retention_days = None
-        else:
-            retention_days = int(raw_retention_days)
-            if retention_days < 1 or retention_days > 3650:
-                raise ValueError('retention_days must be between 1 and 3650 days, or blank to disable automatic expiry')
+        config_fields = build_venue_config_fields(data)
     except (TypeError, ValueError) as exc:
         return JsonResponse({'detail': str(exc)}, status=400)
 
@@ -2143,22 +2172,7 @@ def admin_venue_config(request, venue_id):
             venue=venue,
             version=next_version,
             active=True,
-            aims_scope=str(data.get('aims_scope', '')).strip(),
-            article_types=_json_list(data.get('article_types')),
-            accepted_methods=_json_list(data.get('accepted_methods')),
-            quality_threshold=str(data.get('quality_threshold', '')).strip(),
-            reviewer_criteria=_json_list(data.get('reviewer_criteria')),
-            policies=data.get('policies') if isinstance(data.get('policies'), dict) else {},
-            disclosures=_json_list(data.get('disclosures')),
-            reporting_standards=_json_list(data.get('reporting_standards')),
-            desk_rejection_rules=_json_list(data.get('desk_rejection_rules')),
-            structured_desk_rejection_rules=structured_desk_rejection_rules,
-            required_submission_items=required_submission_items,
-            retention_days=retention_days,
-            deadlines=data.get('deadlines') if isinstance(data.get('deadlines'), dict) else {},
-            submission_capacity=data.get('submission_capacity') if isinstance(data.get('submission_capacity'), dict) else {},
-            current_demand=data.get('current_demand') if isinstance(data.get('current_demand'), dict) else {},
-            config_notes=str(data.get('config_notes', '')).strip(),
+            **config_fields,
         )
         venue.agent_configs.filter(active=True).exclude(id=config.id).update(active=False)
         record_audit_event(

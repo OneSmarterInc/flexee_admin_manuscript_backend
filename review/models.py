@@ -1,4 +1,5 @@
 import uuid
+from django.utils import timezone
 from django.db import models
 
 class Author(models.Model):
@@ -598,3 +599,112 @@ class AIUsageEvent(models.Model):
             models.Index(fields=['operation', '-created_at'], name='review_ai_operation_time_idx'),
         ]
 
+
+
+class DiscoveredVenue(models.Model):
+    """A venue found by the daily discovery agent.
+
+    Staging only: authors never see these. The admin's one-click "Add to Venue
+    Agent" turns a candidate into a live Venue plus an active VenueAgentConfig.
+    """
+
+    VENUE_TYPE_CHOICES = [('journal', 'Journal'), ('conference', 'Conference'), ('publisher', 'Publisher')]
+    ACCEPTANCE_CHOICES = [('accepting', 'Accepting'), ('unclear', 'Unclear'), ('closed', 'Closed')]
+    DISCOVERY_STATUS_CHOICES = [
+        ('new', 'New'),
+        ('added', 'Added'),
+        ('ignored', 'Ignored'),
+        ('changed', 'Changed'),
+        ('error', 'Error'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    name = models.CharField(max_length=300)
+    normalized_name = models.CharField(max_length=300, db_index=True)
+    organization_name = models.CharField(max_length=300, blank=True)
+    normalized_organization_name = models.CharField(max_length=300, blank=True)
+    venue_type = models.CharField(max_length=20, choices=VENUE_TYPE_CHOICES, db_index=True)
+    description = models.TextField(blank=True)
+    website_url = models.URLField(max_length=1000, blank=True)
+    submission_url = models.URLField(max_length=1000, blank=True)
+    canonical_domain = models.CharField(max_length=255, blank=True, db_index=True)
+    canonical_submission_url = models.CharField(max_length=1000, blank=True, db_index=True)
+
+    acceptance_status = models.CharField(max_length=20, choices=ACCEPTANCE_CHOICES, default='unclear', db_index=True)
+    submission_types = models.JSONField(default=list, blank=True)
+
+    # Same shapes as VenueAgentConfig so "Add" can copy them across.
+    aims_scope = models.TextField(blank=True)
+    article_types = models.JSONField(default=list, blank=True)
+    accepted_methods = models.JSONField(default=list, blank=True)
+    quality_threshold = models.TextField(blank=True)
+    reviewer_criteria = models.JSONField(default=list, blank=True)
+    policies = models.JSONField(default=dict, blank=True)
+    disclosures = models.JSONField(default=list, blank=True)
+    reporting_standards = models.JSONField(default=list, blank=True)
+    desk_rejection_rules = models.JSONField(default=list, blank=True)
+    structured_desk_rejection_rules = models.JSONField(default=list, blank=True)
+    required_submission_items = models.JSONField(default=list, blank=True)
+    retention_days = models.PositiveIntegerField(null=True, blank=True)
+    deadlines = models.JSONField(default=dict, blank=True)
+    submission_capacity = models.JSONField(default=dict, blank=True)
+    current_demand = models.JSONField(default=dict, blank=True)
+    config_notes = models.TextField(blank=True)
+
+    source_evidence = models.JSONField(default=list, blank=True)
+    source_urls = models.JSONField(default=list, blank=True)
+    confidence = models.PositiveSmallIntegerField(default=0)
+    content_fingerprint = models.CharField(max_length=64, blank=True)
+
+    first_discovered_at = models.DateTimeField(default=timezone.now)
+    last_checked_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    discovery_status = models.CharField(max_length=20, choices=DISCOVERY_STATUS_CHOICES, default='new', db_index=True)
+    change_summary = models.TextField(blank=True)
+    last_error = models.TextField(blank=True)
+
+    added_at = models.DateTimeField(null=True, blank=True)
+    added_venue = models.ForeignKey(Venue, null=True, blank=True, on_delete=models.SET_NULL, related_name='discovery_records')
+    added_venue_config = models.ForeignKey(
+        VenueAgentConfig, null=True, blank=True, on_delete=models.SET_NULL, related_name='discovery_records'
+    )
+
+    class Meta:
+        ordering = ['-last_checked_at', 'name']
+        indexes = [
+            models.Index(fields=['discovery_status', 'acceptance_status'], name='disc_status_accept_idx'),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
+class VenueDiscoveryRun(models.Model):
+    STATUS_CHOICES = [
+        ('queued', 'Queued'),
+        ('processing', 'Processing'),
+        ('completed', 'Completed'),
+        ('failed', 'Failed'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='queued', db_index=True)
+    trigger = models.CharField(max_length=20, default='schedule')  # schedule | manual
+    requested_by = models.CharField(max_length=254, blank=True)
+    queries_run = models.PositiveIntegerField(default=0)
+    results_seen = models.PositiveIntegerField(default=0)
+    official_pages_checked = models.PositiveIntegerField(default=0)
+    candidates_created = models.PositiveIntegerField(default=0)
+    candidates_updated = models.PositiveIntegerField(default=0)
+    candidates_changed = models.PositiveIntegerField(default=0)
+    errors = models.JSONField(default=list, blank=True)
+    summary = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['-created_at']

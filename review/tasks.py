@@ -474,3 +474,24 @@ def sweep_retention_task():
         f'{purged_manuscripts} fully expired manuscript payload(s).'
     )
 
+
+
+@monitor_background_task('venue_discovery')
+def run_venue_discovery_task(run_id=None):
+    """Daily venue discovery (also used by "Run discovery now").
+
+    The schedule calls it without a run id; manual runs pass the run they created.
+    """
+    from .models import VenueDiscoveryRun
+    from .services.venue_discovery import run_discovery, start_run
+
+    if run_id:
+        run = VenueDiscoveryRun.objects.filter(id=run_id).first()
+        if run is None or run.status not in {'queued', 'processing'}:
+            return None
+    else:
+        run, created = start_run(trigger='schedule')
+        if not created:
+            return str(run.id)  # a run is already in progress
+    run_discovery(run)
+    return str(run.id)

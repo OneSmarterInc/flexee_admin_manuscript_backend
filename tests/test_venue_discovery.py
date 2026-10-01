@@ -253,7 +253,10 @@ def test_valid_extraction_is_normalised_and_verified():
     assert set(items) == {'Conflict of interest statement', 'Cover letter'}
     assert items['Conflict of interest statement']['required'] is True and items['Cover letter']['required'] is False
     # The fabricated quote was dropped; real quotes kept with timestamps.
-    assert len(record.source_evidence) == 2 and all('checked_at' in e for e in record.source_evidence)
+    assert all('checked_at' in e for e in record.source_evidence)
+    quotes = ' '.join(e['excerpt'] for e in record.source_evidence)
+    assert 'poetry' not in quotes  # the fabricated quote was dropped
+    assert any(e['field'] == 'acceptance_status' for e in record.source_evidence)
     assert record.confidence >= 80
     assert record.retention_days is None and record.current_demand == {}
 
@@ -981,10 +984,12 @@ def test_free_run_end_to_end_with_searxng_doaj_and_ollama(monkeypatch):
 
     press = DiscoveredVenue.objects.get(name='Northfield Press')
     assert press.acceptance_status == 'accepting' and press.submission_types == ['book']
-    # The journal came from DOAJ; the model failed, so directory data fills in and it stays unclear.
+    # The journal came from DOAJ and the model failed; directory data fills in the identity and the
+    # official page's own "Submit your manuscript" sentence proves it is accepting.
     journal = DiscoveredVenue.objects.get(name='Journal of Applied AI in Organizations')
-    assert journal.acceptance_status == 'unclear' and journal.organization_name == 'Meridian Academic Publishing'
-    assert journal.policies['listed_in_doaj'] is True and journal.confidence < 60
+    assert journal.acceptance_status == 'accepting' and journal.organization_name == 'Meridian Academic Publishing'
+    assert journal.policies['listed_in_doaj'] is True
+    assert {'research_article', 'review_article'} <= set(journal.submission_types)
 
 
 @pytest.mark.django_db
@@ -1067,3 +1072,103 @@ def test_list_marks_venues_checked_by_the_latest_run():
     items = {i['name']: i for i in client.get('/api/admin/venue-discovery/?status=new&acceptance=accepting').json()['items']}
     assert items['Fresh J']['checked_in_last_run'] is True
     assert items['Journal of Applied AI in Organizations']['checked_in_last_run'] is False
+
+
+
+# ---------------------------------------------------------------------------
+# Sources variety, OpenAlex, phrase signals, sorting
+# ---------------------------------------------------------------------------
+
+def test_registrable_domain_handles_academic_country_domains():
+    assert vd.registrable_domain('journal.unpad.ac.id') == 'unpad.ac.id'
+    assert vd.registrable_domain('ejournal.undip.ac.id') == 'undip.ac.id'
+    assert vd.registrable_domain('www.tandfonline.com') == 'tandfonline.com'
+    assert vd.registrable_domain('journals.example.co.uk') == 'example.co.uk'
+    assert vd.country_of('https://journal.unpad.ac.id/x') == 'ID'
+    assert vd.country_of('https://www.tandfonline.com/x') == ''
+    assert vd.country_of('https://www.tandfonline.com/x', 'gb') == 'GB'
+
+
+def test_openalex_provider_returns_homepages_with_hints(monkeypatch):
+    free_env(monkeypatch, provider='openalex')
+    payload = {'results': [
+        {'display_name': 'MIS Quarterly', 'host_organization_name': 'MIS Research Center',
+         'homepage_url': 'https://misq.umn.edu', 'country_code': 'US', 'is_oa': False},
+        {'display_name': 'No Homepage Journal', 'homepage_url': None},
+    ]}
+    fake = FakeHttp({'https://api.openalex.org/sources': httpx.Response(200, json=payload)})
+    monkeypatch.setattr(vd.httpx, 'get', fake)
+    provider = vd.get_search_providers(vd.DiscoveryConfig.from_env())[0]
+    assert provider.name == 'openalex'
+    assert provider.queries(vd.DiscoveryConfig.from_env()) == [('journal', 'information systems'), ('journal', 'management')]
+    [result] = provider.search('information systems', max_results=5)
+    assert result.url == 'https://misq.umn.edu'
+    assert result.hints['organization_name'] == 'MIS Research Center' and result.hints['country'] == 'US'
+    params = fake.calls[0]['params']
+    assert params['filter'] == 'type:journal' and params['sort'] == 'cited_by_count:desc' and params['page'] >= 1
+
+
+def test_varied_entries_limit_country_and_site_and_mix_sources(monkeypatch):
+    monkeypatch.setenv('VENUE_DISCOVERY_MAX_PER_COUNTRY', '2')
+    config = vd.DiscoveryConfig.from_env()
+    config.max_candidates_per_run = 6
+    doaj = [(f'https://journal{i}.univ{i}.ac.id/j', {'country': 'ID'}) for i in range(5)]
+    openalex = [('https://misq.umn.edu', {'country': 'US'}), ('https://www.tandfonline.com/a', {'country': 'GB'}),
+                ('https://www.tandfonline.com/b', {'country': 'GB'}), ('https://www.emerald.com/j', {'country': 'GB'})]
+    picked = [url for url, _ in vd.pick_varied_entries([doaj, openalex], config)]
+    assert sum('.ac.id' in u for u in picked) == 2                      # max 2 per country
+    assert sum('tandfonline.com' in u for u in picked) == 1             # max 1 per website
+    assert picked[0].endswith('ac.id/j') and picked[1] == 'https://misq.umn.edu'  # sources interleaved
+
+
+def test_page_rotation_changes_by_day(monkeypatch):
+    from datetime import date
+    pages = set()
+    for day in range(1, 6):
+        monkeypatch.setattr(vd.timezone, 'localdate', lambda d=day: date(2026, 10, d))
+        pages.add(vd.results_page_for_today(5))
+    assert pages == {1, 2, 3, 4, 5}
+
+
+OJS_HOME = """<html><head><title>Jurnal Sistem Informasi</title></head><body>
+<div class="pkp_block block_make_submission"><a href="/index.php/jsi/about/submissions">Make a Submission</a></div>
+<p>The journal publishes original research articles and case studies in information systems.</p></body></html>"""
+
+
+@pytest.mark.django_db
+def test_page_phrases_prove_accepting_when_the_model_fails():
+    fetcher, config = make_fetcher({'https://jsi.univ.ac.id/index.php/jsi': OJS_HOME})
+    def broken_model(*args):
+        raise vd.DiscoveryExtractionError('The AI did not return JSON.')
+    record, _ = vd.process_candidate('https://jsi.univ.ac.id/index.php/jsi', fetcher, config, extractor=broken_model,
+                                     hints={'name': 'Jurnal Sistem Informasi', 'website_url': 'https://jsi.univ.ac.id',
+                                            'organization_name': 'Universitas Example', 'venue_type': 'journal'})
+    assert record.acceptance_status == 'accepting'
+    assert set(record.submission_types) == {'research_article', 'case_study'}
+    status = [e for e in record.source_evidence if e['field'] == 'acceptance_status']
+    assert status and 'Make a Submission' in status[0]['excerpt']
+    assert record.confidence >= 50  # medium from one page; a fetched submissions page raises it
+
+
+@pytest.mark.django_db
+def test_page_phrases_detect_closed():
+    page = '<title>QLT</title><p>Submissions are temporarily closed while we clear our backlog.</p><p>Make a Submission</p>'
+    fetcher, config = make_fetcher({'https://press.example/qlt': page})
+    record, _ = vd.process_candidate('https://press.example/qlt', fetcher, config,
+                                     extractor=lambda *a: {'name': 'QLT', 'website_url': 'https://press.example/qlt'})
+    assert record.acceptance_status == 'closed'
+
+
+@pytest.mark.django_db
+def test_list_sorting_newest_first_by_default():
+    from datetime import timedelta
+    from django.utils import timezone
+    client, _ = admin_client()
+    now = timezone.now()
+    for name, conf, mins in [('Old high', 95, 300), ('New low', 30, 1), ('Middle', 60, 60)]:
+        DiscoveredVenue.objects.create(name=name, normalized_name=name.lower(), venue_type='journal',
+                                       acceptance_status='accepting', confidence=conf,
+                                       first_discovered_at=now - timedelta(minutes=mins))
+    names = lambda q: [i['name'] for i in client.get('/api/admin/venue-discovery/?status=new' + q).json()['items']]
+    assert names('') == ['New low', 'Middle', 'Old high']
+    assert names('&sort=confidence') == ['Old high', 'Middle', 'New low']

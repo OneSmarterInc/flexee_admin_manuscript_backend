@@ -39,7 +39,21 @@ Alternative (`VENUE_DISCOVERY_MODE=search_api`): fixed queries through a search 
 (`VENUE_SEARCH_PROVIDER=tavily`, `VENUE_SEARCH_API_KEY`) and this server's own safe fetcher,
 with the AI used only to extract rules.
 
-## 1b. Free setup: SearXNG + DOAJ + local Ollama (no API keys)
+## 1b. Free setup: OpenAlex + DOAJ (+ SearXNG) + local Ollama (no API keys)
+
+Recommended sources without Docker: `VENUE_SEARCH_PROVIDER=openalex,doaj`. OpenAlex is a free
+global catalogue of journals (most-cited first, every major publisher); DOAJ adds open-access
+journals. Each run takes candidates from the sources in turn, with at most
+`VENUE_DISCOVERY_MAX_PER_COUNTRY` venues per country and `VENUE_DISCOVERY_MAX_PER_SITE` per
+website, and directory sources rotate their results page daily.
+
+Status and accepted types are also read directly from the official pages using exact,
+standard phrases ("Make a Submission", "Submit your manuscript", "Call for papers",
+"submissions are closed", "original research article", "book proposal", ...). The matching
+sentence is stored as evidence, so venues can be confirmed even when a small local model
+returns little.
+
+### SearXNG + DOAJ + local Ollama
 
 This mode costs nothing per run. Venues are found with **DOAJ** (Directory of Open Access
 Journals, a free public API; journals only, and it links each journal's author instructions)

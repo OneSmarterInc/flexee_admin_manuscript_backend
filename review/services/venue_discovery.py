@@ -248,15 +248,7 @@ class DoajSearchProvider(VenueSearchProvider):
 
     def queries(self, config):
         """One query per subject area in VENUE_DISCOVERY_FOCUS."""
-        focus = os.getenv('VENUE_DISCOVERY_FOCUS', '') or (
-            'information systems, management, supply chain, artificial intelligence, education')
-        terms = [t.strip() for t in re.split(r',|\band\b|;', focus) if t.strip()]
-        out = []
-        for term in terms:
-            term = re.sub(r'^(and|or)\s+', '', term).strip()
-            if term and term not in out:
-                out.append(term)
-        return [('journal', term) for term in out[: config.max_queries_per_run]]
+        return [('journal', term) for term in focus_terms(config)]
 
     def search(self, query, *, max_results=10):
         from urllib.parse import quote
@@ -264,7 +256,8 @@ class DoajSearchProvider(VenueSearchProvider):
         try:
             response = httpx.get(
                 self.endpoint + search,
-                params={'page': 1, 'pageSize': max_results},
+                params={'page': results_page_for_today(os.getenv('VENUE_DISCOVERY_PAGE_ROTATION', '5')),
+                        'pageSize': max_results},
                 headers={'User-Agent': self.user_agent or 'FlexeeVenueDiscovery/1.0', 'Accept': 'application/json'},
                 timeout=self.timeout,
             )
@@ -286,6 +279,7 @@ class DoajSearchProvider(VenueSearchProvider):
                 'organization_name': str((bib.get('publisher') or {}).get('name') or '')[:300],
                 'website_url': homepage,
                 'venue_type': 'journal',
+                'country': str((bib.get('publisher') or {}).get('country') or '')[:2],
                 'subjects': [str(s.get('term')) for s in (bib.get('subject') or []) if isinstance(s, dict) and s.get('term')][:8],
                 'policies': {k: v for k, v in {
                     'listed_in_doaj': True,
@@ -298,7 +292,66 @@ class DoajSearchProvider(VenueSearchProvider):
         return results
 
 
-SEARCH_PROVIDERS = {'tavily': TavilySearchProvider, 'searxng': SearxngSearchProvider, 'doaj': DoajSearchProvider}
+def focus_terms(config):
+    focus = os.getenv('VENUE_DISCOVERY_FOCUS', '') or (
+        'information systems, management, supply chain, artificial intelligence, education')
+    out = []
+    for term in re.split(r',|;|\band\b', focus):
+        term = re.sub(r'^(and|or)\s+', '', term.strip()).strip()
+        if term and term not in out:
+            out.append(term)
+    return out[: config.max_queries_per_run]
+
+
+class OpenAlexSearchProvider(VenueSearchProvider):
+    """OpenAlex global catalogue of journals (free, no API key). Most-cited journals first."""
+    name = 'openalex'
+    endpoint = 'https://api.openalex.org/sources'
+
+    def __init__(self, *, timeout=15.0, user_agent='', contact_email=''):
+        self.timeout = timeout
+        self.user_agent = user_agent
+        self.contact_email = contact_email
+
+    def queries(self, config):
+        return [('journal', term) for term in focus_terms(config)]
+
+    def search(self, query, *, max_results=10):
+        params = {
+            'search': query,
+            'filter': 'type:journal',
+            'sort': 'cited_by_count:desc',
+            'per-page': max_results,
+            'page': results_page_for_today(os.getenv('VENUE_DISCOVERY_PAGE_ROTATION', '5')),
+        }
+        if self.contact_email:
+            params['mailto'] = self.contact_email  # OpenAlex "polite pool"
+        try:
+            response = httpx.get(self.endpoint, params=params, timeout=self.timeout,
+                                 headers={'User-Agent': self.user_agent or 'FlexeeVenueDiscovery/1.0'})
+        except httpx.HTTPError as exc:
+            raise DiscoveryFetchError('Could not reach the OpenAlex API.') from exc
+        if response.status_code >= 400:
+            raise DiscoveryFetchError(f'OpenAlex returned HTTP {response.status_code}.')
+        results = []
+        for item in (response.json().get('results') or [])[:max_results]:
+            homepage = str(item.get('homepage_url') or '').strip()
+            if not homepage:
+                continue
+            hints = {
+                'name': str(item.get('display_name') or '')[:300],
+                'organization_name': str(item.get('host_organization_name') or '')[:300],
+                'website_url': homepage,
+                'venue_type': 'journal',
+                'country': str(item.get('country_code') or '')[:2],
+                'policies': {k: v for k, v in {'open_access': 'yes' if item.get('is_oa') else ''}.items() if v},
+            }
+            results.append(SearchResult(url=homepage, title=hints['name'], hints=hints))
+        return results
+
+
+SEARCH_PROVIDERS = {'tavily': TavilySearchProvider, 'searxng': SearxngSearchProvider, 'doaj': DoajSearchProvider,
+                    'openalex': OpenAlexSearchProvider}
 
 
 def get_search_providers(config):
@@ -315,6 +368,9 @@ def get_search_providers(config):
                                                    user_agent=config.user_agent))
         elif name == 'doaj':
             providers.append(DoajSearchProvider(timeout=config.http_timeout, user_agent=config.user_agent))
+        elif name == 'openalex':
+            providers.append(OpenAlexSearchProvider(timeout=config.http_timeout, user_agent=config.user_agent,
+                                                    contact_email=os.getenv('VENUE_DISCOVERY_CONTACT_EMAIL', '').strip()))
         else:
             raise DiscoveryConfigError(
                 f'Unknown VENUE_SEARCH_PROVIDER {name!r}. Supported: {", ".join(sorted(SEARCH_PROVIDERS))}.')
@@ -349,11 +405,32 @@ def canonical_host(url):
     return host[4:] if host.startswith('www.') else host
 
 
+SECOND_LEVEL_LABELS = {'ac', 'co', 'com', 'edu', 'org', 'gov', 'net', 'or', 'go', 'sch', 'res', 'nic', 'mil', 'ne', 'gob', 'gouv'}
+
+
 def registrable_domain(host):
     parts = [p for p in host.lower().split('.') if p]
-    if len(parts) >= 3 and '.'.join(parts[-2:]) in MULTI_PART_SUFFIXES:
-        return '.'.join(parts[-3:])
+    if len(parts) >= 3 and ('.'.join(parts[-2:]) in MULTI_PART_SUFFIXES
+                            or (len(parts[-1]) == 2 and parts[-2] in SECOND_LEVEL_LABELS)):
+        return '.'.join(parts[-3:])  # e.g. journal.unpad.ac.id -> unpad.ac.id
     return '.'.join(parts[-2:]) if len(parts) >= 2 else host
+
+
+GENERIC_TLDS = {'com', 'org', 'net', 'edu', 'info', 'io', 'gov', 'int', 'eu', 'press', 'pub', 'science', 'global', 'online'}
+
+
+def country_of(url, hint=''):
+    """Best guess of a venue's country for variety limits: directory data first, else a country-code TLD."""
+    if hint:
+        return str(hint).strip().upper()[:2]
+    tld = canonical_host(url).rsplit('.', 1)[-1]
+    return tld.upper() if len(tld) == 2 and tld not in GENERIC_TLDS else ''
+
+
+def results_page_for_today(rotation):
+    """Directory results page to use today, so daily runs do not keep returning the same venues."""
+    rotation = max(1, int(rotation or 1))
+    return (timezone.localdate().toordinal() % rotation) + 1
 
 
 def is_third_party(url):
@@ -902,7 +979,7 @@ def _number_in_text(number, text):
 def verify_evidence(raw_evidence, pages):
     by_url = {canonical_url(p.url): p for p in pages}
     checked_at = timezone.now().isoformat()
-    verified = []
+    verified, seen = [], set()
     for item in raw_evidence if isinstance(raw_evidence, list) else []:
         if not isinstance(item, dict):
             continue
@@ -910,6 +987,10 @@ def verify_evidence(raw_evidence, pages):
         quote = str(item.get('evidence_text') or item.get('excerpt') or '')
         if not page or not _quote_found(quote, page.text):
             continue  # unverifiable evidence is dropped, never trusted
+        key = (canonical_url(page.url), _squash(quote)[:120])
+        if key in seen:
+            continue
+        seen.add(key)
         verified.append({
             'field': _clean_text(item.get('field'), 80) or 'general',
             'claim': _clean_text(item.get('claim'), 300),
@@ -1096,8 +1177,11 @@ STAGED_FIELDS = COMPARED_FIELDS + [
 ]
 
 
+EXTRACTION_VERSION = 'v2-signals'  # bump when reading logic changes so stored pages get re-read once
+
+
 def content_fingerprint(pages):
-    digest = hashlib.sha256()
+    digest = hashlib.sha256(EXTRACTION_VERSION.encode())
     for page in sorted(pages, key=lambda p: canonical_url(p.url)):
         digest.update(canonical_url(page.url).encode())
         digest.update(_squash(page.text).encode())
@@ -1220,6 +1304,85 @@ def gather_pages(entry_url, fetcher, config):
     return pages
 
 
+ACCEPTING_PATTERNS = [
+    r'make a (new )?submission', r'submit (your|a|an) (manuscript|paper|article|proposal|abstract)',
+    r'online submissions?', r'submissions? (are|is) (now )?open', r'call for (papers|submissions|proposals|chapters)',
+    r'we (welcome|invite|accept|are accepting) (new )?(submissions|manuscripts|proposals|papers|articles)',
+    r'(currently )?accepting (new )?(submissions|manuscripts|proposals|papers)',
+    r'submit (online|now|here)\b', r'submission (system|portal) is open',
+]
+CLOSED_PATTERNS = [
+    r'(not|no longer) (currently )?accepting (any )?(new )?(submissions|manuscripts|proposals|papers)',
+    r'submissions? (are|is) (currently |temporarily )?(closed|suspended|paused|on hold)',
+    r'(closed|suspended|paused) (for|to) (new )?submissions',
+]
+TYPE_PATTERNS = [
+    ('research_article', r'(original )?research (article|paper)s?|original research|empirical (study|studies|paper)'),
+    ('review_article', r'(systematic |literature )?review (article|paper)s?|systematic reviews?|literature reviews?'),
+    ('case_study', r'case (study|studies|report)'),
+    ('book', r'book proposals?|monographs?|textbook proposals?'),
+    ('conference_paper', r'conference papers?|full papers? submission'),
+]
+
+
+def _sentence_around(text, start, end):
+    left = max(text.rfind('.', 0, start), text.rfind('\n', 0, start)) + 1
+    right_candidates = [i for i in (text.find('.', end), text.find('\n', end)) if i != -1]
+    right = min(right_candidates) if right_candidates else len(text)
+    sentence = text[left:right].strip()
+    if len(sentence) > 220:  # long run-on text: keep a window around the match instead
+        sentence = text[max(0, start - 80): min(len(text), end + 80)].strip()
+    return sentence
+
+
+def detect_page_signals(pages):
+    """Exact phrases on official pages that prove status and accepted types (no model needed)."""
+    signals = {'closed': None, 'accepting': None, 'types': {}}
+    for page in pages:
+        text = page.text or ''
+        for pattern in CLOSED_PATTERNS:
+            match = re.search(pattern, text, re.I)
+            if match and not signals['closed']:
+                signals['closed'] = (page, _sentence_around(text, match.start(), match.end()))
+        for pattern in ACCEPTING_PATTERNS:
+            match = re.search(pattern, text, re.I)
+            if match and not signals['accepting']:
+                signals['accepting'] = (page, _sentence_around(text, match.start(), match.end()))
+        for type_key, pattern in TYPE_PATTERNS:
+            match = re.search(r'\b(' + pattern + r')\b', text, re.I)
+            if match and type_key not in signals['types']:
+                signals['types'][type_key] = (page, _sentence_around(text, match.start(), match.end()))
+    return signals
+
+
+def apply_page_signals(raw, pages):
+    """Add verified, phrase-based status/type evidence to the model's answer (or to an empty answer)."""
+    merged = dict(raw or {})
+    evidence = list(merged.get('source_evidence') or [])
+    signals = detect_page_signals(pages)
+    current = str(merged.get('acceptance_status') or '').lower()
+    if signals['closed']:
+        page, quote = signals['closed']
+        merged['acceptance_status'] = 'closed'
+        evidence.append({'field': 'acceptance_status', 'claim': 'The official page says submissions are closed.',
+                         'url': page.url, 'source_title': page.title, 'evidence_text': quote})
+    elif signals['accepting'] and current != 'closed':
+        page, quote = signals['accepting']
+        merged['acceptance_status'] = 'accepting'
+        evidence.append({'field': 'acceptance_status', 'claim': 'The official page offers a way to submit.',
+                         'url': page.url, 'source_title': page.title, 'evidence_text': quote})
+    types = list(merged.get('submission_types') or [])
+    for type_key, (page, quote) in signals['types'].items():
+        label = TYPE_LABELS[type_key]
+        if label not in types and type_key not in types:
+            types.append(label)
+            evidence.append({'field': 'accepted_types', 'claim': f'The official page mentions {label.lower()}s.',
+                             'url': page.url, 'source_title': page.title, 'evidence_text': quote})
+    merged['submission_types'] = types
+    merged['source_evidence'] = evidence
+    return merged
+
+
 def _apply_hints(raw, hints):
     """Fill fields the model left empty from structured directory data (never overrides the model)."""
     merged = dict(raw or {})
@@ -1256,7 +1419,9 @@ def process_candidate(entry_url, fetcher, config, *, extractor=None, hints=None)
         if not hints.get('name'):
             raise
         raw = {}  # the model failed, but the directory still tells us which journal this is
-    candidate = validate_extraction(_apply_hints(raw, hints) if hints else raw, pages)
+    merged = _apply_hints(raw, hints) if hints else raw
+    merged = apply_page_signals(merged, pages)
+    candidate = validate_extraction(merged, pages)
     return upsert_candidate(candidate, fingerprint)
 
 
@@ -1291,8 +1456,10 @@ def run_discovery(run, *, config=None, provider=None, fetcher=None, extractor=No
         providers = [provider] if provider is not None else get_search_providers(config)
         fetcher = fetcher or SafeFetcher(config)
 
-        entries, seen_keys = [], set()
+        per_provider, seen_keys = [], set()
         for search_provider in providers:
+            found = []
+            per_provider.append(found)
             queries = (search_provider.queries(config) if hasattr(search_provider, 'queries')
                        else query_bank()[: config.max_queries_per_run])
             for _category, query in queries:
@@ -1310,9 +1477,10 @@ def run_discovery(run, *, config=None, provider=None, fetcher=None, extractor=No
                     if key in seen_keys:
                         continue
                     seen_keys.add(key)
-                    entries.append((result.url, getattr(result, 'hints', {}) or {}))
+                    found.append((result.url, getattr(result, 'hints', {}) or {}))
 
-        for url, hints in entries[: config.max_candidates_per_run]:
+        entries = pick_varied_entries(per_provider, config)
+        for url, hints in entries:
             _process_and_count(run, url, fetcher, config, extractor, hints=hints)
 
         _recheck_existing(run, fetcher, config, extractor, skip=set(seen_keys))
@@ -1336,6 +1504,32 @@ def run_discovery(run, *, config=None, provider=None, fetcher=None, extractor=No
     run.completed_at = timezone.now()
     run.save()
     return run
+
+
+def pick_varied_entries(per_provider, config):
+    """Take candidates round-robin across sources, with per-country and per-site limits."""
+    max_per_country = _env_int('VENUE_DISCOVERY_MAX_PER_COUNTRY', 2, 1, 1000)
+    max_per_site = _env_int('VENUE_DISCOVERY_MAX_PER_SITE', 1, 1, 1000)
+    by_country, by_site, picked = {}, {}, []
+    queues = [list(items) for items in per_provider]
+    while queues and len(picked) < config.max_candidates_per_run:
+        for queue in list(queues):
+            if not queue:
+                queues.remove(queue)
+                continue
+            url, hints = queue.pop(0)
+            country = country_of(url, hints.get('country', ''))
+            site = registrable_domain(canonical_host(url))
+            if country and by_country.get(country, 0) >= max_per_country:
+                continue
+            if by_site.get(site, 0) >= max_per_site:
+                continue
+            by_country[country] = by_country.get(country, 0) + 1
+            by_site[site] = by_site.get(site, 0) + 1
+            picked.append((url, hints))
+            if len(picked) >= config.max_candidates_per_run:
+                break
+    return picked
 
 
 def _process_and_count(run, url, fetcher, config, extractor, hints=None):

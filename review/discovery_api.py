@@ -145,7 +145,12 @@ def discovery_list(request):
     items = filtered
     if status in {'new', 'added', 'ignored', 'changed', 'error'}:
         items = items.filter(discovery_status=status)
-    items = items.order_by('-confidence', '-last_checked_at')[:LIST_LIMIT]
+    sort = request.GET.get('sort', 'newest')
+    ordering = {
+        'confidence': ('-confidence', '-first_discovered_at'),
+        'verified': ('-last_checked_at', '-confidence'),
+    }.get(sort, ('-first_discovered_at', '-confidence'))  # default: newest found first
+    items = items.order_by(*ordering)[:LIST_LIMIT]
 
     keys = ('new', 'added', 'changed', 'ignored', 'error')
     counts = dict(filtered.values_list('discovery_status').annotate(n=Count('id')))

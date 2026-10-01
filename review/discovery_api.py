@@ -33,7 +33,7 @@ def _primary_source(item):
     return item.submission_url or item.website_url or ''
 
 
-def discovered_payload(item, *, detail=False):
+def discovered_payload(item, *, detail=False, last_run_started=None):
     payload = {
         'id': str(item.id),
         'name': item.name,
@@ -56,6 +56,7 @@ def discovered_payload(item, *, detail=False):
         'added_venue_config_id': item.added_venue_config_id,
         'change_summary': item.change_summary,
         'last_error': item.last_error,
+        'checked_in_last_run': bool(last_run_started and item.last_checked_at and item.last_checked_at >= last_run_started),
     }
     if detail:
         payload.update({
@@ -128,26 +129,37 @@ def run_payload(run):
 @require_platform_superuser
 def discovery_list(request):
     status = request.GET.get('status', 'new')
-    items = DiscoveredVenue.objects.all()
+    acceptance = request.GET.get('acceptance', '')
+    venue_type = request.GET.get('type', '')
+    query = request.GET.get('q', '').strip()
+
+    # Type and search filters apply to the tab counts too, so a count always
+    # matches what the table can show; the status filter is reported separately.
+    base = DiscoveredVenue.objects.all()
+    if venue_type in {'journal', 'publisher', 'conference'}:
+        base = base.filter(venue_type=venue_type)
+    if query:
+        base = base.filter(Q(name__icontains=query) | Q(organization_name__icontains=query) | Q(aims_scope__icontains=query))
+    filtered = base.filter(acceptance_status=acceptance) if acceptance in {'accepting', 'unclear', 'closed'} else base
+
+    items = filtered
     if status in {'new', 'added', 'ignored', 'changed', 'error'}:
         items = items.filter(discovery_status=status)
-    acceptance = request.GET.get('acceptance', '')
-    if acceptance in {'accepting', 'unclear', 'closed'}:
-        items = items.filter(acceptance_status=acceptance)
-    venue_type = request.GET.get('type', '')
-    if venue_type in {'journal', 'publisher', 'conference'}:
-        items = items.filter(venue_type=venue_type)
-    query = request.GET.get('q', '').strip()
-    if query:
-        items = items.filter(Q(name__icontains=query) | Q(organization_name__icontains=query) | Q(aims_scope__icontains=query))
     items = items.order_by('-confidence', '-last_checked_at')[:LIST_LIMIT]
 
-    counts = dict(DiscoveredVenue.objects.values_list('discovery_status').annotate(n=Count('id')))
+    keys = ('new', 'added', 'changed', 'ignored', 'error')
+    counts = dict(filtered.values_list('discovery_status').annotate(n=Count('id')))
+    counts_all = dict(base.values_list('discovery_status').annotate(n=Count('id')))
+    hidden_by_status = (counts_all.get(status, 0) - counts.get(status, 0)) if filtered is not base else 0
+    last_run = VenueDiscoveryRun.objects.order_by('-created_at').first()
+    last_run_started = last_run.started_at if last_run and last_run.status == 'completed' else None
     config = DiscoveryConfig.from_env()
     return JsonResponse({
-        'items': [discovered_payload(item) for item in items],
-        'counts': {key: counts.get(key, 0) for key in ('new', 'added', 'changed', 'ignored', 'error')},
-        'last_run': run_payload(VenueDiscoveryRun.objects.order_by('-created_at').first()),
+        'items': [discovered_payload(item, last_run_started=last_run_started) for item in items],
+        'counts': {key: counts.get(key, 0) for key in keys},
+        'counts_all_statuses': {key: counts_all.get(key, 0) for key in keys},
+        'hidden_by_status_filter': max(0, hidden_by_status),
+        'last_run': run_payload(last_run),
         'settings': discovery_settings_payload(config),
     })
 

@@ -1130,6 +1130,23 @@ def _describe_changes(old, new):
     return changed, 'Official sources changed: ' + ', '.join(labels[:6]) + ('…' if len(labels) > 6 else '') + '.'
 
 
+INCONCLUSIVE_NOTE = 'Latest check was inconclusive; showing the previous verified result.'
+
+
+def _is_weaker_reading(record, candidate):
+    """True when a new reading is less trustworthy than what is stored.
+
+    Small local models read the same page differently from run to run. A weaker
+    reading must not overwrite a better one, except when the official pages now
+    prove the venue is closed (that status already requires verified evidence).
+    """
+    if candidate['acceptance_status'] == 'closed' and record.acceptance_status != 'closed':
+        return False
+    if (record.acceptance_status in {'accepting', 'closed'} and candidate['acceptance_status'] == 'unclear'):
+        return True
+    return candidate['confidence'] < record.confidence
+
+
 def upsert_candidate(candidate, fingerprint):
     """Create or update one DiscoveredVenue. Returns (record, outcome)."""
     now = timezone.now()
@@ -1151,6 +1168,13 @@ def upsert_candidate(candidate, fingerprint):
             return record, 'created'
 
         record = DiscoveredVenue.objects.select_for_update().get(id=existing.id)
+        if _is_weaker_reading(record, candidate):
+            # Keep the better verified result; just note that it was looked at again.
+            record.last_checked_at = now
+            record.content_fingerprint = fingerprint
+            record.last_error = INCONCLUSIVE_NOTE
+            record.save(update_fields=['last_checked_at', 'content_fingerprint', 'last_error', 'updated_at'])
+            return record, 'updated'
         diff = _describe_changes(record, candidate)
         for f in STAGED_FIELDS:
             setattr(record, f, candidate[f])

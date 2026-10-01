@@ -552,7 +552,11 @@ def test_list_filters_counts_and_detail():
                                    acceptance_status='closed')
     body = client.get('/api/admin/venue-discovery/?status=new&acceptance=accepting').json()
     assert [i['name'] for i in body['items']] == ['Journal of Applied AI in Organizations']
-    assert body['counts']['new'] == 2 and body['settings']['search_configured'] is True
+    # Tab counts follow the status filter; the hidden ones are reported separately.
+    assert body['counts']['new'] == 1 and body['counts_all_statuses']['new'] == 2
+    assert body['hidden_by_status_filter'] == 1
+    assert client.get('/api/admin/venue-discovery/?status=new').json()['hidden_by_status_filter'] == 0
+    assert body['settings']['search_configured'] is True
     item = body['items'][0]
     assert item['confidence_label'] == 'high' and item['primary_source_url'].startswith('https://')
     detail = client.get(f'/api/admin/venue-discovery/{record.id}/').json()['item']
@@ -1008,3 +1012,58 @@ def test_ollama_down_does_not_create_thin_records(monkeypatch):
     run.refresh_from_db()
     assert DiscoveredVenue.objects.count() == 0
     assert any('Could not reach Ollama' in e['message'] for e in run.errors)
+
+
+
+# ---------------------------------------------------------------------------
+# Stability: a weaker re-reading never replaces a better verified result
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+def test_weaker_reading_keeps_the_previous_verified_result():
+    record = stage_journal()
+    before = (record.acceptance_status, record.confidence, record.aims_scope)
+    weak = journal_extraction()
+    weak['source_evidence'] = []          # the model missed the quotes this time
+    weak['aims_scope'] = 'something else'
+    fetcher, config = make_fetcher({**JOURNAL_PAGES,
+                                    'https://www.meridian-academic.example/jaaio': JOURNAL_HOME + '<p>new footer</p>'})
+    updated, outcome = vd.process_candidate('https://www.meridian-academic.example/jaaio', fetcher, config,
+                                            extractor=lambda *a: weak)
+    updated.refresh_from_db()
+    assert outcome == 'updated'
+    assert (updated.acceptance_status, updated.confidence, updated.aims_scope) == before
+    assert updated.last_error == vd.INCONCLUSIVE_NOTE
+    assert updated.last_checked_at > record.last_checked_at
+
+
+@pytest.mark.django_db
+def test_verified_closed_status_still_replaces_accepting():
+    record = stage_journal()
+    closed_guide = '<title>Author guidelines</title><p>We are not accepting new submissions at this time.</p>'
+    raw = journal_extraction()
+    raw['acceptance_status'] = 'closed'
+    raw['source_evidence'] = [{'field': 'acceptance_status', 'claim': 'Submissions suspended.',
+                               'url': 'https://www.meridian-academic.example/jaaio/author-guidelines',
+                               'evidence_text': 'We are not accepting new submissions at this time.'}]
+    fetcher, config = make_fetcher({**JOURNAL_PAGES,
+                                    'https://www.meridian-academic.example/jaaio/author-guidelines': closed_guide})
+    updated, _ = vd.process_candidate('https://www.meridian-academic.example/jaaio', fetcher, config,
+                                      extractor=lambda *a: raw)
+    assert updated.acceptance_status == 'closed' and updated.last_error == ''
+
+
+@pytest.mark.django_db
+def test_list_marks_venues_checked_by_the_latest_run():
+    from datetime import timedelta
+    from django.utils import timezone
+    client, _ = admin_client()
+    old = stage_journal()
+    DiscoveredVenue.objects.filter(id=old.id).update(last_checked_at=timezone.now() - timedelta(hours=2))
+    fresh = DiscoveredVenue.objects.create(name='Fresh J', normalized_name='fresh j', venue_type='journal',
+                                           acceptance_status='accepting')
+    VenueDiscoveryRun.objects.create(status='completed', started_at=timezone.now() - timedelta(minutes=5),
+                                     completed_at=timezone.now())
+    items = {i['name']: i for i in client.get('/api/admin/venue-discovery/?status=new&acceptance=accepting').json()['items']}
+    assert items['Fresh J']['checked_in_last_run'] is True
+    assert items['Journal of Applied AI in Organizations']['checked_in_last_run'] is False

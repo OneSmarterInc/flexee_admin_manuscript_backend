@@ -1012,6 +1012,76 @@ def author_logout(request):
     return response
 
 
+_DUMMY_PASSWORD_HASH = None
+
+
+def _dummy_password_hash():
+    # Used so a wrong email costs the same time as a wrong password.
+    global _DUMMY_PASSWORD_HASH
+    if _DUMMY_PASSWORD_HASH is None:
+        from .auth import hash_password
+        _DUMMY_PASSWORD_HASH = hash_password('flexee-timing-equaliser')
+    return _DUMMY_PASSWORD_HASH
+
+
+@require_POST
+def author_change_password_direct(request):
+    """Change a password from the sign-in page: email + current + new + confirm.
+
+    No session is needed because the current password proves ownership. Failures
+    share the sign-in lockout per network and have their own per-email limit, and
+    the reply never says whether the email or the password was wrong.
+    """
+    from .auth import hash_password, validate_password_change, verify_password
+    data = _json_body(request)
+    email = str(data.get('email', '')).strip().lower()
+    current = str(data.get('current_password', ''))
+    new = str(data.get('new_password', ''))
+    confirm = str(data.get('confirm_password', ''))
+    if not email:
+        return JsonResponse({'detail': 'Enter the email address you use to sign in.', 'field': 'email'}, status=400)
+
+    rh = remote_hash(request)
+    window_start = timezone.now() - timedelta(minutes=int(os.getenv('AUTHOR_LOGIN_WINDOW_MINUTES', '15')))
+    network_failures = AuthorAuthEvent.objects.filter(remote_hash=rh, success=False, occurred_at__gte=window_start).count()
+    email_failures = AuthorAuthEvent.objects.filter(
+        success=False, detail__action='direct_password_change', detail__email=email, occurred_at__gte=window_start,
+    ).count()
+    if network_failures >= int(os.getenv('AUTHOR_LOGIN_MAX_FAILURES', '10')) or email_failures >= 5:
+        AuthorAuthEvent.objects.create(remote_hash=rh, success=False,
+                                       detail={'action': 'direct_password_change', 'email': email, 'reason': 'rate_limited'})
+        return JsonResponse({'detail': 'Too many attempts. Try again in a few minutes.'}, status=429)
+
+    error = validate_password_change(current, new, confirm, min_length=AUTHOR_PASSWORD_MIN_LENGTH)
+    if error:
+        return JsonResponse({'detail': error, 'field': 'new_password'}, status=400)
+
+    author = Author.objects.filter(email=email).first()
+    password_ok = verify_password(current, author.password_hash if author else _dummy_password_hash())
+    if not author or not password_ok:
+        AuthorAuthEvent.objects.create(remote_hash=rh, success=False,
+                                       detail={'action': 'direct_password_change', 'email': email, 'reason': 'invalid_credentials'})
+        if author:
+            AuditEvent.objects.create(
+                actor_email=author.email, actor_role='author', action='author.password_change_failed',
+                resource_type='author_account', resource_id=str(author.id), remote_hash=rh,
+                detail={'reason': 'wrong_current_password', 'method': 'sign_in_page'},
+            )
+        return JsonResponse({'detail': 'The email or current password is incorrect.', 'field': 'current_password'}, status=400)
+
+    author.password_hash = hash_password(new)
+    author.password_changed_at = timezone.now()
+    author.save(update_fields=['password_hash', 'password_changed_at', 'updated_at'])
+    AuthorAuthEvent.objects.create(remote_hash=rh, success=True,
+                                   detail={'action': 'direct_password_change', 'email': email, 'reason': 'ok'})
+    AuditEvent.objects.create(
+        actor_email=author.email, actor_role='author', action='author.password_changed',
+        resource_type='author_account', resource_id=str(author.id), remote_hash=rh,
+        detail={'method': 'sign_in_page'},
+    )
+    return JsonResponse({'ok': True, 'detail': 'Your password has been changed. Sign in with your new password.'})
+
+
 PASSWORD_RESET_SALT = 'flexee.author.password-reset'
 PASSWORD_RESET_MAX_AGE_SECONDS = 30 * 60
 PASSWORD_RESET_GENERIC_REPLY = (

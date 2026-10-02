@@ -580,7 +580,11 @@ def _readiness_payload(item):
 
 
 def _match_payload(item):
+    from .match_score import compute_match_score
+    violations = sum(1 for entry in (item.evidence or []) if isinstance(entry, dict) and entry.get('rule'))
     return {
+        'match_score': compute_match_score(item.manuscript, item.venue_config,
+                                           eligibility=item.eligibility, violations=violations),
         'id': str(item.id),
         'manuscript_id': str(item.manuscript_id),
         'venue': _venue_payload(item.venue, include_config=False),

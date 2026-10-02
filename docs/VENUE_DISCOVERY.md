@@ -140,7 +140,20 @@ reachable, nothing is staged and the run lists the error. Switch to `qwen2.5:7b-
 * For thinking models such as `qwen3:1.7b`, discovery turns thinking off
   (`VENUE_DISCOVERY_OLLAMA_THINK=false`), which is much faster.
 
-## 2. Schedule it (once per environment, idempotent)
+## 2. Schedule it
+
+Set the daily time on the Venue Discovery page (**Daily schedule** card: on/off, time, time
+zone), or from a shell (idempotent):
+
+```
+python manage.py ensure_venue_discovery_schedule --hour 2 --minute 0 --timezone Asia/Kolkata
+python manage.py ensure_venue_discovery_schedule --remove
+```
+
+Both keep exactly one Django-Q schedule. The default time zone is `VENUE_DISCOVERY_TIMEZONE`,
+else the server's `TIME_ZONE`.
+
+Older notes (still valid):
 
 ```
 python manage.py migrate

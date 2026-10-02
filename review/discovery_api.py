@@ -10,7 +10,7 @@ from django.db import transaction
 from django.db.models import Count, Q
 from django.http import JsonResponse
 from django.utils import timezone
-from django.views.decorators.http import require_GET, require_POST
+from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from .audit import record_audit_event
 from .auth import require_platform_superuser
@@ -187,6 +187,30 @@ def discovery_list(request):
         'last_run': run_payload(last_run),
         'settings': discovery_settings_payload(config),
     })
+
+
+@require_http_methods(['GET', 'POST'])
+@require_platform_superuser
+def discovery_schedule(request):
+    """GET the daily schedule; POST {enabled, time: 'HH:MM', timezone} to change it."""
+    from .discovery_schedule import get_schedule, parse_time, set_schedule, validate_timezone
+    if request.method == 'GET':
+        return JsonResponse({'schedule': get_schedule()})
+    try:
+        data = json.loads(request.body or b'{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'detail': 'Invalid JSON'}, status=400)
+    enabled = bool(data.get('enabled'))
+    try:
+        hour, minute = parse_time(data.get('time', '02:00'))
+        tz_name = validate_timezone(str(data.get('timezone') or '').strip() or None) if data.get('timezone') else None
+    except ValueError as exc:
+        return JsonResponse({'detail': str(exc)}, status=400)
+    schedule = set_schedule(enabled=enabled, hour=hour, minute=minute, tz_name=tz_name)
+    record_audit_event(request, 'venue_discovery.schedule_updated', resource_type='venue_discovery_schedule',
+                       resource_id='daily', detail={'enabled': enabled, 'time': schedule['time'],
+                                                    'timezone': schedule['timezone']})
+    return JsonResponse({'schedule': schedule})
 
 
 @require_POST

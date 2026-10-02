@@ -477,7 +477,7 @@ def sweep_retention_task():
 
 
 @monitor_background_task('venue_discovery')
-def run_venue_discovery_task(run_id=None):
+def run_venue_discovery_task(run_id=None, schedule_tz=None):
     """Daily venue discovery (also used by "Run discovery now").
 
     The schedule calls it without a run id; manual runs pass the run they created.

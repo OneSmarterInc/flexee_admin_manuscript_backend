@@ -81,7 +81,7 @@ class DiscoveryConfig:
             max_results_per_query=_env_int('VENUE_DISCOVERY_MAX_RESULTS_PER_QUERY', 10, 1, 20),
             max_candidates_per_run=_env_int('VENUE_DISCOVERY_MAX_CANDIDATES_PER_RUN', 40, 1, 500),
             max_pages_per_run=_env_int('VENUE_DISCOVERY_MAX_PAGES_PER_RUN', 100, 1, 2000),
-            max_pages_per_candidate=_env_int('VENUE_DISCOVERY_MAX_PAGES_PER_CANDIDATE', 3, 1, 10),
+            max_pages_per_candidate=_env_int('VENUE_DISCOVERY_MAX_PAGES_PER_CANDIDATE', 5, 1, 12),
             max_rechecks_per_run=_env_int('VENUE_DISCOVERY_MAX_RECHECKS_PER_RUN', 25, 0, 500),
             recheck_after_hours=_env_int('VENUE_DISCOVERY_RECHECK_AFTER_HOURS', 20, 1, 24 * 60),
             http_timeout=float(_env_int('VENUE_DISCOVERY_HTTP_TIMEOUT_SECONDS', 15, 1, 120)),
@@ -526,6 +526,20 @@ class FetchedPage:
     links: list = field(default_factory=list)
 
 
+TEMPORARY_FAILURE_PATTERNS = (r'Could not resolve', r'HTTP (429|500|502|503|504|520|521|522|523|524)\b',
+                              r'Timed out', r'Could not fetch')
+BLOCKED_FAILURE_PATTERNS = (r'HTTP (401|403|429)\b', r'robots\.txt does not allow', r'HTTP 52\d\b')
+
+
+def is_temporary_failure(exc):
+    return any(re.search(pattern, str(exc)) for pattern in TEMPORARY_FAILURE_PATTERNS)
+
+
+def is_blocked_failure(exc):
+    """The publisher's site refuses automated reading (as opposed to the site not existing)."""
+    return any(re.search(pattern, str(exc)) for pattern in BLOCKED_FAILURE_PATTERNS)
+
+
 class SafeFetcher:
     """Fetches public pages with redirect re-validation, size/time limits and robots.txt."""
 
@@ -598,6 +612,17 @@ class SafeFetcher:
         raise DiscoveryFetchError('Too many redirects.')
 
     def fetch(self, url):
+        try:
+            return self._fetch_once(url)
+        except DiscoveryFetchError as exc:
+            if not is_temporary_failure(exc):
+                raise
+            delay = float(os.getenv('VENUE_DISCOVERY_RETRY_DELAY_SECONDS', '3') or 0)
+            if delay > 0:
+                time.sleep(delay)
+            return self._fetch_once(url)  # one retry; a second failure is reported as usual
+
+    def _fetch_once(self, url):
         if self.pages_fetched >= self.config.max_pages_per_run:
             raise DiscoveryFetchError('Page budget for this run is used up.')
         validate_public_url(url)
@@ -683,6 +708,27 @@ SUBMISSION_KEYWORDS = (
 def looks_like_submission_page(url, title='', text=''):
     haystack = f'{url} {title} {text[:400]}'.lower()
     return any(keyword in haystack for keyword in SUBMISSION_KEYWORDS)
+
+
+CFP_KEYWORDS = ('special issue', 'call for paper', 'calls for paper', 'call-for-paper', 'callforpaper', 'cfp',
+                'call for submission', 'call for proposal', 'call for chapter')
+
+
+def find_cfp_links(page, limit):
+    """Same-site links to special issues / calls for papers."""
+    site = registrable_domain(canonical_host(page.url))
+    seen, picked = {canonical_url(page.url)}, []
+    for href, text in page.links:
+        if urlsplit(href).scheme not in {'http', 'https'} or registrable_domain(canonical_host(href)) != site:
+            continue
+        haystack = f'{href} {text}'.lower()
+        key = canonical_url(href)
+        if key and key not in seen and any(k in haystack for k in CFP_KEYWORDS):
+            seen.add(key)
+            picked.append(href)
+        if len(picked) >= limit:
+            break
+    return picked
 
 
 def find_submission_links(page, limit):
@@ -1185,7 +1231,7 @@ STAGED_FIELDS = COMPARED_FIELDS + [
 ]
 
 
-EXTRACTION_VERSION = 'v2-signals'  # bump when reading logic changes so stored pages get re-read once
+EXTRACTION_VERSION = 'v3-calls'  # bump when reading logic changes so stored pages get re-read once
 
 
 def content_fingerprint(pages):
@@ -1301,15 +1347,134 @@ def upsert_candidate(candidate, fingerprint):
 # ---------------------------------------------------------------------------
 
 def gather_pages(entry_url, fetcher, config):
-    """Fetch the entry page and up to N same-site author/submission pages."""
+    """Fetch the entry page, same-site author/submission pages, and call-for-papers pages."""
     first = fetcher.fetch(entry_url)
     pages = [first]
-    for link in find_submission_links(first, config.max_pages_per_candidate - 1):
+    cfp_budget = min(_env_int('VENUE_DISCOVERY_MAX_CFP_PAGES', 2, 0, 5), max(0, config.max_pages_per_candidate - 2))
+    cfp_links = find_cfp_links(first, cfp_budget) if cfp_budget else []
+    submission_budget = config.max_pages_per_candidate - 1 - len(cfp_links)
+    fetched = {canonical_url(first.url)}
+    for link in find_submission_links(first, submission_budget + len(cfp_links)):
+        if len(pages) - 1 >= submission_budget or canonical_url(link) in {canonical_url(c) for c in cfp_links}:
+            continue
+        try:
+            page = fetcher.fetch(link)
+        except DiscoveryFetchError:
+            continue
+        fetched.add(canonical_url(page.url))
+        pages.append(page)
+    for link in cfp_links:
+        if canonical_url(link) in fetched:
+            continue
         try:
             pages.append(fetcher.fetch(link))
         except DiscoveryFetchError:
             continue
     return pages
+
+
+# ---------------------------------------------------------------------------
+# Calls for papers / special issues with deadlines
+# ---------------------------------------------------------------------------
+
+MONTHS = {m: i for i, m in enumerate(
+    ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october',
+     'november', 'december'], start=1)}
+MONTHS.update({name[:3]: num for name, num in list(MONTHS.items())})
+MONTHS['sept'] = 9
+_MONTH_RE = r'(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?'
+DATE_PATTERNS = [
+    re.compile(r'\b(\d{1,2})(?:st|nd|rd|th)?\s+' + _MONTH_RE + r',?\s+(20\d\d)\b', re.I),   # 15 February 2027
+    re.compile(r'\b' + _MONTH_RE + r'\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(20\d\d)\b', re.I),   # February 15, 2027
+    re.compile(r'\b(20\d\d)-(\d{2})-(\d{2})\b'),                                              # 2027-02-15
+]
+CFP_LINE = re.compile(r'special issue|call for (papers|submissions|proposals|chapters)|\bcfp\b', re.I)
+DEADLINE_WORDS = re.compile(r'deadline|due|submi|closes|close on|until|last date|extended', re.I)
+
+
+def _month(token):
+    token = token.lower().rstrip('.')
+    return MONTHS.get(token) or MONTHS[token[:3]]
+
+
+def _parse_dates(text):
+    from datetime import date
+    found = []
+    for index, pattern in enumerate(DATE_PATTERNS):
+        for match in pattern.finditer(text):
+            try:
+                if index == 0:
+                    day, month, year = int(match.group(1)), _month(match.group(2)), int(match.group(3))
+                elif index == 1:
+                    month, day, year = _month(match.group(1)), int(match.group(2)), int(match.group(3))
+                else:
+                    year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+                found.append((match.start(), date(year, month, day)))
+            except (ValueError, KeyError):
+                continue
+    return sorted(found)
+
+
+def detect_calls_for_papers(pages, today=None):
+    """Open special issues / calls for papers with a future deadline, read straight from official pages."""
+    today = today or timezone.localdate()
+    calls, seen = [], set()
+    for page in pages:
+        page_is_cfp = bool(CFP_LINE.search(f'{page.url} {page.title}'))
+        lines = [line.strip() for line in (page.text or '').split('\n') if line.strip()]
+        for index, line in enumerate(lines):
+            is_heading = bool(CFP_LINE.search(line))
+            if not (is_heading or (page_is_cfp and DEADLINE_WORDS.search(line))):
+                continue
+            if not is_heading and any(CFP_LINE.search(prev) for prev in lines[max(0, index - 2):index]):
+                continue  # this deadline belongs to the call heading just above it
+            block = [line]
+            for following in lines[index + 1:index + 3]:
+                if CFP_LINE.search(following):
+                    break  # the next call starts here; do not borrow its deadline
+                block.append(following)
+            window = ' '.join(block)[:600]
+            if not DEADLINE_WORDS.search(window):
+                continue
+            future = [d for _pos, d in _parse_dates(window) if d >= today]
+            if not future:
+                continue
+            title = line if CFP_LINE.search(line) else (page.title or line)
+            title = re.sub(r'\s+', ' ', title)[:180]
+            key = (canonical_url(page.url), title.lower(), future[0])
+            if key in seen:
+                continue
+            seen.add(key)
+            calls.append({'title': title, 'deadline': future[0].isoformat(), 'url': page.url,
+                          'evidence_text': _clean_text(window, 300)})
+    calls.sort(key=lambda call: call['deadline'])
+    return calls[:10]
+
+
+def apply_calls_for_papers(candidate, pages):
+    """Add verified open calls to current_demand/deadlines; an open call also proves the venue is accepting."""
+    official = [p for p in pages if not is_third_party(p.url)]
+    calls = detect_calls_for_papers(official)
+    if not calls:
+        return candidate
+    demand = dict(candidate.get('current_demand') or {})
+    demand['calls_for_papers'] = calls
+    candidate['current_demand'] = demand
+    deadlines = dict(candidate.get('deadlines') or {})
+    for call in calls[:5]:
+        deadlines[f"Call: {call['title'][:80]}"] = call['deadline']
+    candidate['deadlines'] = deadlines
+    checked_at = timezone.now().isoformat()
+    evidence = list(candidate.get('source_evidence') or [])
+    for call in calls[:3]:
+        evidence.append({'field': 'call_for_papers', 'claim': f"Open call, deadline {call['deadline']}.",
+                         'url': call['url'], 'source_title': call['title'][:200], 'excerpt': call['evidence_text'],
+                         'checked_at': checked_at})
+    candidate['source_evidence'] = evidence[:30]
+    if candidate.get('acceptance_status') == 'unclear':
+        candidate['acceptance_status'] = 'accepting'  # an open call with a future deadline is an open route to submit
+        candidate['confidence'] = min(100, candidate.get('confidence', 0) + 15)
+    return candidate
 
 
 ACCEPTING_PATTERNS = [
@@ -1406,10 +1571,33 @@ def _apply_hints(raw, hints):
     return merged
 
 
+BLOCKED_NOTE = ('Publisher site blocks automated reading; details come from the journal catalogue '
+                '(OpenAlex/DOAJ). Check the official site before adding.')
+
+
+def stage_from_catalogue(entry_url, hints, reason):
+    """Keep a catalogue-listed journal whose official site refused to be read, clearly marked as unverified."""
+    raw = _apply_hints({'website_url': hints.get('website_url') or entry_url}, hints)
+    candidate = validate_extraction(raw, [])
+    candidate['acceptance_status'] = 'unclear'
+    candidate['source_urls'] = [entry_url]
+    fingerprint = hashlib.sha256(('catalogue:' + canonical_url(entry_url)).encode()).hexdigest()
+    record, outcome = upsert_candidate(candidate, fingerprint)
+    if outcome in {'created', 'updated'} and not record.source_evidence:
+        record.last_error = BLOCKED_NOTE
+        record.save(update_fields=['last_error', 'updated_at'])
+    return record, outcome
+
+
 def process_candidate(entry_url, fetcher, config, *, extractor=None, hints=None):
     extractor = extractor or extract_with_ai
     hints = hints or {}
-    pages = gather_pages(entry_url, fetcher, config)
+    try:
+        pages = gather_pages(entry_url, fetcher, config)
+    except DiscoveryFetchError as exc:
+        if hints.get('name') and is_blocked_failure(exc):
+            return stage_from_catalogue(entry_url, hints, exc)
+        raise
     if not any(page.text for page in pages):
         raise DiscoveryExtractionError('The page has no readable text (it may need JavaScript).')
     fingerprint = content_fingerprint(pages)
@@ -1430,6 +1618,7 @@ def process_candidate(entry_url, fetcher, config, *, extractor=None, hints=None)
     merged = _apply_hints(raw, hints) if hints else raw
     merged = apply_page_signals(merged, pages)
     candidate = validate_extraction(merged, pages)
+    candidate = apply_calls_for_papers(candidate, pages)
     return upsert_candidate(candidate, fingerprint)
 
 

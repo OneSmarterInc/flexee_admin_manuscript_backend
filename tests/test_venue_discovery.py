@@ -27,6 +27,7 @@ def env(monkeypatch):
     monkeypatch.setenv('ANTHROPIC_API_KEY', 'test-anthropic-key')
     monkeypatch.setenv('VENUE_DISCOVERY_MODEL', 'claude-test-model')
     monkeypatch.setenv('VENUE_DISCOVERY_PER_DOMAIN_DELAY_SECONDS', '0')
+    monkeypatch.setenv('VENUE_DISCOVERY_RETRY_DELAY_SECONDS', '0')
     # Every test hostname resolves to a public documentation address.
     monkeypatch.setattr(vd, '_resolve', lambda host: {'93.184.216.34'})
 
@@ -1199,3 +1200,101 @@ def test_run_payload_lists_skip_reasons():
         {'url': 'openalex: management', 'stage': 'search', 'message': 'Could not reach the OpenAlex API.'}])
     run = client.get('/api/admin/venue-discovery/').json()['last_run']
     assert run['error_count'] == 1 and run['errors'][0]['message'] == 'Could not reach the OpenAlex API.'
+
+
+
+# ---------------------------------------------------------------------------
+# Retries, blocked publishers, calls for papers
+# ---------------------------------------------------------------------------
+
+def test_temporary_failures_are_retried_once():
+    attempts = {'n': 0}
+    def flaky(request):
+        if str(request.url).endswith('/robots.txt'):
+            return httpx.Response(404)
+        attempts['n'] += 1
+        if attempts['n'] == 1:
+            return httpx.Response(520, text='', headers={'content-type': 'text/html'})
+        return httpx.Response(200, text='<title>OK</title><p>Fine</p>', headers={'content-type': 'text/html'})
+    config = vd.DiscoveryConfig.from_env()
+    fetcher = vd.SafeFetcher(config, client=httpx.Client(transport=httpx.MockTransport(flaky)))
+    assert fetcher.fetch('https://flaky.example/j').title == 'OK' and attempts['n'] == 2
+
+    def forbidden(request):
+        if str(request.url).endswith('/robots.txt'):
+            return httpx.Response(404)
+        attempts['n'] += 1
+        return httpx.Response(403, headers={'content-type': 'text/html'})
+    attempts['n'] = 0
+    fetcher = vd.SafeFetcher(config, client=httpx.Client(transport=httpx.MockTransport(forbidden)))
+    with pytest.raises(vd.DiscoveryFetchError, match='403'):
+        fetcher.fetch('https://blocked.example/j')
+    assert attempts['n'] == 1  # 403 is not retried
+
+
+@pytest.mark.django_db
+def test_blocked_catalogue_journal_is_kept_as_unverified():
+    pages = {'https://www.sciencedirect.com/journal/x': httpx.Response(403, headers={'content-type': 'text/html'})}
+    fetcher, config = make_fetcher(pages)
+    hints = {'name': 'Journal X', 'organization_name': 'Elsevier', 'website_url': 'https://www.sciencedirect.com/journal/x',
+             'venue_type': 'journal', 'country': 'NL'}
+    record, outcome = vd.process_candidate('https://www.sciencedirect.com/journal/x', fetcher, config,
+                                           extractor=journal_extraction, hints=hints)
+    assert outcome == 'created'
+    assert record.name == 'Journal X' and record.organization_name == 'Elsevier'
+    assert record.acceptance_status == 'unclear' and record.confidence <= 25
+    assert record.last_error == vd.BLOCKED_NOTE
+
+
+@pytest.mark.django_db
+def test_blocked_site_without_catalogue_data_is_still_skipped():
+    pages = {'https://blocked.example/j': httpx.Response(403, headers={'content-type': 'text/html'})}
+    fetcher, config = make_fetcher(pages)
+    with pytest.raises(vd.DiscoveryFetchError):
+        vd.process_candidate('https://blocked.example/j', fetcher, config, extractor=journal_extraction)
+
+
+CFP_HOME = """<html><head><title>Journal of Digital Operations</title></head><body>
+<p>We publish original research articles.</p>
+<a href="/jdo/special-issues">Special issues</a></body></html>"""
+CFP_PAGE = """<html><head><title>Special issues - call for papers</title></head><body>
+<h2>Special Issue: AI in Supply Chain Resilience</h2>
+<p>Submission deadline: 15 March 2099</p>
+<h2>Special Issue: Old topic</h2>
+<p>Deadline: 1 January 2020</p>
+<h2>Call for papers: Digital Twins in Manufacturing</h2>
+<p>Manuscripts due December 1, 2099</p></body></html>"""
+
+
+@pytest.mark.django_db
+def test_open_calls_for_papers_are_found_with_future_deadlines_only():
+    pages = {'https://ops.example/jdo': CFP_HOME, 'https://ops.example/jdo/special-issues': CFP_PAGE}
+    fetcher, config = make_fetcher(pages)
+    record, _ = vd.process_candidate('https://ops.example/jdo', fetcher, config,
+                                     extractor=lambda *a: {'name': 'Journal of Digital Operations',
+                                                           'website_url': 'https://ops.example/jdo'})
+    calls = record.current_demand['calls_for_papers']
+    assert [c['deadline'] for c in calls] == ['2099-03-15', '2099-12-01']
+    assert calls[0]['title'] == 'Special Issue: AI in Supply Chain Resilience'
+    assert calls[0]['url'].endswith('/special-issues')
+    assert 'Call: Special Issue: AI in Supply Chain Resilience' in record.deadlines
+    assert record.acceptance_status == 'accepting'  # an open call is an open route to submit
+    assert any(e['field'] == 'call_for_papers' for e in record.source_evidence)
+
+
+def test_date_parsing_formats():
+    from datetime import date
+    dates = [d for _p, d in vd._parse_dates('Due 15th Sept 2099, or March 3, 2099, or 2099-07-01; not 31 February 2099')]
+    assert dates == [date(2099, 9, 15), date(2099, 3, 3), date(2099, 7, 1)]
+
+
+@pytest.mark.django_db
+def test_list_filter_open_calls_only():
+    client, _ = admin_client()
+    DiscoveredVenue.objects.create(name='With call', normalized_name='with call', venue_type='journal',
+                                   acceptance_status='accepting',
+                                   current_demand={'calls_for_papers': [{'title': 'SI', 'deadline': '2099-01-01', 'url': 'https://a.example'}]})
+    DiscoveredVenue.objects.create(name='No call', normalized_name='no call', venue_type='journal', acceptance_status='accepting')
+    body = client.get('/api/admin/venue-discovery/?status=new&acceptance=accepting&calls=1').json()
+    assert [i['name'] for i in body['items']] == ['With call']
+    assert body['items'][0]['open_calls'][0]['deadline'] == '2099-01-01'

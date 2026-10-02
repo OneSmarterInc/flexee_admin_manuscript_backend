@@ -33,6 +33,12 @@ def _primary_source(item):
     return item.submission_url or item.website_url or ''
 
 
+def _open_calls(item):
+    today = timezone.localdate().isoformat()
+    calls = (item.current_demand or {}).get('calls_for_papers') or []
+    return [c for c in calls if isinstance(c, dict) and str(c.get('deadline', '')) >= today][:10]
+
+
 def discovered_payload(item, *, detail=False, last_run_started=None):
     payload = {
         'id': str(item.id),
@@ -56,6 +62,7 @@ def discovered_payload(item, *, detail=False, last_run_started=None):
         'added_venue_config_id': item.added_venue_config_id,
         'change_summary': item.change_summary,
         'last_error': item.last_error,
+        'open_calls': _open_calls(item),
         'checked_in_last_run': bool(last_run_started and item.last_checked_at and item.last_checked_at >= last_run_started),
     }
     if detail:
@@ -142,6 +149,8 @@ def discovery_list(request):
         base = base.filter(venue_type=venue_type)
     if query:
         base = base.filter(Q(name__icontains=query) | Q(organization_name__icontains=query) | Q(aims_scope__icontains=query))
+    if request.GET.get('calls') in {'1', 'true'}:
+        base = base.filter(current_demand__has_key='calls_for_papers')
     filtered = base.filter(acceptance_status=acceptance) if acceptance in {'accepting', 'unclear', 'closed'} else base
 
     items = filtered

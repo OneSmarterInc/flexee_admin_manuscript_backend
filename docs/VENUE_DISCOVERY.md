@@ -104,7 +104,21 @@ DOAJ's own data (name, publisher, subjects, peer review, APC). If Ollama itself 
 reachable, nothing is staged and the run lists the error. Switch to `qwen2.5:7b-instruct`
 (one `.env` line) for useful results.
 
-## 2. Schedule it (once per environment, idempotent)
+## 1c. More venues per run, open calls for papers
+
+* Temporary failures (address lookup, HTTP 429/5xx, timeouts) are retried once
+  (`VENUE_DISCOVERY_RETRY_DELAY_SECONDS`). 401/403 and robots.txt refusals are not retried.
+* When a catalogue journal's own site refuses automated reading (403, robots.txt), it is still
+  staged from the catalogue data (name, publisher, link) as "Unclear", low confidence, with the
+  note "Publisher site blocks automated reading". Check it by hand before adding.
+* Each venue can use up to `VENUE_DISCOVERY_MAX_PAGES_PER_CANDIDATE` (default 5) pages, including
+  up to `VENUE_DISCOVERY_MAX_CFP_PAGES` (default 2) special-issue / call-for-papers pages.
+* Open calls are read from official pages: a special-issue or call-for-papers heading with a
+  deadline date. Only future deadlines are kept, in `current_demand.calls_for_papers` and
+  `deadlines`, each with the exact text as evidence. An open call also confirms "Accepting".
+  The admin page can show "Open calls only".
+
+ (once per environment, idempotent)
 
 ```
 python manage.py migrate

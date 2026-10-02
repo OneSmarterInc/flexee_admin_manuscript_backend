@@ -144,3 +144,41 @@ def test_match_payload_includes_score():
     payload = _match_payload(match)
     assert set(payload['match_score']) == {'score', 'label', 'breakdown', 'matched_terms'}
     assert 0 <= payload['match_score']['score'] <= 100
+
+
+# ---------------- the schedule really fires (Django-Q scheduler) ----------------
+
+@pytest.mark.django_db
+def test_india_time_zone_is_offered_first_and_default(monkeypatch):
+    monkeypatch.delenv('VENUE_DISCOVERY_TIMEZONE', raising=False)
+    client, _ = admin()
+    schedule = client.get(URL).json()['schedule']
+    assert schedule['timezone'] == 'Asia/Kolkata'
+    assert schedule['timezone_options'][0] == {'value': 'Asia/Kolkata', 'label': 'India — IST (UTC+05:30)'}
+
+
+@pytest.mark.django_db
+def test_django_q_scheduler_queues_discovery_at_the_set_time_and_keeps_the_local_time():
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+    from django.utils import timezone
+    from django_q.models import OrmQ, Schedule
+    from django_q.scheduler import scheduler
+    from review.discovery_schedule import set_schedule
+
+    set_schedule(enabled=True, hour=19, minute=12, tz_name='Asia/Kolkata')
+    schedule = Schedule.objects.get(name='flexee-venue-discovery-daily')
+    local = schedule.next_run.astimezone(ZoneInfo('Asia/Kolkata'))
+    assert (local.hour, local.minute) == (19, 12)
+
+    # Pretend the time has come: the scheduler the worker runs every ~30 s must queue the task.
+    due = timezone.now() - timedelta(minutes=1)
+    Schedule.objects.filter(id=schedule.id).update(next_run=due)
+    scheduler()
+    queued = [q for q in OrmQ.objects.all() if q.func() == 'review.tasks.run_venue_discovery_task']
+    assert len(queued) == 1
+    assert queued[0].task['kwargs'] == {'schedule_tz': 'Asia/Kolkata'}
+
+    schedule.refresh_from_db()
+    assert schedule.next_run > timezone.now()  # moved on to the next day
+    assert timedelta(hours=23) < schedule.next_run - due < timedelta(hours=25)

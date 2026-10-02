@@ -16,6 +16,7 @@ from .audit import record_audit_event
 from .auth import require_platform_superuser
 from .models import DiscoveredVenue, Organization, Venue, VenueAgentConfig, VenueDiscoveryRun
 from .services.venue_discovery import (
+    BLOCKED_NOTE,
     DiscoveryConfig, TYPE_LABELS, canonical_host, normalize_name, registrable_domain, start_run,
 )
 
@@ -151,7 +152,13 @@ def discovery_list(request):
         base = base.filter(Q(name__icontains=query) | Q(organization_name__icontains=query) | Q(aims_scope__icontains=query))
     if request.GET.get('calls') in {'1', 'true'}:
         base = base.filter(current_demand__has_key='calls_for_papers')
-    filtered = base.filter(acceptance_status=acceptance) if acceptance in {'accepting', 'unclear', 'closed'} else base
+    if acceptance == 'verified':
+        # Status proven by a quote from the venue's own official page.
+        filtered = base.filter(acceptance_status__in=['accepting', 'closed']).exclude(last_error=BLOCKED_NOTE)
+    elif acceptance in {'accepting', 'unclear', 'closed'}:
+        filtered = base.filter(acceptance_status=acceptance)
+    else:
+        filtered = base
 
     items = filtered
     if status in {'new', 'added', 'ignored', 'changed', 'error'}:

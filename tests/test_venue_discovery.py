@@ -1233,7 +1233,8 @@ def test_temporary_failures_are_retried_once():
 
 
 @pytest.mark.django_db
-def test_blocked_catalogue_journal_is_kept_as_unverified():
+def test_blocked_catalogue_journal_is_kept_as_unverified(monkeypatch):
+    monkeypatch.setenv('VENUE_DISCOVERY_KEEP_BLOCKED', 'true')
     pages = {'https://www.sciencedirect.com/journal/x': httpx.Response(403, headers={'content-type': 'text/html'})}
     fetcher, config = make_fetcher(pages)
     hints = {'name': 'Journal X', 'organization_name': 'Elsevier', 'website_url': 'https://www.sciencedirect.com/journal/x',
@@ -1298,3 +1299,47 @@ def test_list_filter_open_calls_only():
     body = client.get('/api/admin/venue-discovery/?status=new&acceptance=accepting&calls=1').json()
     assert [i['name'] for i in body['items']] == ['With call']
     assert body['items'][0]['open_calls'][0]['deadline'] == '2099-01-01'
+
+
+
+@pytest.mark.django_db
+def test_blocked_publishers_are_skipped_by_default():
+    pages = {'https://www.sciencedirect.com/journal/x': httpx.Response(403, headers={'content-type': 'text/html'})}
+    fetcher, config = make_fetcher(pages)
+    with pytest.raises(vd.DiscoveryFetchError, match='403'):
+        vd.process_candidate('https://www.sciencedirect.com/journal/x', fetcher, config, extractor=journal_extraction,
+                             hints={'name': 'Journal X', 'website_url': 'https://www.sciencedirect.com/journal/x'})
+    assert DiscoveredVenue.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_verified_only_filter():
+    client, _ = admin_client()
+    for name, status, note in [('Proven open', 'accepting', ''), ('Proven closed', 'closed', ''),
+                               ('Unclear one', 'unclear', ''), ('Blocked one', 'unclear', vd.BLOCKED_NOTE)]:
+        DiscoveredVenue.objects.create(name=name, normalized_name=name.lower(), venue_type='journal',
+                                       acceptance_status=status, last_error=note)
+    body = client.get('/api/admin/venue-discovery/?status=new&acceptance=verified').json()
+    assert sorted(i['name'] for i in body['items']) == ['Proven closed', 'Proven open']
+    assert body['counts']['new'] == 2 and body['hidden_by_status_filter'] == 2
+
+
+@pytest.mark.django_db
+def test_cleanup_command_removes_only_unverified_new_venues():
+    from io import StringIO
+    from django.core.management import call_command
+    DiscoveredVenue.objects.create(name='Blocked new', normalized_name='blocked new', venue_type='journal',
+                                   acceptance_status='unclear', last_error=vd.BLOCKED_NOTE)
+    DiscoveredVenue.objects.create(name='Blocked ignored', normalized_name='blocked ignored', venue_type='journal',
+                                   acceptance_status='unclear', last_error=vd.BLOCKED_NOTE, discovery_status='ignored')
+    DiscoveredVenue.objects.create(name='Plain unclear', normalized_name='plain unclear', venue_type='journal',
+                                   acceptance_status='unclear')
+    DiscoveredVenue.objects.create(name='Verified', normalized_name='verified', venue_type='journal',
+                                   acceptance_status='accepting')
+    out = StringIO()
+    call_command('cleanup_unverified_discoveries', stdout=out)
+    assert 'Dry run: 1' in out.getvalue() and DiscoveredVenue.objects.count() == 4
+    call_command('cleanup_unverified_discoveries', '--yes', stdout=StringIO())
+    assert not DiscoveredVenue.objects.filter(name='Blocked new').exists()
+    call_command('cleanup_unverified_discoveries', '--yes', '--all-unclear', stdout=StringIO())
+    assert sorted(DiscoveredVenue.objects.values_list('name', flat=True)) == ['Blocked ignored', 'Verified']

@@ -108,9 +108,20 @@ reachable, nothing is staged and the run lists the error. Switch to `qwen2.5:7b-
 
 * Temporary failures (address lookup, HTTP 429/5xx, timeouts) are retried once
   (`VENUE_DISCOVERY_RETRY_DELAY_SECONDS`). 401/403 and robots.txt refusals are not retried.
-* When a catalogue journal's own site refuses automated reading (403, robots.txt), it is still
-  staged from the catalogue data (name, publisher, link) as "Unclear", low confidence, with the
-  note "Publisher site blocks automated reading". Check it by hand before adding.
+* When a catalogue journal's own site refuses automated reading (403, robots.txt), it is skipped
+  and listed under the run's skip reasons. Set `VENUE_DISCOVERY_KEEP_BLOCKED=true` to stage such
+  journals from catalogue data as unverified "Unclear" venues instead.
+* The admin page opens on "Verified only": venues whose status (accepting or closed) is proven by
+  a quote from their own official page.
+* Remove unverified venues already staged (dry run first, then `--yes`):
+
+  ```
+  python manage.py cleanup_unverified_discoveries
+  python manage.py cleanup_unverified_discoveries --yes
+  python manage.py cleanup_unverified_discoveries --yes --all-unclear   # also every New 'unclear' venue
+  ```
+
+  Only venues still in New and not added to Venue Agents are removed.
 * Each venue can use up to `VENUE_DISCOVERY_MAX_PAGES_PER_CANDIDATE` (default 5) pages, including
   up to `VENUE_DISCOVERY_MAX_CFP_PAGES` (default 2) special-issue / call-for-papers pages.
 * Open calls are read from official pages: a special-issue or call-for-papers heading with a

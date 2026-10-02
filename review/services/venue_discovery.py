@@ -1595,7 +1595,8 @@ def process_candidate(entry_url, fetcher, config, *, extractor=None, hints=None)
     try:
         pages = gather_pages(entry_url, fetcher, config)
     except DiscoveryFetchError as exc:
-        if hints.get('name') and is_blocked_failure(exc):
+        # Off by default: only venues verified on their own official site are staged.
+        if hints.get('name') and is_blocked_failure(exc) and _env_bool('VENUE_DISCOVERY_KEEP_BLOCKED', False):
             return stage_from_catalogue(entry_url, hints, exc)
         raise
     if not any(page.text for page in pages):

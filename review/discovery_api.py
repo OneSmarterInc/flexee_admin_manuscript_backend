@@ -168,7 +168,19 @@ def discovery_list(request):
         'confidence': ('-confidence', '-first_discovered_at'),
         'verified': ('-last_checked_at', '-confidence'),
     }.get(sort, ('-first_discovered_at', '-confidence'))  # default: newest found first
-    items = items.order_by(*ordering)[:LIST_LIMIT]
+    items = items.order_by(*ordering)
+    # Pagination: ?page=1&page_size=10 (page_size 1-50). Out-of-range pages snap to the last page.
+    try:
+        page_size = max(1, min(int(request.GET.get('page_size', 10)), 50))
+    except (TypeError, ValueError):
+        page_size = 10
+    total = items.count()
+    pages = max(1, -(-total // page_size))
+    try:
+        page = max(1, min(int(request.GET.get('page', 1)), pages))
+    except (TypeError, ValueError):
+        page = 1
+    items = items[(page - 1) * page_size: page * page_size]
 
     keys = ('new', 'added', 'changed', 'ignored', 'error')
     counts = dict(filtered.values_list('discovery_status').annotate(n=Count('id')))
@@ -181,6 +193,7 @@ def discovery_list(request):
     config = DiscoveryConfig.from_env()
     return JsonResponse({
         'items': [discovered_payload(item, last_run_started=last_run_started) for item in items],
+        'pagination': {'page': page, 'page_size': page_size, 'total': total, 'pages': pages},
         'counts': {key: counts.get(key, 0) for key in keys},
         'counts_all_statuses': {key: counts_all.get(key, 0) for key in keys},
         'hidden_by_status_filter': max(0, hidden_by_status),

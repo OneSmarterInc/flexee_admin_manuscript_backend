@@ -1420,3 +1420,24 @@ def test_ollama_discovery_requests_skip_thinking(monkeypatch):
     monkeypatch.setenv('VENUE_DISCOVERY_OLLAMA_THINK', 'true')
     vd.extract_with_local_ollama([vd.FetchedPage(url='https://a.example', title='', text='x')], vd.DiscoveryConfig.from_env())
     assert 'think' not in fake.calls[1]['json']
+
+
+@pytest.mark.django_db
+def test_list_is_paginated():
+    from datetime import timedelta
+    from django.utils import timezone
+    client, _ = admin_client()
+    now = timezone.now()
+    for i in range(23):
+        DiscoveredVenue.objects.create(name=f'Venue {i:02d}', normalized_name=f'venue {i:02d}', venue_type='journal',
+                                       acceptance_status='accepting', first_discovered_at=now - timedelta(minutes=i))
+    first = client.get('/api/admin/venue-discovery/?status=new&acceptance=accepting').json()
+    assert first['pagination'] == {'page': 1, 'page_size': 10, 'total': 23, 'pages': 3}
+    assert [i['name'] for i in first['items']][:2] == ['Venue 00', 'Venue 01'] and len(first['items']) == 10
+    last = client.get('/api/admin/venue-discovery/?status=new&acceptance=accepting&page=3').json()
+    assert len(last['items']) == 3 and last['items'][-1]['name'] == 'Venue 22'
+    beyond = client.get('/api/admin/venue-discovery/?status=new&acceptance=accepting&page=99').json()
+    assert beyond['pagination']['page'] == 3  # snaps to the last page
+    big = client.get('/api/admin/venue-discovery/?status=new&acceptance=accepting&page_size=500').json()
+    assert big['pagination']['page_size'] == 50
+    assert first['counts']['new'] == 23  # tab counts cover all pages

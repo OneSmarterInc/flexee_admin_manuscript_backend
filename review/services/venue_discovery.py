@@ -900,6 +900,8 @@ def extract_with_local_ollama(pages, config):
                 'stream': False,
                 'format': 'json',
                 'keep_alive': '5m',
+                # Thinking models (Qwen3, DeepSeek-R1) skip their reasoning step: much faster, same JSON.
+                **({} if _env_bool('VENUE_DISCOVERY_OLLAMA_THINK', False) else {'think': False}),
                 'options': {'temperature': 0.1, 'num_ctx': local['num_ctx'], 'num_predict': local['num_predict']},
             },
             timeout=local['timeout'],
@@ -1680,15 +1682,33 @@ def run_discovery(run, *, config=None, provider=None, fetcher=None, extractor=No
                     found.append((result.url, getattr(result, 'hints', {}) or {}))
 
         entries = pick_varied_entries(per_provider, config)
-        for url, hints in entries:
+        stop_reason = ''
+        for index, (url, hints) in enumerate(entries, start=1):
+            stop_reason = _should_stop(run)
+            if stop_reason:
+                break
+            _save_progress(run, fetcher, f'Checking venue {index} of {len(entries)}')
             _process_and_count(run, url, fetcher, config, extractor, hints=hints)
 
-        _recheck_existing(run, fetcher, config, extractor, skip=set(seen_keys))
+        if not stop_reason:
+            _recheck_existing(run, fetcher, config, extractor, skip=set(seen_keys))
+            stop_reason = _should_stop(run)
 
         run.official_pages_checked = fetcher.pages_fetched
+        if stop_reason == 'stopped':
+            run.refresh_from_db(fields=['summary'])
+            run.status = 'failed'
+            run.summary = (run.summary or 'Stopped by an admin.') + (
+                f' Kept results so far: {run.candidates_created} new · {run.candidates_updated} updated.')
+            run.completed_at = timezone.now()
+            run.save()
+            return run
         run.status = 'completed'
         run.summary = (f'{run.candidates_created} new · {run.candidates_updated} updated · '
                        f'{run.candidates_changed} changed · {len(run.errors or [])} skipped')
+        if stop_reason == 'time_limit':
+            run.summary += f' · stopped at the {max_run_minutes()}-minute limit; the next run continues with new venues'
+
     except DiscoveryConfigError as exc:
         run.status = 'failed'
         run.summary = str(exc)
@@ -1775,6 +1795,33 @@ def _process_and_count(run, url, fetcher, config, extractor, hints=None):
         run.candidates_updated += 1
 
 
+def max_run_minutes():
+    # Must stay below the worker's job timeout (Q_CLUSTER timeout, 30 minutes), or the
+    # worker kills the job and re-queues it, which looks like a run that never ends.
+    return _env_int('VENUE_DISCOVERY_MAX_RUN_MINUTES', 25, 1, 28)
+
+
+def _should_stop(run):
+    """'stopped' if an admin pressed Stop, 'time_limit' when the run's time budget is used up."""
+    status = VenueDiscoveryRun.objects.filter(id=run.id).values_list('status', flat=True).first()
+    if status not in (None, 'processing'):
+        return 'stopped'
+    started = run.started_at or timezone.now()
+    if timezone.now() - started >= timedelta(minutes=max_run_minutes()):
+        return 'time_limit'
+    return ''
+
+
+def _save_progress(run, fetcher, message):
+    run.official_pages_checked = fetcher.pages_fetched
+    VenueDiscoveryRun.objects.filter(id=run.id, status='processing').update(
+        summary=message, official_pages_checked=run.official_pages_checked, queries_run=run.queries_run,
+        results_seen=run.results_seen, candidates_created=run.candidates_created,
+        candidates_updated=run.candidates_updated, candidates_changed=run.candidates_changed,
+        errors=run.errors or [],
+    )
+
+
 def _recheck_existing(run, fetcher, config, extractor, skip):
     if config.max_rechecks_per_run <= 0:
         return
@@ -1784,6 +1831,8 @@ def _recheck_existing(run, fetcher, config, extractor, skip):
            .filter(last_checked_at__lt=stale_before)
            .order_by('last_checked_at')[: config.max_rechecks_per_run])
     for record in due:
+        if _should_stop(run):
+            return
         url = record.submission_url or record.website_url or (record.source_urls or [''])[0]
         if not url or _entry_key(url) in skip:
             continue
@@ -1802,8 +1851,17 @@ def _recheck_existing(run, fetcher, config, extractor, skip):
             run.candidates_updated += 1
 
 
+def close_stale_runs():
+    """Runs left 'processing' after a worker restart or job timeout are marked failed, never resumed."""
+    limit = timezone.now() - timedelta(minutes=max_run_minutes() + 10)
+    return VenueDiscoveryRun.objects.filter(status='processing', started_at__lt=limit).update(
+        status='failed', completed_at=timezone.now(),
+        summary='Interrupted (worker restarted or time limit reached). Results found before that were kept.')
+
+
 def start_run(trigger='schedule', requested_by=''):
     """Create a run unless one is already queued/processing (from the last 3 hours)."""
+    close_stale_runs()
     recent = timezone.now() - timedelta(hours=3)
     active = VenueDiscoveryRun.objects.filter(status__in=['queued', 'processing'], created_at__gte=recent).first()
     if active:

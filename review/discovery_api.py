@@ -174,6 +174,8 @@ def discovery_list(request):
     counts = dict(filtered.values_list('discovery_status').annotate(n=Count('id')))
     counts_all = dict(base.values_list('discovery_status').annotate(n=Count('id')))
     hidden_by_status = (counts_all.get(status, 0) - counts.get(status, 0)) if filtered is not base else 0
+    from .services.venue_discovery import close_stale_runs
+    close_stale_runs()
     last_run = VenueDiscoveryRun.objects.order_by('-created_at').first()
     last_run_started = last_run.started_at if last_run and last_run.status == 'completed' else None
     config = DiscoveryConfig.from_env()
@@ -185,6 +187,23 @@ def discovery_list(request):
         'last_run': run_payload(last_run),
         'settings': discovery_settings_payload(config),
     })
+
+
+@require_POST
+@require_platform_superuser
+def discovery_stop_run(request):
+    """Stop the current run. Venues already found are kept; the worker stops before the next venue."""
+    from .services.venue_discovery import close_stale_runs
+    close_stale_runs()
+    run = VenueDiscoveryRun.objects.filter(status__in=['queued', 'processing']).order_by('-created_at').first()
+    if run is None:
+        return JsonResponse({'detail': 'No discovery run is in progress.'}, status=409)
+    VenueDiscoveryRun.objects.filter(id=run.id).update(
+        status='failed', completed_at=timezone.now(), summary=f'Stopped by {request.editor_user.email}.')
+    record_audit_event(request, 'venue_discovery.run_stopped', resource_type='venue_discovery_run', resource_id=run.id,
+                       detail={'previous_status': run.status})
+    run.refresh_from_db()
+    return JsonResponse({'run': run_payload(run)})
 
 
 @require_GET

@@ -1343,3 +1343,80 @@ def test_cleanup_command_removes_only_unverified_new_venues():
     assert not DiscoveredVenue.objects.filter(name='Blocked new').exists()
     call_command('cleanup_unverified_discoveries', '--yes', '--all-unclear', stdout=StringIO())
     assert sorted(DiscoveredVenue.objects.values_list('name', flat=True)) == ['Blocked ignored', 'Verified']
+
+
+# ---------------------------------------------------------------------------
+# Run control: no endless re-runs, stop button, time limit, stale runs
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+def test_redelivered_task_does_not_resume_a_processing_run(monkeypatch):
+    from django.utils import timezone
+    from review.tasks import run_venue_discovery_task
+    called = []
+    monkeypatch.setattr('review.services.venue_discovery.run_discovery', lambda run, **kw: called.append(run))
+    run = VenueDiscoveryRun.objects.create(status='processing', started_at=timezone.now())
+    assert run_venue_discovery_task(str(run.id)) is None
+    run.refresh_from_db()
+    assert called == [] and run.status == 'failed' and 'Interrupted' in run.summary
+
+
+@pytest.mark.django_db
+def test_stop_button_stops_before_the_next_venue():
+    client, _ = admin_client()
+    pages = {f'https://j{i}.example/journal': f'<title>J{i}</title><p>Make a Submission</p>' for i in range(3)}
+    fetcher, config = make_fetcher(pages)
+    provider = FakeProvider({vd.query_bank()[0][1]: [vd.SearchResult(url=u) for u in pages]})
+    run = VenueDiscoveryRun.objects.create()
+    seen = []
+    def extractor(page_list, cfg):
+        seen.append(page_list[0].url)
+        if len(seen) == 1:
+            assert client.post('/api/admin/venue-discovery/stop/').status_code == 200  # admin presses Stop
+        return {'name': f'Venue {len(seen)}', 'website_url': page_list[0].url}
+    vd.run_discovery(run, config=config, provider=provider, fetcher=fetcher, extractor=extractor)
+    run.refresh_from_db()
+    assert len(seen) == 1 and run.status == 'failed' and 'Stopped by root@example.com' in run.summary
+    assert DiscoveredVenue.objects.count() == 1  # what was found before stopping is kept
+    assert AuditEvent.objects.filter(action='venue_discovery.run_stopped').exists()
+    assert client.post('/api/admin/venue-discovery/stop/').status_code == 409
+
+
+@pytest.mark.django_db
+def test_run_stops_at_its_time_limit(monkeypatch):
+    from datetime import timedelta
+    from django.utils import timezone
+    pages = {f'https://t{i}.example/journal': f'<title>T{i}</title><p>Make a Submission</p>' for i in range(3)}
+    fetcher, config = make_fetcher(pages)
+    provider = FakeProvider({vd.query_bank()[0][1]: [vd.SearchResult(url=u) for u in pages]})
+    run = VenueDiscoveryRun.objects.create()
+    real_now = timezone.now
+    calls = {'n': 0}
+    def extractor(page_list, cfg):
+        calls['n'] += 1
+        monkeypatch.setattr(vd.timezone, 'now', lambda: real_now() + timedelta(minutes=60))  # time is up
+        return {'name': f'Timed {calls["n"]}', 'website_url': page_list[0].url}
+    vd.run_discovery(run, config=config, provider=provider, fetcher=fetcher, extractor=extractor)
+    run.refresh_from_db()
+    assert calls['n'] == 1 and run.status == 'completed' and 'minute limit' in run.summary
+
+
+@pytest.mark.django_db
+def test_stale_processing_runs_are_closed_when_the_page_loads():
+    from datetime import timedelta
+    from django.utils import timezone
+    client, _ = admin_client()
+    VenueDiscoveryRun.objects.create(status='processing', started_at=timezone.now() - timedelta(hours=2))
+    run = client.get('/api/admin/venue-discovery/').json()['last_run']
+    assert run['status'] == 'failed' and 'Interrupted' in run['summary']
+
+
+def test_ollama_discovery_requests_skip_thinking(monkeypatch):
+    free_env(monkeypatch)
+    fake = FakeHttp({'http://127.0.0.1:11434/api/chat': ollama_reply('{"name": "X"}')})
+    monkeypatch.setattr(vd.httpx, 'post', fake)
+    vd.extract_with_local_ollama([vd.FetchedPage(url='https://a.example', title='', text='x')], vd.DiscoveryConfig.from_env())
+    assert fake.calls[0]['json']['think'] is False
+    monkeypatch.setenv('VENUE_DISCOVERY_OLLAMA_THINK', 'true')
+    vd.extract_with_local_ollama([vd.FetchedPage(url='https://a.example', title='', text='x')], vd.DiscoveryConfig.from_env())
+    assert 'think' not in fake.calls[1]['json']

@@ -487,7 +487,13 @@ def run_venue_discovery_task(run_id=None):
 
     if run_id:
         run = VenueDiscoveryRun.objects.filter(id=run_id).first()
-        if run is None or run.status not in {'queued', 'processing'}:
+        if run is None or run.status != 'queued':
+            # Only a queued run may start. A run already 'processing' means the worker is re-delivering
+            # a job it timed out or lost on restart; resuming it would make the run loop forever.
+            if run is not None and run.status == 'processing':
+                VenueDiscoveryRun.objects.filter(id=run.id, status='processing').update(
+                    status='failed', completed_at=timezone.now(),
+                    summary='Interrupted (worker restarted or time limit reached). Results found before that were kept.')
             return None
     else:
         run, created = start_run(trigger='schedule')

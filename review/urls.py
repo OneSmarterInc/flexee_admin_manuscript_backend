@@ -76,6 +76,7 @@ urlpatterns = [
     path('admin/venue-submissions/<uuid:submission_id>/download/', editor_api.admin_venue_submission_download),
     path('admin/venue-discovery/', discovery_api.discovery_list),
     path('admin/venue-discovery/run/', discovery_api.discovery_run_now),
+    path('admin/venue-discovery/stop/', discovery_api.discovery_stop_run),
     path('admin/venue-discovery/<uuid:discovered_id>/', discovery_api.discovery_detail),
     path('admin/venue-discovery/<uuid:discovered_id>/add-to-venue-agent/', discovery_api.discovery_add_to_venue_agent),
     path('admin/venue-discovery/<uuid:discovered_id>/ignore/', discovery_api.discovery_ignore),

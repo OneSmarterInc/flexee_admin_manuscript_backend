@@ -129,7 +129,18 @@ reachable, nothing is staged and the run lists the error. Switch to `qwen2.5:7b-
   `deadlines`, each with the exact text as evidence. An open call also confirms "Accepting".
   The admin page can show "Open calls only".
 
- (once per environment, idempotent)
+## 1d. Run length and stopping a run
+
+* A run stops taking new venues after `VENUE_DISCOVERY_MAX_RUN_MINUTES` (default 25), which keeps
+  it inside the worker's 30-minute job timeout. Venues not reached are tried by the next run.
+* A run is never resumed after a worker restart or timeout: it is marked "Interrupted" and its
+  results so far are kept. Stuck "processing" runs are closed automatically.
+* "Stop run" on the admin page stops the current run before the next venue.
+* While running, the status strip shows progress ("Checking venue 7 of 40").
+* For thinking models such as `qwen3:1.7b`, discovery turns thinking off
+  (`VENUE_DISCOVERY_OLLAMA_THINK=false`), which is much faster.
+
+## 2. Schedule it (once per environment, idempotent)
 
 ```
 python manage.py migrate

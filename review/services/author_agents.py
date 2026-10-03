@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 import random
@@ -9,7 +8,7 @@ from io import BytesIO
 from django.db import transaction
 from django.utils import timezone
 
-from ..models import EvidenceFinding, ReadinessAssessment, Venue, VenueMatch, VenueSubmission
+from ..models import EvidenceFinding, ReadinessAssessment, VenueSubmission
 from ..storage_security import validate_manuscript_zip
 from .field_agent import _extract_citations, _verify_citation_crossref
 from .ai_provider import ai_chat_json, ai_available
@@ -1397,7 +1396,7 @@ def run_venue_assessment(submission):
             timeout=240,
             operation='venue_assessment',
         )
-    except Exception as exc:
+    except Exception:
         model = 'deterministic-fallback'
         data = {
             'editor_summary': 'Semantic analysis unavailable. The manuscript was processed with deterministic checks only.',

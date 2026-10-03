@@ -1,4 +1,3 @@
-import json
 
 from django.db import transaction
 from django.db.models import Q
@@ -7,12 +6,12 @@ from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
 from .auth import check_org_access, require_admin
-from .models import AuditEvent, EditorFeedback, SubmissionRequirementFile, Venue, VenueAgentConfig, VenueSubmission
+from .models import AuditEvent, SubmissionRequirementFile, Venue, VenueAgentConfig, VenueSubmission
 from .services.email_service import send_acceptance_email, send_rejection_email, _send
 from .audit import ADMIN_AUTH_RESOURCE_TYPE, audit_event_payload, record_audit_event
 from .monitoring import capture_exception
 from .storage_security import secure_download_response
-from .author_api import _active_config, _json_body, _submission_payload, _venue_config_payload, _venue_payload
+from .author_api import _json_body, _submission_payload, _venue_config_payload, _venue_payload
 
 
 ALLOWED_VENUE_TYPES = {value for value, _ in Venue.TYPE_CHOICES}

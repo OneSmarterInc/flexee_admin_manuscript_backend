@@ -44,12 +44,7 @@ from django_q.tasks import async_task
 from .services.review_engine import word_count
 from .services.field_agent import _extract_citations
 from .services.author_agents import (
-    AgentExecutionError,
-    AgentInputError,
     load_manuscript_text,
-    run_semantic_matching,
-    run_semantic_readiness,
-    run_venue_assessment,
 )
 from .services.email_service import _send as _send_email
 from .audit import record_audit_event
@@ -57,6 +52,7 @@ from .monitoring import capture_exception
 from .storage_security import (
     UploadSecurityError,
     sanitize_original_filename,
+    secure_download_response,
     validate_manuscript_filename,
     validate_manuscript_zip,
 )
@@ -201,6 +197,52 @@ def _normalise_required_submission_items(value):
             'max_length': max_length,
         })
     return normalised
+
+
+def unique_venue_slug(name, requested=''):
+    """Slug for a new Venue, suffixed -2, -3, ... until it is unused."""
+    base_slug = slugify(str(requested or '').strip() or name)[:160] or 'venue'
+    candidate = base_slug
+    suffix = 2
+    while Venue.objects.filter(slug=candidate).exists():
+        candidate = f'{base_slug[:150]}-{suffix}'
+        suffix += 1
+    return candidate
+
+
+def build_venue_config_fields(data):
+    """Validate and normalise VenueAgentConfig fields from a request-like dict.
+
+    Shared by manual configuration and by venue discovery, so both apply the
+    same rules. Raises ValueError/TypeError with a user-facing message.
+    """
+    required_submission_items = _normalise_required_submission_items(data.get('required_submission_items', []))
+    structured_desk_rejection_rules = _normalise_structured_desk_rules(data.get('structured_desk_rejection_rules', []))
+    raw_retention_days = data.get('retention_days')
+    if raw_retention_days in (None, ''):
+        retention_days = None
+    else:
+        retention_days = int(raw_retention_days)
+        if retention_days < 1 or retention_days > 3650:
+            raise ValueError('retention_days must be between 1 and 3650 days, or blank to disable automatic expiry')
+    return {
+        'aims_scope': str(data.get('aims_scope', '') or '').strip(),
+        'article_types': _json_list(data.get('article_types')),
+        'accepted_methods': _json_list(data.get('accepted_methods')),
+        'quality_threshold': str(data.get('quality_threshold', '') or '').strip(),
+        'reviewer_criteria': _json_list(data.get('reviewer_criteria')),
+        'policies': data.get('policies') if isinstance(data.get('policies'), dict) else {},
+        'disclosures': _json_list(data.get('disclosures')),
+        'reporting_standards': _json_list(data.get('reporting_standards')),
+        'desk_rejection_rules': _json_list(data.get('desk_rejection_rules')),
+        'structured_desk_rejection_rules': structured_desk_rejection_rules,
+        'required_submission_items': required_submission_items,
+        'retention_days': retention_days,
+        'deadlines': data.get('deadlines') if isinstance(data.get('deadlines'), dict) else {},
+        'submission_capacity': data.get('submission_capacity') if isinstance(data.get('submission_capacity'), dict) else {},
+        'current_demand': data.get('current_demand') if isinstance(data.get('current_demand'), dict) else {},
+        'config_notes': str(data.get('config_notes', '') or '').strip(),
+    }
 
 
 def _normalise_structured_desk_rules(value):
@@ -534,7 +576,11 @@ def _readiness_payload(item):
 
 
 def _match_payload(item):
+    from .match_score import compute_match_score
+    violations = sum(1 for entry in (item.evidence or []) if isinstance(entry, dict) and entry.get('rule'))
     return {
+        'match_score': compute_match_score(item.manuscript, item.venue_config,
+                                           eligibility=item.eligibility, violations=violations),
         'id': str(item.id),
         'manuscript_id': str(item.manuscript_id),
         'venue': _venue_payload(item.venue, include_config=False),
@@ -1012,6 +1058,195 @@ def author_logout(request):
     return response
 
 
+_DUMMY_PASSWORD_HASH = None
+
+
+def _dummy_password_hash():
+    # Used so a wrong email costs the same time as a wrong password.
+    global _DUMMY_PASSWORD_HASH
+    if _DUMMY_PASSWORD_HASH is None:
+        from .auth import hash_password
+        _DUMMY_PASSWORD_HASH = hash_password('flexee-timing-equaliser')
+    return _DUMMY_PASSWORD_HASH
+
+
+@require_POST
+def author_change_password_direct(request):
+    """Change a password from the sign-in page: email + current + new + confirm.
+
+    No session is needed because the current password proves ownership. Failures
+    share the sign-in lockout per network and have their own per-email limit, and
+    the reply never says whether the email or the password was wrong.
+    """
+    from .auth import hash_password, validate_password_change, verify_password
+    data = _json_body(request)
+    email = str(data.get('email', '')).strip().lower()
+    current = str(data.get('current_password', ''))
+    new = str(data.get('new_password', ''))
+    confirm = str(data.get('confirm_password', ''))
+    if not email:
+        return JsonResponse({'detail': 'Enter the email address you use to sign in.', 'field': 'email'}, status=400)
+
+    rh = remote_hash(request)
+    window_start = timezone.now() - timedelta(minutes=int(os.getenv('AUTHOR_LOGIN_WINDOW_MINUTES', '15')))
+    network_failures = AuthorAuthEvent.objects.filter(remote_hash=rh, success=False, occurred_at__gte=window_start).count()
+    email_failures = AuthorAuthEvent.objects.filter(
+        success=False, detail__action='direct_password_change', detail__email=email, occurred_at__gte=window_start,
+    ).count()
+    if network_failures >= int(os.getenv('AUTHOR_LOGIN_MAX_FAILURES', '10')) or email_failures >= 5:
+        AuthorAuthEvent.objects.create(remote_hash=rh, success=False,
+                                       detail={'action': 'direct_password_change', 'email': email, 'reason': 'rate_limited'})
+        return JsonResponse({'detail': 'Too many attempts. Try again in a few minutes.'}, status=429)
+
+    error = validate_password_change(current, new, confirm, min_length=AUTHOR_PASSWORD_MIN_LENGTH)
+    if error:
+        return JsonResponse({'detail': error, 'field': 'new_password'}, status=400)
+
+    author = Author.objects.filter(email=email).first()
+    password_ok = verify_password(current, author.password_hash if author else _dummy_password_hash())
+    if not author or not password_ok:
+        AuthorAuthEvent.objects.create(remote_hash=rh, success=False,
+                                       detail={'action': 'direct_password_change', 'email': email, 'reason': 'invalid_credentials'})
+        if author:
+            AuditEvent.objects.create(
+                actor_email=author.email, actor_role='author', action='author.password_change_failed',
+                resource_type='author_account', resource_id=str(author.id), remote_hash=rh,
+                detail={'reason': 'wrong_current_password', 'method': 'sign_in_page'},
+            )
+        return JsonResponse({'detail': 'The email or current password is incorrect.', 'field': 'current_password'}, status=400)
+
+    author.password_hash = hash_password(new)
+    author.password_changed_at = timezone.now()
+    author.save(update_fields=['password_hash', 'password_changed_at', 'updated_at'])
+    AuthorAuthEvent.objects.create(remote_hash=rh, success=True,
+                                   detail={'action': 'direct_password_change', 'email': email, 'reason': 'ok'})
+    AuditEvent.objects.create(
+        actor_email=author.email, actor_role='author', action='author.password_changed',
+        resource_type='author_account', resource_id=str(author.id), remote_hash=rh,
+        detail={'method': 'sign_in_page'},
+    )
+    return JsonResponse({'ok': True, 'detail': 'Your password has been changed. Sign in with your new password.'})
+
+
+PASSWORD_RESET_SALT = 'flexee.author.password-reset'
+PASSWORD_RESET_MAX_AGE_SECONDS = 30 * 60
+PASSWORD_RESET_GENERIC_REPLY = (
+    'If an author account exists for that email, a password reset link has been sent. '
+    'The link expires in 30 minutes.'
+)
+
+
+def _password_fingerprint(author):
+    # Changes whenever the password changes, so a reset link works only once.
+    return hashlib.sha256(f'{author.id}:{author.password_hash}'.encode('utf-8')).hexdigest()[:24]
+
+
+def _author_portal_origin(request):
+    configured = os.getenv('AUTHOR_PORTAL_BASE_URL', '').strip().rstrip('/')
+    if configured:
+        return configured
+    from .auth import allowed_frontend_origins
+    allowed = allowed_frontend_origins()
+    origin = (request.headers.get('Origin') or '').strip().rstrip('/')
+    if origin and origin in allowed:
+        return origin
+    return sorted(allowed)[0] if allowed else ''
+
+
+@require_POST
+def author_password_reset_request(request):
+    """Email a single-use reset link. The reply never reveals whether the email exists."""
+    from django.core.signing import dumps
+    data = _json_body(request)
+    email = str(data.get('email', '')).strip().lower()
+    if not email or '@' not in email or len(email) > 254:
+        return JsonResponse({'detail': 'Enter the email address you use to sign in.'}, status=400)
+
+    rh = remote_hash(request)
+    since = timezone.now() - timedelta(minutes=int(os.getenv('AUTHOR_RESET_WINDOW_MINUTES', '60')))
+    recent = AuthorAuthEvent.objects.filter(detail__action='password_reset_request', occurred_at__gte=since)
+    per_network = recent.filter(remote_hash=rh).count()
+    per_email = recent.filter(detail__email=email).count()
+    AuthorAuthEvent.objects.create(remote_hash=rh, success=True, detail={'action': 'password_reset_request', 'email': email})
+    if per_network >= int(os.getenv('AUTHOR_RESET_MAX_PER_NETWORK', '10')) or per_email >= int(os.getenv('AUTHOR_RESET_MAX_PER_EMAIL', '3')):
+        # Same reply as success: throttling must not reveal whether the account exists.
+        return JsonResponse({'ok': True, 'detail': PASSWORD_RESET_GENERIC_REPLY})
+
+    author = Author.objects.filter(email=email).first()
+    if author:
+        token = dumps({'aid': str(author.id), 'fp': _password_fingerprint(author)}, salt=PASSWORD_RESET_SALT)
+        reset_url = f'{_author_portal_origin(request)}/author/reset-password?token={token}'
+        try:
+            _send_email(
+                to=author.email,
+                subject='Reset your Flexee author password',
+                body=(
+                    f'Hello {author.name},\n\n'
+                    'We received a request to reset the password for your Flexee author account. '
+                    'Open the link below to choose a new password:\n\n'
+                    f'{reset_url}\n\n'
+                    'This link expires in 30 minutes and can be used once. '
+                    'If you did not ask for this, you can ignore this email; your password will not change.'
+                ),
+            )
+        except Exception as exc:  # never reveal delivery problems to the requester
+            capture_exception(exc)
+        AuditEvent.objects.create(
+            actor_email=author.email, actor_role='author', action='author.password_reset_requested',
+            resource_type='author_account', resource_id=str(author.id), remote_hash=rh, detail={},
+        )
+    return JsonResponse({'ok': True, 'detail': PASSWORD_RESET_GENERIC_REPLY})
+
+
+def _author_from_reset_token(token):
+    from django.core.signing import BadSignature, SignatureExpired, loads
+    try:
+        data = loads(token or '', salt=PASSWORD_RESET_SALT, max_age=PASSWORD_RESET_MAX_AGE_SECONDS)
+        author = Author.objects.get(id=data.get('aid'))
+    except (BadSignature, SignatureExpired, Author.DoesNotExist, ValueError, TypeError):
+        return None
+    if data.get('fp') != _password_fingerprint(author):
+        return None  # already used, or the password changed since the link was sent
+    return author
+
+
+@require_http_methods(['GET', 'POST'])
+def author_password_reset_confirm(request):
+    """GET ?token= checks a link; POST {token, new_password, confirm_password} sets the password."""
+    if request.method == 'GET':
+        author = _author_from_reset_token(request.GET.get('token'))
+        if not author:
+            return JsonResponse({'valid': False, 'detail': 'This reset link is invalid or has expired. Request a new one.'}, status=400)
+        return JsonResponse({'valid': True, 'email': author.email})
+
+    from .auth import hash_password
+    data = _json_body(request)
+    author = _author_from_reset_token(str(data.get('token', '')))
+    if not author:
+        return JsonResponse({'detail': 'This reset link is invalid or has expired. Request a new one.', 'code': 'invalid_token'}, status=400)
+    new = str(data.get('new_password', ''))
+    confirm = str(data.get('confirm_password', ''))
+    if not new or not confirm:
+        return JsonResponse({'detail': 'Enter the new password twice.'}, status=400)
+    if new != confirm:
+        return JsonResponse({'detail': 'The new password and the confirmation do not match.'}, status=400)
+    if len(new) < AUTHOR_PASSWORD_MIN_LENGTH:
+        return JsonResponse({'detail': f'The new password must be at least {AUTHOR_PASSWORD_MIN_LENGTH} characters.'}, status=400)
+    if len(new) > 256:
+        return JsonResponse({'detail': 'The new password must be 256 characters or fewer.'}, status=400)
+
+    author.password_hash = hash_password(new)
+    author.password_changed_at = timezone.now()
+    # Opening the emailed link proves the author controls this address.
+    author.email_verified = True
+    author.save(update_fields=['password_hash', 'password_changed_at', 'email_verified', 'updated_at'])
+    AuditEvent.objects.create(
+        actor_email=author.email, actor_role='author', action='author.password_reset_completed',
+        resource_type='author_account', resource_id=str(author.id), remote_hash=remote_hash(request), detail={},
+    )
+    return JsonResponse({'ok': True, 'detail': 'Your password has been reset. Sign in with your new password.'})
+
+
 @require_GET
 def author_verify_email(request):
     token = request.GET.get('token')
@@ -1107,6 +1342,15 @@ def author_manuscripts_list(request):
         payload = _manuscript_payload(m)
         if sub:
             payload['latest_submission'] = _submission_payload(sub)
+        try:
+            refresh_matches_for_new_venues(m)
+        except Exception:
+            pass  # matching problems must never break the dashboard
+        matches = m.venue_matches.all()
+        payload['match_count'] = matches.count()
+        payload['new_match_count'] = (matches.filter(created_at__gt=m.matches_seen_at).count()
+                                      if m.matches_seen_at else 0)
+        payload['has_file'] = bool(m.manuscript_file) and not m.content_purged_at
         result.append(payload)
         
     return JsonResponse({'manuscripts': result})
@@ -1276,24 +1520,9 @@ def _normalise_label(value):
     return re.sub(r'[^a-z0-9]+', '_', str(value or '').strip().lower()).strip('_')
 
 
-@require_POST
-def author_generate_matches(request, manuscript_id):
-    try:
-        manuscript = Manuscript.objects.get(id=manuscript_id)
-    except Manuscript.DoesNotExist:
-        return JsonResponse({'detail': 'Manuscript not found'}, status=404)
-    access_error = _author_access_error(request, manuscript)
-    if access_error:
-        return access_error
-
-    latest_readiness = manuscript.readiness_assessments.filter(status='completed').first()
-    if not latest_readiness or latest_readiness.status != 'completed':
-        return JsonResponse({'detail': 'Complete a readiness assessment before generating venue matches'}, status=409)
-    if not latest_readiness.summary.get('ready_for_matching', False):
-        return JsonResponse({'detail': 'Resolve blocking readiness issues before generating venue matches'}, status=409)
-
-    generated = []
-    venues = list(Venue.objects.filter(active=True).select_related('organization'))
+def _generate_deterministic_matches(manuscript, latest_readiness, venues):
+    """Create or update the deterministic policy-gate match for each venue. Returns the VenueMatch rows."""
+    created = []
     venue_configs = {venue.id: _active_config(venue) for venue in venues}
     needs_text_rules = any(
         config and any(
@@ -1379,7 +1608,48 @@ def author_generate_matches(request, manuscript_id):
                 'evidence': evidence,
             },
         )
-        generated.append(_match_payload(match))
+        created.append(match)
+
+    return created
+
+
+def refresh_matches_for_new_venues(manuscript):
+    """Match a manuscript against active venues added after it was matched (admin added venues later).
+
+    Only runs for manuscripts the author has already matched and whose latest
+    readiness check allows matching; existing matches are never touched.
+    Returns the number of new matches created.
+    """
+    if not manuscript.venue_matches.exists():
+        return 0
+    latest_readiness = manuscript.readiness_assessments.filter(status='completed').first()
+    if not latest_readiness or not latest_readiness.summary.get('ready_for_matching', False):
+        return 0
+    matched = set(manuscript.venue_matches.values_list('venue_id', flat=True))
+    new_venues = list(Venue.objects.filter(active=True).exclude(id__in=matched).select_related('organization'))
+    if not new_venues:
+        return 0
+    return len(_generate_deterministic_matches(manuscript, latest_readiness, new_venues))
+
+
+@require_POST
+def author_generate_matches(request, manuscript_id):
+    try:
+        manuscript = Manuscript.objects.get(id=manuscript_id)
+    except Manuscript.DoesNotExist:
+        return JsonResponse({'detail': 'Manuscript not found'}, status=404)
+    access_error = _author_access_error(request, manuscript)
+    if access_error:
+        return access_error
+
+    latest_readiness = manuscript.readiness_assessments.filter(status='completed').first()
+    if not latest_readiness or latest_readiness.status != 'completed':
+        return JsonResponse({'detail': 'Complete a readiness assessment before generating venue matches'}, status=409)
+    if not latest_readiness.summary.get('ready_for_matching', False):
+        return JsonResponse({'detail': 'Resolve blocking readiness issues before generating venue matches'}, status=409)
+
+    venues = list(Venue.objects.filter(active=True).select_related('organization'))
+    generated = [_match_payload(match) for match in _generate_deterministic_matches(manuscript, latest_readiness, venues)]
 
     return JsonResponse({
         'matches': generated,
@@ -1423,8 +1693,55 @@ def author_matches(request, manuscript_id):
     access_error = _author_access_error(request, manuscript)
     if access_error:
         return access_error
+    try:
+        refresh_matches_for_new_venues(manuscript)
+    except Exception:
+        pass  # keep showing the existing matches
     items = manuscript.venue_matches.select_related('venue', 'venue__organization', 'venue_config').all()
-    return JsonResponse({'matches': [_match_payload(item) for item in items]})
+    seen_at = manuscript.matches_seen_at
+    payloads = []
+    for item in items:
+        payload = _match_payload(item)
+        payload['is_new'] = bool(seen_at and item.created_at > seen_at)
+        payloads.append(payload)
+    return JsonResponse({'matches': payloads, 'matches_seen_at': seen_at.isoformat() if seen_at else None})
+
+
+@require_POST
+def author_matches_seen(request, manuscript_id):
+    """The author opened their matches: anything created so far is no longer 'new'."""
+    try:
+        manuscript = Manuscript.objects.get(id=manuscript_id)
+    except Manuscript.DoesNotExist:
+        return JsonResponse({'detail': 'Manuscript not found'}, status=404)
+    access_error = _author_access_error(request, manuscript)
+    if access_error:
+        return access_error
+    manuscript.matches_seen_at = timezone.now()
+    manuscript.save(update_fields=['matches_seen_at'])
+    return JsonResponse({'matches_seen_at': manuscript.matches_seen_at.isoformat()})
+
+
+@require_GET
+def author_manuscript_file(request, manuscript_id):
+    """The author's own manuscript file, for the in-page viewer or a download.
+
+    Always served as an opaque, sandboxed attachment (the portal renders it).
+    """
+    try:
+        manuscript = Manuscript.objects.get(id=manuscript_id)
+    except Manuscript.DoesNotExist:
+        return JsonResponse({'detail': 'Manuscript not found'}, status=404)
+    access_error = _author_access_error(request, manuscript)
+    if access_error:
+        return access_error
+    if manuscript.content_purged_at or not manuscript.manuscript_file:
+        return JsonResponse({'detail': 'Manuscript content is no longer available'}, status=410)
+    try:
+        manuscript.manuscript_file.open('rb')
+        return secure_download_response(manuscript.manuscript_file, filename=manuscript.manuscript_filename)
+    except (FileNotFoundError, OSError):
+        return JsonResponse({'detail': 'Manuscript file is unavailable'}, status=404)
 
 
 @require_POST
@@ -1882,12 +2199,7 @@ def admin_venues(request):
     elif not request.editor_user.platform_superuser:
         return JsonResponse({'detail': 'organization_id is required'}, status=400)
 
-    base_slug = slugify(str(data.get('slug', '')).strip() or name)[:160] or 'venue'
-    candidate = base_slug
-    suffix = 2
-    while Venue.objects.filter(slug=candidate).exists():
-        candidate = f'{base_slug[:150]}-{suffix}'
-        suffix += 1
+    candidate = unique_venue_slug(name, data.get('slug', ''))
 
     venue = Venue.objects.create(
         organization=organization,
@@ -1930,19 +2242,7 @@ def admin_venue_config(request, venue_id):
 
     data = _json_body(request)
     try:
-        required_submission_items = _normalise_required_submission_items(
-            data.get('required_submission_items', [])
-        )
-        structured_desk_rejection_rules = _normalise_structured_desk_rules(
-            data.get('structured_desk_rejection_rules', [])
-        )
-        raw_retention_days = data.get('retention_days')
-        if raw_retention_days in (None, ''):
-            retention_days = None
-        else:
-            retention_days = int(raw_retention_days)
-            if retention_days < 1 or retention_days > 3650:
-                raise ValueError('retention_days must be between 1 and 3650 days, or blank to disable automatic expiry')
+        config_fields = build_venue_config_fields(data)
     except (TypeError, ValueError) as exc:
         return JsonResponse({'detail': str(exc)}, status=400)
 
@@ -1954,22 +2254,7 @@ def admin_venue_config(request, venue_id):
             venue=venue,
             version=next_version,
             active=True,
-            aims_scope=str(data.get('aims_scope', '')).strip(),
-            article_types=_json_list(data.get('article_types')),
-            accepted_methods=_json_list(data.get('accepted_methods')),
-            quality_threshold=str(data.get('quality_threshold', '')).strip(),
-            reviewer_criteria=_json_list(data.get('reviewer_criteria')),
-            policies=data.get('policies') if isinstance(data.get('policies'), dict) else {},
-            disclosures=_json_list(data.get('disclosures')),
-            reporting_standards=_json_list(data.get('reporting_standards')),
-            desk_rejection_rules=_json_list(data.get('desk_rejection_rules')),
-            structured_desk_rejection_rules=structured_desk_rejection_rules,
-            required_submission_items=required_submission_items,
-            retention_days=retention_days,
-            deadlines=data.get('deadlines') if isinstance(data.get('deadlines'), dict) else {},
-            submission_capacity=data.get('submission_capacity') if isinstance(data.get('submission_capacity'), dict) else {},
-            current_demand=data.get('current_demand') if isinstance(data.get('current_demand'), dict) else {},
-            config_notes=str(data.get('config_notes', '')).strip(),
+            **config_fields,
         )
         venue.agent_configs.filter(active=True).exclude(id=config.id).update(active=False)
         record_audit_event(

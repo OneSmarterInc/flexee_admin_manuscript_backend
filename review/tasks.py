@@ -9,9 +9,7 @@ from .models import AuditEvent, ReviewJob, Manuscript, VenueSubmission, Submissi
 from .services.author_agents import (
     run_semantic_readiness,
     run_semantic_matching,
-    run_venue_assessment,
-    AgentInputError,
-    AgentExecutionError
+    run_venue_assessment
 )
 from .services.review_engine import run_review, extract_text, word_count as wc_fn
 from .services.email_service import send_review_emails
@@ -474,3 +472,30 @@ def sweep_retention_task():
         f'{purged_manuscripts} fully expired manuscript payload(s).'
     )
 
+
+
+@monitor_background_task('venue_discovery')
+def run_venue_discovery_task(run_id=None, schedule_tz=None):
+    """Daily venue discovery (also used by "Run discovery now").
+
+    The schedule calls it without a run id; manual runs pass the run they created.
+    """
+    from .models import VenueDiscoveryRun
+    from .services.venue_discovery import run_discovery, start_run
+
+    if run_id:
+        run = VenueDiscoveryRun.objects.filter(id=run_id).first()
+        if run is None or run.status != 'queued':
+            # Only a queued run may start. A run already 'processing' means the worker is re-delivering
+            # a job it timed out or lost on restart; resuming it would make the run loop forever.
+            if run is not None and run.status == 'processing':
+                VenueDiscoveryRun.objects.filter(id=run.id, status='processing').update(
+                    status='failed', completed_at=timezone.now(),
+                    summary='Interrupted (worker restarted or time limit reached). Results found before that were kept.')
+            return None
+    else:
+        run, created = start_run(trigger='schedule')
+        if not created:
+            return str(run.id)  # a run is already in progress
+    run_discovery(run)
+    return str(run.id)

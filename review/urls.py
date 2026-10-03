@@ -1,5 +1,5 @@
 from django.urls import path
-from . import views
+from . import views, discovery_api
 from . import author_api
 from . import editor_api
 from .api_summary import admin_submission_api_summary
@@ -18,6 +18,9 @@ urlpatterns = [
     path('author/login/', author_api.author_login),
     path('author/logout/', author_api.author_logout),
     path('author/change-password/', author_api.author_change_password),
+    path('author/password-change/', author_api.author_change_password_direct),
+    path('author/password-reset/', author_api.author_password_reset_request),
+    path('author/password-reset/confirm/', author_api.author_password_reset_confirm),
     path('author/session/', author_api.author_session),
     path('author/jobs/<int:job_id>/', author_api.author_job_status),
     path('author/manuscripts/list/', author_api.author_manuscripts_list),
@@ -29,6 +32,8 @@ urlpatterns = [
     path('author/manuscripts/<uuid:manuscript_id>/readiness/semantic/', author_api.author_run_semantic_readiness),
     path('author/manuscripts/<uuid:manuscript_id>/matches/', author_api.author_matches),
     path('author/manuscripts/<uuid:manuscript_id>/matches/run/', author_api.author_generate_matches),
+    path('author/manuscripts/<uuid:manuscript_id>/matches/seen/', author_api.author_matches_seen),
+    path('author/manuscripts/<uuid:manuscript_id>/file/', author_api.author_manuscript_file),
     path('author/manuscripts/<uuid:manuscript_id>/matches/semantic/', author_api.author_run_semantic_matches),
     path('author/manuscripts/<uuid:manuscript_id>/submissions/', author_api.author_create_submission),
     path('author/venues/', author_api.public_venues),
@@ -71,6 +76,14 @@ urlpatterns = [
     path('admin/venue-submissions/<uuid:submission_id>/start-review/', editor_api.admin_start_venue_review),
     path('admin/venue-submissions/<uuid:submission_id>/decision/', editor_api.admin_venue_submission_decision),
     path('admin/venue-submissions/<uuid:submission_id>/download/', editor_api.admin_venue_submission_download),
+    path('admin/venue-discovery/', discovery_api.discovery_list),
+    path('admin/venue-discovery/run/', discovery_api.discovery_run_now),
+    path('admin/venue-discovery/stop/', discovery_api.discovery_stop_run),
+    path('admin/venue-discovery/schedule/', discovery_api.discovery_schedule),
+    path('admin/venue-discovery/<uuid:discovered_id>/', discovery_api.discovery_detail),
+    path('admin/venue-discovery/<uuid:discovered_id>/add-to-venue-agent/', discovery_api.discovery_add_to_venue_agent),
+    path('admin/venue-discovery/<uuid:discovered_id>/ignore/', discovery_api.discovery_ignore),
+    path('admin/venue-discovery/<uuid:discovered_id>/restore/', discovery_api.discovery_restore),
     path('admin/venue-submissions/<uuid:submission_id>/view/', editor_api.admin_venue_submission_view),
     path('admin/venue-submissions/<uuid:submission_id>/requirements/<str:requirement_key>/download/', editor_api.admin_submission_requirement_download),
 

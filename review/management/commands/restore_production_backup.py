@@ -11,7 +11,6 @@ from review.backup_utils import (
     database_config_from_url,
     database_name,
     database_vendor,
-    read_manifest,
     restore_postgres,
     smoke_test_postgres,
     stage_media_restore,

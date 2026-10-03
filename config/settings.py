@@ -85,6 +85,9 @@ Q_CLUSTER = {
     'workers': int(os.getenv('FLEXEE_Q_WORKERS', '1')),
     'recycle': 500,
     'timeout': 1800,  # 30 mins
+    # If the worker was offline at a scheduled time, run once at the next slot instead of
+    # replaying every missed run back to back (e.g. several daily discoveries in a row).
+    'catch_up': False,
     'retry': 1860,
     'compress': True,
     'save_limit': 250,
@@ -146,6 +149,11 @@ if PRODUCTION:
     if not SECURE_SSL_REDIRECT:
         raise RuntimeError('SECURE_SSL_REDIRECT must remain enabled in production')
     SESSION_COOKIE_SECURE = True
+    # Cross-site frontends (for example *.vercel.app calling another domain)
+    # need COOKIE_SAMESITE=None. Same-site deployments keep Django's default.
+    if os.getenv('COOKIE_SAMESITE', 'Strict').strip().capitalize() == 'None':
+        SESSION_COOKIE_SAMESITE = 'None'
+        CSRF_COOKIE_SAMESITE = 'None'
     CSRF_COOKIE_SECURE = True
     SECURE_HSTS_SECONDS = int(os.getenv('SECURE_HSTS_SECONDS', '31536000'))
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True

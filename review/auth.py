@@ -20,6 +20,21 @@ def _secure_cookie_required():
     return os.getenv('COOKIE_SECURE', 'false').lower() in {'1', 'true', 'yes', 'on'}
 
 
+def cookie_samesite(secure):
+    """SameSite value for session cookies.
+
+    COOKIE_SAMESITE may be Strict (default), Lax or None. Browsers reject
+    SameSite=None cookies that are not Secure, so None falls back to Lax on
+    plain HTTP (local development) instead of silently breaking sign-in.
+    """
+    value = os.getenv('COOKIE_SAMESITE', 'Strict').strip().capitalize()
+    if value not in {'Strict', 'Lax', 'None'}:
+        value = 'Strict'
+    if value == 'None' and not secure:
+        return 'Lax'
+    return value
+
+
 def allowed_frontend_origins():
     """Return browser origins accepted by both CORS and unsafe admin checks.
 
@@ -164,13 +179,13 @@ def set_session_cookie(response, token, max_age):
         max_age=max_age,
         httponly=True,
         secure=secure,
-        samesite='Strict',
+        samesite=cookie_samesite(secure),
         path='/',
     )
 
 
 def clear_session_cookie(response):
-    response.delete_cookie(COOKIE_NAME, path='/', samesite='Strict')
+    response.delete_cookie(COOKIE_NAME, path='/', samesite=cookie_samesite(_secure_cookie_required()))
 
 
 def require_admin(view):
@@ -252,19 +267,19 @@ def read_author_session(request):
         return None
 
 def set_author_session_cookie(response, token, max_age):
-    secure = os.getenv('COOKIE_SECURE', 'false').lower() in {'1', 'true', 'yes', 'on'}
+    secure = _secure_cookie_required()
     response.set_cookie(
         AUTHOR_COOKIE_NAME,
         token,
         max_age=max_age,
         httponly=True,
         secure=secure,
-        samesite='Strict',
+        samesite=cookie_samesite(secure),
         path='/',
     )
 
 def clear_author_session_cookie(response):
-    response.delete_cookie(AUTHOR_COOKIE_NAME, path='/', samesite='Strict')
+    response.delete_cookie(AUTHOR_COOKIE_NAME, path='/', samesite=cookie_samesite(_secure_cookie_required()))
 
 def require_author(view):
     @wraps(view)

@@ -127,10 +127,10 @@ def send_review_emails(submission, result):
     body = (
         f"Dear {submission.author_name},\n\n"
         f"Thank you for submitting \"{submission.title}\" to Flexee.\n\n"
-        f"We have successfully received your submission and it is currently under editorial review. Our team will evaluate your work based on our review guidelines and overall suitability.\n\n"
-        f"We will update you once the review process is complete.\n\n"
-        f"Thank you for sharing your work with us.\n\n"
-        f"Best regards,\nFlexee Editorial Team\neditor@flexee.org"
+        "We have successfully received your submission and it is currently under editorial review. Our team will evaluate your work based on our review guidelines and overall suitability.\n\n"
+        "We will update you once the review process is complete.\n\n"
+        "Thank you for sharing your work with us.\n\n"
+        "Best regards,\nFlexee Editorial Team\neditor@flexee.org"
     )
 
     if author_target:
@@ -164,13 +164,13 @@ def send_acceptance_email(submission, message):
     body = (
         f"Dear {submission.author_name},\n\n"
         f"We are pleased to inform you that your submission \"{submission.title}\" has been approved by the Flexee editorial team.\n\n"
-        f"Your work has successfully passed our initial review process, and we will proceed with the next steps. Our team will contact you with further details.\n\n"
+        "Your work has successfully passed our initial review process, and we will proceed with the next steps. Our team will contact you with further details.\n\n"
     )
     if message:
         body += f"Message from admin:\n{message}\n\n"
     body += (
-        f"Thank you for sharing your work with Flexee. We look forward to working with you.\n\n"
-        f"Best regards,\nFlexee Editorial Team\neditor@flexee.org"
+        "Thank you for sharing your work with Flexee. We look forward to working with you.\n\n"
+        "Best regards,\nFlexee Editorial Team\neditor@flexee.org"
     )
     
     smtp_settings = SMTPSettings.objects.first()
@@ -197,11 +197,11 @@ def send_rejection_email(submission, reason):
     body = (
         f"Dear {submission.author_name},\n\n"
         f"Thank you for submitting \"{submission.title}\" to Flexee and for giving us the opportunity to review your work.\n\n"
-        f"After careful consideration, we have decided not to proceed with your submission at this stage.\n\n"
+        "After careful consideration, we have decided not to proceed with your submission at this stage.\n\n"
         f"Editorial Feedback:\n{reason}\n\n"
-        f"We appreciate the time and effort invested in your submission and encourage you to continue developing your work.\n\n"
-        f"Thank you for your interest in Flexee.\n\n"
-        f"Best regards,\nFlexee Editorial Team\neditor@flexee.org"
+        "We appreciate the time and effort invested in your submission and encourage you to continue developing your work.\n\n"
+        "Thank you for your interest in Flexee.\n\n"
+        "Best regards,\nFlexee Editorial Team\neditor@flexee.org"
     )
     
     smtp_settings = SMTPSettings.objects.first()

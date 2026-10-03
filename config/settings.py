@@ -85,6 +85,9 @@ Q_CLUSTER = {
     'workers': int(os.getenv('FLEXEE_Q_WORKERS', '1')),
     'recycle': 500,
     'timeout': 1800,  # 30 mins
+    # If the worker was offline at a scheduled time, run once at the next slot instead of
+    # replaying every missed run back to back (e.g. several daily discoveries in a row).
+    'catch_up': False,
     'retry': 1860,
     'compress': True,
     'save_limit': 250,

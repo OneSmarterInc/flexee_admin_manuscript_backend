@@ -17,7 +17,7 @@ from .auth import require_platform_superuser
 from .models import DiscoveredVenue, Organization, Venue, VenueAgentConfig, VenueDiscoveryRun
 from .services.venue_discovery import (
     BLOCKED_NOTE,
-    DiscoveryConfig, TYPE_LABELS, canonical_host, normalize_name, registrable_domain, start_run,
+    DiscoveryConfig, TYPE_LABELS, canonical_host, registrable_domain, start_run,
 )
 
 LIST_LIMIT = 300

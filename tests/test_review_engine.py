@@ -23,7 +23,7 @@ class EngineTests(unittest.TestCase):
             200,
             json={"message": {"role": "assistant", "content": json.dumps({"ok": True})}},
         )
-        with patch("review.services.local_llm.httpx.post", return_value=response) as post:
+        with patch("httpx.post", return_value=response) as post:
             from review.services.local_llm import ollama_chat_json
             model, content = ollama_chat_json("Return JSON", max_tokens=123)
         self.assertEqual(model, "qwen2.5:0.5b-instruct")
@@ -41,7 +41,7 @@ class EngineTests(unittest.TestCase):
             200,
             json={"message": {"role": "assistant", "content": json.dumps({"summary": "A concise chapter summary."})}},
         )
-        with patch("review.services.local_llm.httpx.post", return_value=response) as post:
+        with patch("httpx.post", return_value=response) as post:
             from review.views import _generate_chapter_summary
             summary = _generate_chapter_summary("chapter text " * 5000)
         self.assertIn("Editor Summary", summary)
@@ -82,7 +82,7 @@ class EngineTests(unittest.TestCase):
             },
         )
         with patch.dict(os.environ, {'AI_PROVIDER': 'ollama'}), \
-             patch("review.services.local_llm.httpx.post", return_value=response) as post:
+             patch("httpx.post", return_value=response) as post:
             summary, letter = _repair_missing_outputs(
                 {"decision": DECISION_REFER},
                 DECISION_REFER,
@@ -125,7 +125,7 @@ class EngineTests(unittest.TestCase):
     def test_ollama_client_reports_unavailable_server(self):
         from review.services.local_llm import ollama_chat_json
         with patch(
-            "review.services.local_llm.httpx.post",
+            "httpx.post",
             side_effect=httpx.ConnectError("connection refused"),
         ):
             with self.assertRaisesRegex(RuntimeError, "Could not connect to Ollama"):

@@ -891,21 +891,22 @@ def extract_with_local_ollama(pages, config):
     from ..ai_usage import complete_ai_call
     local = local_ai_settings()
     prompt = build_local_prompt(pages, local)
+    body = {
+        'model': local['model'],
+        'messages': [{'role': 'user', 'content': prompt}],
+        'stream': False,
+        'format': 'json',
+        'keep_alive': '5m',
+        'options': {'temperature': 0.1, 'num_ctx': local['num_ctx'], 'num_predict': local['num_predict']},
+    }
+    # Thinking models (Qwen3, DeepSeek-R1) skip their reasoning step: much faster, same JSON.
+    if not _env_bool('VENUE_DISCOVERY_OLLAMA_THINK', False):
+        body['think'] = False
     try:
-        response = httpx.post(
-            f"{local['base_url']}/api/chat",
-            json={
-                'model': local['model'],
-                'messages': [{'role': 'user', 'content': prompt}],
-                'stream': False,
-                'format': 'json',
-                'keep_alive': '5m',
-                # Thinking models (Qwen3, DeepSeek-R1) skip their reasoning step: much faster, same JSON.
-                **({} if _env_bool('VENUE_DISCOVERY_OLLAMA_THINK', False) else {'think': False}),
-                'options': {'temperature': 0.1, 'num_ctx': local['num_ctx'], 'num_predict': local['num_predict']},
-            },
-            timeout=local['timeout'],
-        )
+        response = httpx.post(f"{local['base_url']}/api/chat", json=body, timeout=local['timeout'])
+        if response.status_code == 400 and 'think' in body and 'think' in (response.text or '').lower():
+            body.pop('think')  # this model has no thinking option: ask again without it
+            response = httpx.post(f"{local['base_url']}/api/chat", json=body, timeout=local['timeout'])
     except httpx.HTTPError as exc:
         raise DiscoveryModelUnavailable(
             f"Could not reach Ollama at {local['base_url']}. Start Ollama and run: ollama pull {local['model']}") from exc

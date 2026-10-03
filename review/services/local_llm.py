@@ -189,13 +189,24 @@ def ollama_chat_json(
         },
     }
 
-    try:
-        response = httpx.post(
+    # Thinking models (Qwen3, DeepSeek-R1...) skip their reasoning step unless OLLAMA_THINK=true:
+    # much faster, same JSON answer. Models without the option get the request without it.
+    if os.getenv("OLLAMA_THINK", "false").strip().lower() not in {"1", "true", "yes", "on"}:
+        payload["think"] = False
+
+    def _post(body):
+        return httpx.post(
             f"{base_url}/api/chat",
             headers={"content-type": "application/json"},
-            json=payload,
+            json=body,
             timeout=request_timeout,
         )
+
+    try:
+        response = _post(payload)
+        if response.status_code == 400 and "think" in payload and "think" in response.text.lower():
+            payload = {key: value for key, value in payload.items() if key != "think"}
+            response = _post(payload)
     except httpx.RequestError as exc:
         raise RuntimeError(
             f"Could not connect to Ollama at {base_url}. "

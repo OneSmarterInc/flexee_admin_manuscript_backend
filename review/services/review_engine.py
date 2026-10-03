@@ -6,7 +6,7 @@ from docx import Document
 from pypdf import PdfReader
 
 from .ai_provider import ai_chat_json
-from .local_llm import assert_prompt_fits_context, DEFAULT_OLLAMA_NUM_CTX, DEFAULT_OLLAMA_NUM_PREDICT
+from .local_llm import assert_prompt_fits_context, DEFAULT_OLLAMA_NUM_CTX
 
 BOOK_STRUCTURE = {
     'chapters_required': 12,

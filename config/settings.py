@@ -15,7 +15,12 @@ def _load_env(path):
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
-_load_env(BASE_DIR / '.env')
+# Tests must not depend on a developer's local .env (AI providers, discovery sources, keys):
+# with a local .env some tests called real services and failed or hung.
+import sys
+TESTING = 'pytest' in sys.modules or 'test' in sys.argv
+if not TESTING:
+    _load_env(BASE_DIR / '.env')
 
 ENVIRONMENT = os.getenv('DJANGO_ENV', 'development').lower()
 PRODUCTION = ENVIRONMENT == 'production'
@@ -120,9 +125,6 @@ ROOT_URLCONF = 'config.urls'
 TEMPLATES = []
 WSGI_APPLICATION = 'config.wsgi.application'
 ASGI_APPLICATION = 'config.asgi.application'
-
-import sys
-TESTING = 'pytest' in sys.modules or 'test' in sys.argv
 
 if os.getenv('DATABASE_URL') and not TESTING:
     import dj_database_url

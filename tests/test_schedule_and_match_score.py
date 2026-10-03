@@ -182,3 +182,11 @@ def test_django_q_scheduler_queues_discovery_at_the_set_time_and_keeps_the_local
     schedule.refresh_from_db()
     assert schedule.next_run > timezone.now()  # moved on to the next day
     assert timedelta(hours=23) < schedule.next_run - due < timedelta(hours=25)
+
+
+@pytest.mark.django_db
+def test_type_not_accepted_caps_the_score_even_with_perfect_scope():
+    from review.match_score import compute_match_score
+    config = make_config(article_types=['Book manuscript'])
+    result = compute_match_score(make_manuscript(), config)
+    assert result['breakdown']['type'] == 0 and result['score'] <= 50 and result['label'] != 'Strong fit'

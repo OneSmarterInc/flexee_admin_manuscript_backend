@@ -309,6 +309,8 @@ class Manuscript(models.Model):
     access_token_hash = models.CharField(max_length=64, blank=True, db_index=True)
     parsed_profile = models.JSONField(default=dict, blank=True)
     content_purged_at = models.DateTimeField(null=True, blank=True)
+    # When the author last opened their venue matches; matches created later are shown as new.
+    matches_seen_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-created_at']

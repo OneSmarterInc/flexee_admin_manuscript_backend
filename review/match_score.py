@@ -104,6 +104,8 @@ def compute_match_score(manuscript, config, *, eligibility='needs_changes', viol
     requirements = round(requirements * fit_factor)
     method_points = round(method_points * fit_factor)
     score = scope + type_points + requirements + method_points
+    if accepted and type_points == 0:
+        score = min(score, 50)  # the venue does not take this kind of manuscript: never a strong fit
     if eligibility == 'ineligible':
         score = min(score, 30)  # a failed desk rule caps the score
     score = max(0, min(100, score))

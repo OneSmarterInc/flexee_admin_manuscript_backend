@@ -57,6 +57,7 @@ from .monitoring import capture_exception
 from .storage_security import (
     UploadSecurityError,
     sanitize_original_filename,
+    secure_download_response,
     validate_manuscript_filename,
     validate_manuscript_zip,
 )
@@ -1346,6 +1347,15 @@ def author_manuscripts_list(request):
         payload = _manuscript_payload(m)
         if sub:
             payload['latest_submission'] = _submission_payload(sub)
+        try:
+            refresh_matches_for_new_venues(m)
+        except Exception:
+            pass  # matching problems must never break the dashboard
+        matches = m.venue_matches.all()
+        payload['match_count'] = matches.count()
+        payload['new_match_count'] = (matches.filter(created_at__gt=m.matches_seen_at).count()
+                                      if m.matches_seen_at else 0)
+        payload['has_file'] = bool(m.manuscript_file) and not m.content_purged_at
         result.append(payload)
         
     return JsonResponse({'manuscripts': result})
@@ -1515,24 +1525,9 @@ def _normalise_label(value):
     return re.sub(r'[^a-z0-9]+', '_', str(value or '').strip().lower()).strip('_')
 
 
-@require_POST
-def author_generate_matches(request, manuscript_id):
-    try:
-        manuscript = Manuscript.objects.get(id=manuscript_id)
-    except Manuscript.DoesNotExist:
-        return JsonResponse({'detail': 'Manuscript not found'}, status=404)
-    access_error = _author_access_error(request, manuscript)
-    if access_error:
-        return access_error
-
-    latest_readiness = manuscript.readiness_assessments.filter(status='completed').first()
-    if not latest_readiness or latest_readiness.status != 'completed':
-        return JsonResponse({'detail': 'Complete a readiness assessment before generating venue matches'}, status=409)
-    if not latest_readiness.summary.get('ready_for_matching', False):
-        return JsonResponse({'detail': 'Resolve blocking readiness issues before generating venue matches'}, status=409)
-
-    generated = []
-    venues = list(Venue.objects.filter(active=True).select_related('organization'))
+def _generate_deterministic_matches(manuscript, latest_readiness, venues):
+    """Create or update the deterministic policy-gate match for each venue. Returns the VenueMatch rows."""
+    created = []
     venue_configs = {venue.id: _active_config(venue) for venue in venues}
     needs_text_rules = any(
         config and any(
@@ -1618,7 +1613,48 @@ def author_generate_matches(request, manuscript_id):
                 'evidence': evidence,
             },
         )
-        generated.append(_match_payload(match))
+        created.append(match)
+
+    return created
+
+
+def refresh_matches_for_new_venues(manuscript):
+    """Match a manuscript against active venues added after it was matched (admin added venues later).
+
+    Only runs for manuscripts the author has already matched and whose latest
+    readiness check allows matching; existing matches are never touched.
+    Returns the number of new matches created.
+    """
+    if not manuscript.venue_matches.exists():
+        return 0
+    latest_readiness = manuscript.readiness_assessments.filter(status='completed').first()
+    if not latest_readiness or not latest_readiness.summary.get('ready_for_matching', False):
+        return 0
+    matched = set(manuscript.venue_matches.values_list('venue_id', flat=True))
+    new_venues = list(Venue.objects.filter(active=True).exclude(id__in=matched).select_related('organization'))
+    if not new_venues:
+        return 0
+    return len(_generate_deterministic_matches(manuscript, latest_readiness, new_venues))
+
+
+@require_POST
+def author_generate_matches(request, manuscript_id):
+    try:
+        manuscript = Manuscript.objects.get(id=manuscript_id)
+    except Manuscript.DoesNotExist:
+        return JsonResponse({'detail': 'Manuscript not found'}, status=404)
+    access_error = _author_access_error(request, manuscript)
+    if access_error:
+        return access_error
+
+    latest_readiness = manuscript.readiness_assessments.filter(status='completed').first()
+    if not latest_readiness or latest_readiness.status != 'completed':
+        return JsonResponse({'detail': 'Complete a readiness assessment before generating venue matches'}, status=409)
+    if not latest_readiness.summary.get('ready_for_matching', False):
+        return JsonResponse({'detail': 'Resolve blocking readiness issues before generating venue matches'}, status=409)
+
+    venues = list(Venue.objects.filter(active=True).select_related('organization'))
+    generated = [_match_payload(match) for match in _generate_deterministic_matches(manuscript, latest_readiness, venues)]
 
     return JsonResponse({
         'matches': generated,
@@ -1662,8 +1698,55 @@ def author_matches(request, manuscript_id):
     access_error = _author_access_error(request, manuscript)
     if access_error:
         return access_error
+    try:
+        refresh_matches_for_new_venues(manuscript)
+    except Exception:
+        pass  # keep showing the existing matches
     items = manuscript.venue_matches.select_related('venue', 'venue__organization', 'venue_config').all()
-    return JsonResponse({'matches': [_match_payload(item) for item in items]})
+    seen_at = manuscript.matches_seen_at
+    payloads = []
+    for item in items:
+        payload = _match_payload(item)
+        payload['is_new'] = bool(seen_at and item.created_at > seen_at)
+        payloads.append(payload)
+    return JsonResponse({'matches': payloads, 'matches_seen_at': seen_at.isoformat() if seen_at else None})
+
+
+@require_POST
+def author_matches_seen(request, manuscript_id):
+    """The author opened their matches: anything created so far is no longer 'new'."""
+    try:
+        manuscript = Manuscript.objects.get(id=manuscript_id)
+    except Manuscript.DoesNotExist:
+        return JsonResponse({'detail': 'Manuscript not found'}, status=404)
+    access_error = _author_access_error(request, manuscript)
+    if access_error:
+        return access_error
+    manuscript.matches_seen_at = timezone.now()
+    manuscript.save(update_fields=['matches_seen_at'])
+    return JsonResponse({'matches_seen_at': manuscript.matches_seen_at.isoformat()})
+
+
+@require_GET
+def author_manuscript_file(request, manuscript_id):
+    """The author's own manuscript file, for the in-page viewer or a download.
+
+    Always served as an opaque, sandboxed attachment (the portal renders it).
+    """
+    try:
+        manuscript = Manuscript.objects.get(id=manuscript_id)
+    except Manuscript.DoesNotExist:
+        return JsonResponse({'detail': 'Manuscript not found'}, status=404)
+    access_error = _author_access_error(request, manuscript)
+    if access_error:
+        return access_error
+    if manuscript.content_purged_at or not manuscript.manuscript_file:
+        return JsonResponse({'detail': 'Manuscript content is no longer available'}, status=410)
+    try:
+        manuscript.manuscript_file.open('rb')
+        return secure_download_response(manuscript.manuscript_file, filename=manuscript.manuscript_filename)
+    except (FileNotFoundError, OSError):
+        return JsonResponse({'detail': 'Manuscript file is unavailable'}, status=404)
 
 
 @require_POST

@@ -32,6 +32,8 @@ urlpatterns = [
     path('author/manuscripts/<uuid:manuscript_id>/readiness/semantic/', author_api.author_run_semantic_readiness),
     path('author/manuscripts/<uuid:manuscript_id>/matches/', author_api.author_matches),
     path('author/manuscripts/<uuid:manuscript_id>/matches/run/', author_api.author_generate_matches),
+    path('author/manuscripts/<uuid:manuscript_id>/matches/seen/', author_api.author_matches_seen),
+    path('author/manuscripts/<uuid:manuscript_id>/file/', author_api.author_manuscript_file),
     path('author/manuscripts/<uuid:manuscript_id>/matches/semantic/', author_api.author_run_semantic_matches),
     path('author/manuscripts/<uuid:manuscript_id>/submissions/', author_api.author_create_submission),
     path('author/venues/', author_api.public_venues),

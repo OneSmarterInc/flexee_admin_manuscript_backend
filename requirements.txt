@@ -7,5 +7,5 @@ psycopg2-binary==2.9.10
 dj-database-url==3.0.1
 django-q2==1.11.1
 sentry-sdk[django]==2.70.0
-anthropic==1.8.0
+anthropic==1.11.0
 redis>=5.0,<8.0

@@ -11,6 +11,7 @@ from .index_schedule import get_index_schedule, set_index_schedule
 from .models import BlockedPublisher, IndexedVenue, VenueIndexRun
 from .services.index_screening import CRITERIA, FLAG_TO_CRITERION, DecisionError, decide, screen_record, blocked_publisher_names
 from .services.index_rules import rules_candidates, rules_field, rules_summary
+from .services.rules_escalation import escalation_stats
 from .services.venue_discovery import normalize_name
 from .services.venue_index import PROFILES, IndexConfig, coverage_counts, start_index_run
 
@@ -97,6 +98,10 @@ def record_payload(item, detail=False):
             'publisher_blocked': bool(item.publisher) and BlockedPublisher.objects.filter(
                 normalized_name=normalize_name(item.publisher)).exists(),
             'rules_read': rules_summary(item.discovered),
+            'rules_attempts': [{
+                'attempt': a.attempt, 'stage': a.stage, 'provider': a.provider, 'model': a.model, 'outcome': a.outcome,
+                'reason': a.reason, 'missing_fields': a.missing_fields, 'created_at': _iso(a.created_at),
+            } for a in item.rules_attempts.order_by('-created_at', '-attempt')[:9]][::-1],
             'decisions': [{
                 'decision': d.decision, 'criteria': d.criteria, 'evidence_urls': d.evidence_urls, 'note': d.note,
                 'decided_by': d.decided_by, 'decided_at': _iso(d.decided_at),
@@ -134,6 +139,8 @@ def run_payload(run):
         'rules_attempted': run.rules_attempted,
         'rules_ready': run.rules_ready,
         'rules_failed': run.rules_failed,
+        'rules_retried': run.rules_retried,
+        'rules_escalated': run.rules_escalated,
         'flagged_missing': run.flagged_missing,
         'pending_after': run.pending_after,
         'errors': (run.errors or [])[-10:],
@@ -182,6 +189,7 @@ def index_list(request):
         'schedule': get_index_schedule(),
         'criteria': CRITERIA,
         'rules_field': {'key': rules_key, 'label': rules_label, 'due': rules_candidates(config.profile).count()},
+        'escalation': escalation_stats(),
         'blocked_publishers': [{'id': str(b.id), 'name': b.name, 'added_by': b.added_by,
                                 'created_at': _iso(b.created_at)} for b in BlockedPublisher.objects.all()[:200]],
     })

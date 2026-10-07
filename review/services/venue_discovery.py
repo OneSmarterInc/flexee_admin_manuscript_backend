@@ -886,11 +886,18 @@ def build_local_prompt(pages, local):
     )
 
 
-def extract_with_local_ollama(pages, config):
-    """Rule extraction with a local Ollama model (free). Recorded in AI usage at zero cost."""
+def extract_with_local_ollama(pages, config, *, model=None, feedback='', operation='venue_discovery_extraction'):
+    """Rule extraction with a local Ollama model (free). Recorded in AI usage at zero cost.
+
+    `feedback` (a retry after validation failed) tells the model what was wrong the first time."""
     from ..ai_usage import complete_ai_call
     local = local_ai_settings()
+    if model:
+        local['model'] = model
     prompt = build_local_prompt(pages, local)
+    if feedback:
+        prompt = f'{feedback}\n\n{prompt}'
+
     body = {
         'model': local['model'],
         'messages': [{'role': 'user', 'content': prompt}],
@@ -920,7 +927,7 @@ def extract_with_local_ollama(pages, config):
     except ValueError as exc:
         raise DiscoveryExtractionError('Ollama returned an unreadable response.') from exc
     try:
-        complete_ai_call(None, provider='ollama', model=local['model'], operation='venue_discovery_extraction',
+        complete_ai_call(None, provider='ollama', model=local['model'], operation=operation,
                          input_tokens=int(payload.get('prompt_eval_count') or len(prompt) // 4),
                          output_tokens=int(payload.get('eval_count') or len(content) // 4),
                          usage_estimated=not payload.get('prompt_eval_count'))
@@ -930,11 +937,13 @@ def extract_with_local_ollama(pages, config):
     return parse_ai_json(content)
 
 
-def extract_with_ai(pages, config):
+def extract_with_ai(pages, config, *, operation='venue_discovery_extraction', feedback='', model=None):
     if config.ai_provider == 'ollama':
-        return extract_with_local_ollama(pages, config)
+        return extract_with_local_ollama(pages, config, model=model, feedback=feedback, operation=operation)
     from .ai_provider import ai_chat_json
     prompt = build_extraction_prompt(pages, config)
+    if feedback:
+        prompt = f'{feedback}\n\n{prompt}'
     last_error = None
     for _attempt in range(2):
         try:
@@ -943,7 +952,7 @@ def extract_with_ai(pages, config):
                 max_tokens=2200,
                 timeout=180,
                 force_provider=config.ai_provider or None,
-                operation='venue_discovery_extraction',
+                operation=operation,
             )
             return parse_ai_json(raw)
         except DiscoveryExtractionError as exc:
@@ -1634,11 +1643,15 @@ def process_candidate(entry_url, fetcher, config, *, extractor=None, hints=None)
         if not hints.get('name'):
             raise
         raw = {}  # the model failed, but the directory still tells us which journal this is
+    return upsert_candidate(candidate_from_raw(raw, pages, hints), fingerprint)
+
+
+def candidate_from_raw(raw, pages, hints=None):
+    """Raw model output -> validated candidate: hints, page signals, quote checks, calls for papers."""
     merged = _apply_hints(raw, hints) if hints else raw
     merged = apply_page_signals(merged, pages)
     candidate = validate_extraction(merged, pages)
-    candidate = apply_calls_for_papers(candidate, pages)
-    return upsert_candidate(candidate, fingerprint)
+    return apply_calls_for_papers(candidate, pages)
 
 
 def _entry_key(url):

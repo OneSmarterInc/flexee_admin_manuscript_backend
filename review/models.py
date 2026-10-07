@@ -893,6 +893,8 @@ class VenueIndexRun(models.Model):
     rules_attempted = models.PositiveIntegerField(default=0)
     rules_ready = models.PositiveIntegerField(default=0)
     rules_failed = models.PositiveIntegerField(default=0)
+    rules_retried = models.PositiveIntegerField(default=0)     # step 6: a second local attempt was needed
+    rules_escalated = models.PositiveIntegerField(default=0)   # step 6: sent to the cloud model
     catalogue_complete = models.BooleanField(default=False)
     # When VENUE_INDEX_MAX_RECORDS was reached: works count of the smallest journal kept.
     size_cutoff = models.PositiveIntegerField(null=True, blank=True)
@@ -957,3 +959,30 @@ class ManuscriptEmbedding(models.Model):
     text_hash = models.CharField(max_length=64)
     vector = models.JSONField(default=list)
     updated_at = models.DateTimeField(auto_now=True)
+
+
+class RulesAttempt(models.Model):
+    """One extraction attempt while reading a journal's rules (build plan step 6, section 8).
+
+    Local model first; when the page validator finds the result inadequate (no quoted rule, or a
+    required field missing), one local retry with the validator's feedback, then the cloud model.
+    One row per attempt, so the escalation rate per field is measured on real evidence."""
+    STAGE_CHOICES = [('local', 'Local model'), ('local_retry', 'Local retry'), ('cloud', 'Cloud model')]
+    OUTCOME_CHOICES = [('adequate', 'Adequate'), ('inadequate', 'Inadequate'), ('error', 'Error')]
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    chain = models.UUIDField(db_index=True)  # the attempts of one read share a chain
+    record = models.ForeignKey(IndexedVenue, on_delete=models.CASCADE, related_name='rules_attempts')
+    run = models.ForeignKey(VenueIndexRun, null=True, blank=True, on_delete=models.SET_NULL, related_name='rules_attempts')
+    job = models.CharField(max_length=40, default='rule_extraction')
+    attempt = models.PositiveSmallIntegerField()
+    stage = models.CharField(max_length=20, choices=STAGE_CHOICES)
+    provider = models.CharField(max_length=40)
+    model = models.CharField(max_length=200, blank=True)
+    outcome = models.CharField(max_length=20, choices=OUTCOME_CHOICES)
+    reason = models.CharField(max_length=300, blank=True)
+    missing_fields = models.JSONField(default=list, blank=True)
+    escalated = models.BooleanField(default=False)  # another attempt followed this one
+
+    class Meta:
+        ordering = ['created_at', 'attempt']

@@ -87,7 +87,7 @@ def test_editor_view_download_review_and_decision_are_audited():
 
     download = client.get(f'/api/admin/venue-submissions/{submission.id}/download/')
     assert download.status_code == 200
-    download.close()
+    b''.join(download.streaming_content)  # read it like a client; closing it directly would close the DB connection
 
     start = client.post(
         f'/api/admin/venue-submissions/{submission.id}/start-review/',
@@ -279,7 +279,7 @@ def test_platform_legacy_submission_view_download_and_decision_are_audited():
 
     download = client.get(f'/api/admin/submissions/{submission.id}/download/')
     assert download.status_code == 200
-    download.close()
+    b''.join(download.streaming_content)  # read it like a client; closing it directly would close the DB connection
 
     with patch('review.views.send_acceptance_email') as email:
         email.return_value = {

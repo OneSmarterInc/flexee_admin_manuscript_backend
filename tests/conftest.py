@@ -29,3 +29,13 @@ def isolated_environment(monkeypatch):
 def mock_ai_provider(isolated_environment):
     with patch.dict(os.environ, {"AI_PROVIDER": "mock", "TEST_BYPASS_ORIGIN": "1"}):
         yield
+
+
+@pytest.fixture(autouse=True)
+def keep_test_database_connection(monkeypatch):
+    """django-q's scheduler closes old database connections at each tick, as it should in production.
+    Inside a test that runs in one transaction, that closes the test's own connection (PostgreSQL then
+    fails with "connection already closed"; SQLite hid it). Keep it open in tests."""
+    import django.db
+    monkeypatch.setattr(django.db, 'close_old_connections', lambda **kwargs: None)
+    yield

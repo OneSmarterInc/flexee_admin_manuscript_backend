@@ -836,10 +836,13 @@ class VenueIndexRun(models.Model):
     created_count = models.PositiveIntegerField(default=0)
     updated_count = models.PositiveIntegerField(default=0)
     linked_count = models.PositiveIntegerField(default=0)
+    removed_count = models.PositiveIntegerField(default=0)  # no longer in scope, taken out of the index
     enriched_count = models.PositiveIntegerField(default=0)
     flagged_missing = models.PositiveIntegerField(default=0)
     pending_after = models.PositiveIntegerField(default=0)
     catalogue_complete = models.BooleanField(default=False)
+    # When VENUE_INDEX_MAX_RECORDS was reached: works count of the smallest journal kept.
+    size_cutoff = models.PositiveIntegerField(null=True, blank=True)
     errors = models.JSONField(default=list, blank=True)
     summary = models.TextField(blank=True)
 

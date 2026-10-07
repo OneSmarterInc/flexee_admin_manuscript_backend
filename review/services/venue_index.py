@@ -53,6 +53,10 @@ PROFILES = {
             '2209': 'Industrial and Manufacturing Engineering',
             '3304': 'Education',
         },
+        # Broad subjects that only count when a journal also connects to the core fields: education
+        # in general is not business or simulation-based learning, and most AI journals are pure
+        # computer science rather than AI in organizations.
+        'bridging': {'1702', '3304', '2209'},
         # Used only if OpenAlex rejects the subfield filter: keyword searches, then the same scope check.
         'search_terms': ['management', 'business', 'information systems', 'operations management',
                          'supply chain', 'artificial intelligence', 'education', 'decision sciences'],
@@ -82,10 +86,15 @@ def _env_float(name, default, low, high):
 class IndexConfig:
     def __init__(self):
         self.profile = os.getenv('VENUE_INDEX_PROFILE', DEFAULT_PROFILE).strip() or DEFAULT_PROFILE
-        self.max_records = _env_int('VENUE_INDEX_MAX_RECORDS', 3000, 1, 50000)
+        # The index keeps the N most-published journals in the fields (build plan 3.1: ~1,500-2,500).
+        self.max_records = _env_int('VENUE_INDEX_MAX_RECORDS', 2500, 1, 50000)
         self.max_pages = _env_int('VENUE_INDEX_MAX_PAGES', 400, 1, 5000)
         self.min_works = _env_int('VENUE_INDEX_MIN_WORKS', 30, 0, 100000)
-        self.min_scope_share = _env_float('VENUE_INDEX_MIN_SCOPE_SHARE', 0.25, 0.0, 1.0)
+        # A journal whose main subject is outside the fields needs this share of its output inside them.
+        self.min_scope_share = _env_float('VENUE_INDEX_MIN_SCOPE_SHARE', 0.5, 0.0, 1.0)
+        # Every journal not mainly in a core subject needs at least this share in core subjects
+        # (for a bridging-subject journal, other bridging subjects count too).
+        self.min_core_share = _env_float('VENUE_INDEX_MIN_CORE_SHARE', 0.10, 0.0, 1.0)
         self.max_inactive_years = _env_int('VENUE_INDEX_MAX_INACTIVE_YEARS', 3, 0, 50)
         self.enrich_days = _env_int('VENUE_INDEX_ENRICH_DAYS', 30, 1, 365)
         self.time_limit_seconds = _env_int('VENUE_INDEX_TIME_LIMIT_MINUTES', 25, 1, 28) * 60
@@ -101,6 +110,11 @@ class IndexConfig:
         self.subfields = {sid: base['subfields'].get(sid, f'Subfield {sid}') for sid in override} if override \
             else dict(base['subfields'])
         self.search_terms = list(base['search_terms'])
+        bridging_env = os.getenv('VENUE_INDEX_BRIDGING_SUBFIELDS')
+        bridging = ({x.strip() for x in bridging_env.split(',') if x.strip()} if bridging_env is not None
+                    else set(base.get('bridging', set())))
+        self.bridging = bridging & set(self.subfields)
+        self.core = set(self.subfields) - self.bridging
         if not self.contact_email:
             self.workers = 1
 
@@ -253,8 +267,19 @@ def assess_scope(source, config, *, this_year):
     last_year = source.get('last_publication_year')
     if last_year and config.max_inactive_years and int(last_year) < this_year - config.max_inactive_years:
         return False, {**details, 'reason': 'no longer publishing'}
-    main_in_scope = bool(primary and primary['id'] in config.subfields)
-    if not main_in_scope and share < config.min_scope_share:
+    main = primary['id'] if primary else ''
+    if main in config.core:
+        return True, {**details, 'reason': ''}
+
+    def share_of(ids):
+        return (sum(e['count'] for e in ranked if e['id'] in ids) / total) if total else 0.0
+
+    if main in config.bridging:
+        # e.g. an education journal: kept only if it also publishes business / IS / AI work.
+        if share_of(set(config.subfields) - {main}) < config.min_core_share:
+            return False, {**details, 'reason': f'{primary["name"]} journal with little business or IS content'}
+        return True, {**details, 'reason': ''}
+    if share < config.min_scope_share or share_of(config.core) < config.min_core_share:
         return False, {**details, 'reason': 'mostly outside the target fields'}
     return True, {**details, 'reason': ''}
 
@@ -356,16 +381,24 @@ class _Truncated(Exception):
     """Stopped early (page cap or time limit): the catalogue pass is not complete."""
 
 
+def clean_title(value):
+    """Catalogue titles sometimes carry invisible or private-use characters (shown as boxes)."""
+    import unicodedata
+    text = ''.join(' ' if unicodedata.category(ch) in {'Cc', 'Cf', 'Co', 'Cs', 'Zl', 'Zp', 'Cn'} else ch
+                   for ch in unicodedata.normalize('NFC', str(value or '')))
+    return re.sub(r'\s+', ' ', text).strip()
+
+
 def spine_fields(source, details):
     issns = sorted({normalize_issn(x) for x in (source.get('issn') or []) if normalize_issn(x)})
     stats = source.get('summary_stats') or {}
     apc = source.get('apc_usd')
     return {
-        'title': str(source.get('display_name') or '').strip()[:500],
+        'title': clean_title(source.get('display_name'))[:500],
         'venue_type': 'journal',
         'issn_l': normalize_issn(source.get('issn_l')),
         'issns': issns,
-        'publisher': str(source.get('host_organization_name') or '')[:300],
+        'publisher': clean_title(source.get('host_organization_name'))[:300],
         'country_code': str(source.get('country_code') or '')[:2].upper(),
         'homepage_url': str(source.get('homepage_url') or '')[:1000],
         'open_access': bool(source.get('is_oa')),
@@ -569,6 +602,7 @@ def _catalogue_pass(run, config, http, now, budget, say=lambda m: None):
     this_year = now.year
     seen_ids = set()
     kept = 0
+    cutoff = None
 
     def page_done(_event):
         run.pages_fetched = catalogue.pages
@@ -583,6 +617,10 @@ def _catalogue_pass(run, config, http, now, budget, say=lambda m: None):
             keep, details = assess_scope(source, config, this_year=this_year)
             if not keep:
                 run.out_of_scope += 1
+                # A journal already in the index that no longer qualifies (e.g. the scope was narrowed)
+                # is taken out, unless an admin linked it to a live venue.
+                run.removed_count += IndexedVenue.objects.filter(
+                    openalex_id=_short_id(source.get('id')), venue__isnull=True).delete()[0]
                 continue
             openalex_id = _short_id(source.get('id'))
             fields = spine_fields(source, details)
@@ -592,8 +630,12 @@ def _catalogue_pass(run, config, http, now, budget, say=lambda m: None):
             _upsert(run, config, openalex_id, fields, now)
             kept += 1
             if kept >= config.max_records:
+                # Results come largest first, so the cap is a size cutoff: the index is the N
+                # most-published journals in the fields, and everything smaller is outside it.
+                cutoff = int(source.get('works_count') or 0)
                 catalogue.complete = False
-                say(f'Reached the {config.max_records:,}-journal limit (VENUE_INDEX_MAX_RECORDS).')
+                say(f'Reached {config.max_records:,} journals (VENUE_INDEX_MAX_RECORDS): keeping the '
+                    f'{config.max_records:,} most-published journals in your fields (cutoff {cutoff:,} works).')
                 break
     except IndexSourceError as exc:
         _record_error(run, 'openalex', exc)
@@ -601,16 +643,24 @@ def _catalogue_pass(run, config, http, now, budget, say=lambda m: None):
         catalogue.complete = False
     run.pages_fetched = catalogue.pages
     run.catalogue_method = catalogue.method
-    run.catalogue_complete = catalogue.complete and budget()
+    reached_cutoff = cutoff is not None and catalogue.method == 'subfield_filter' and not run.errors
+    run.catalogue_complete = (catalogue.complete or reached_cutoff) and budget()
+    run.size_cutoff = cutoff if reached_cutoff else None
     if run.catalogue_complete:
+        unseen = IndexedVenue.objects.filter(field_profile=config.profile).exclude(openalex_id__in=seen_ids)
+        if reached_cutoff:
+            # Smaller than the cutoff: no longer among the N largest, so out of the index (unless linked).
+            small = [r.id for r in unseen.only('id', 'metrics')
+                     if int((r.metrics or {}).get('works_count') or 0) <= cutoff]
+            run.removed_count += IndexedVenue.objects.filter(id__in=small, venue__isnull=True).delete()[0]
+            unseen = unseen.exclude(id__in=small)  # a linked small journal stays, and is not 'missing'
         # Only a complete pass can say a journal left the catalogue. Keep it, flag it.
-        gone = (IndexedVenue.objects.filter(field_profile=config.profile, missing_since__isnull=True)
-                .exclude(openalex_id__in=seen_ids))
-        run.flagged_missing = gone.update(missing_since=now)
+        run.flagged_missing = unseen.filter(missing_since__isnull=True).update(missing_since=now)
     run.save()
     method = ' (keyword search: OpenAlex did not accept the subject filter)' if catalogue.method == 'keyword_search' else ''
+    removed = f', {run.removed_count:,} no longer in scope removed' if run.removed_count else ''
     say(f'Catalogue done{method}: {run.created_count:,} new, {run.updated_count:,} refreshed, '
-        f'{run.out_of_scope:,} outside your fields skipped.')
+        f'{run.out_of_scope:,} outside your fields skipped{removed}.')
 
 
 def _upsert(run, config, openalex_id, fields, now):
@@ -686,6 +736,10 @@ def _summary(run):
     if run.mode == 'full':
         parts.append(f'{run.created_count} new and {run.updated_count} refreshed journals '
                      f'({run.out_of_scope} outside the target fields skipped)')
+        if run.removed_count:
+            parts.append(f'{run.removed_count} no longer in scope removed')
+        if run.size_cutoff is not None:
+            parts.append(f'index holds the most-published journals down to {run.size_cutoff:,} works')
         if not run.catalogue_complete:
             parts.append('catalogue pass stopped early, so nothing was flagged as missing')
         elif run.flagged_missing:

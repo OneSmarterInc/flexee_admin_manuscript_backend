@@ -145,6 +145,23 @@ python manage.py import_venue_index --rules-only            # up to 40 journals
 python manage.py import_venue_index --rules-only --limit 5  # a quick trial
 ```
 
+## Local AI first, escalation on evidence (build plan step 6)
+
+Rule extraction never uses a router model. The page validator already knows whether a result is
+good enough, so it decides: the local model reads first; if the result has no rule quoted on the
+page, or a required field (`VENUE_INDEX_REQUIRED_FIELDS`, default aims & scope and article types)
+is missing, the local model gets one retry told exactly what failed (optionally a different model,
+`VENUE_INDEX_RETRY_OLLAMA_MODEL`); if that also fails, Anthropic reads the same pages. Pages are
+fetched once for all attempts. The cloud step is on when `ANTHROPIC_API_KEY` is set
+(`VENUE_INDEX_ESCALATE=auto`), is capped per run (`VENUE_INDEX_ESCALATIONS_PER_RUN`, 10) and goes
+through the AI budget; if the budget is reached, escalation stops for the run and reading continues
+locally. Unchanged pages that were read well before are reused without any model call.
+
+Every attempt is stored (`RulesAttempt`: stage, model, outcome, missing fields), and each stage has
+its own AI usage operation (`index_rules_local`, `index_rules_retry`, `index_rules_cloud`), so the
+cost of escalation is visible. Venue Index shows the escalation rate per field over 30 days: under
+20 percent the local model pays for itself; above it, that field should move to the cloud.
+
 ## Topical shortlist for matching (build plan step 5)
 
 Before any AI looks at a manuscript-venue pair, a local embedding model narrows the matchable

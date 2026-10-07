@@ -101,24 +101,32 @@ def rules_found(item, min_confidence):
     least one rule a manuscript can be checked against."""
     if item is None:
         return False, 'Nothing was extracted.'
-    if not item.source_evidence:
+    get = item.get if isinstance(item, dict) else (lambda name: getattr(item, name, None))
+    if not get('source_evidence'):
         return False, 'No rule could be confirmed by a quote on the official pages.'
-    if item.confidence < min_confidence:
-        return False, f'Confidence {item.confidence} is below {min_confidence} (official pages not clear enough).'
-    if not any(getattr(item, f) for f in RULE_FIELDS if f != 'aims_scope') and not item.aims_scope:
+    if (get('confidence') or 0) < min_confidence:
+        return False, f'Confidence {get("confidence")} is below {min_confidence} (official pages not clear enough).'
+    if not any(get(f) for f in RULE_FIELDS):
         return False, 'The pages did not state article types, limits, required items or scope.'
     return True, ''
 
 
-def read_rules_for(record, fetcher, config, *, extractor=None, min_confidence=40, now=None, blocked_sites=None):
+def read_rules_for(record, fetcher, config, *, extractor=None, min_confidence=40, now=None, blocked_sites=None,
+                   escalation=None, run=None):
     """Read one journal's rules. Updates the record; returns its new rules_status.
 
     Tries each official URL (guidelines page, then homepage). A site that refuses automated reading
     (HTTP 401/403/429, robots.txt) is added to `blocked_sites`, and is not requested again in this
-    run; we respect the refusal and never try to get around it."""
+    run; we respect the refusal and never try to get around it.
+
+    Pages are fetched once; the extraction then goes local model -> local retry -> cloud model,
+    stopping at the first result the page validator accepts (build plan step 6)."""
     from . import venue_discovery as vd
+    from ..models import DiscoveredVenue
+    from .rules_escalation import Escalation, extract_with_escalation
     now = now or timezone.now()
     blocked_sites = blocked_sites if blocked_sites is not None else set()
+    escalation = escalation or Escalation.from_env()
     hints = {'name': record.title, 'organization_name': record.publisher, 'website_url': record.homepage_url,
              'venue_type': 'journal'}
     item, errors, blocked = None, [], []
@@ -128,19 +136,33 @@ def read_rules_for(record, fetcher, config, *, extractor=None, min_confidence=40
             blocked.append(f'{site} blocked automated reading earlier in this run')
             continue
         try:
-            item, _outcome = vd.process_candidate(url, fetcher, config, extractor=extractor, hints=hints)
-            break
-        except vd.DiscoveryModelUnavailable as exc:
-            raise RulesModelUnavailable(str(exc)) from exc
+            pages = vd.gather_pages(url, fetcher, config)
         except vd.DiscoveryFetchError as exc:
             if vd.is_blocked_failure(exc):
                 blocked_sites.add(site)
                 blocked.append(f'{site} blocks automated reading ({exc})')
             else:
                 errors.append(f'Pages could not be read: {exc}')
-        except vd.DiscoveryExtractionError as exc:
-            errors.append(f'The AI could not extract rules: {exc}')
+            continue
+        if not any(page.text for page in pages):
+            errors.append('The page has no readable text (it may need JavaScript).')
+            continue
+        fingerprint = vd.content_fingerprint(pages)
+        previous = DiscoveredVenue.objects.filter(content_fingerprint=fingerprint).first()
+        if previous and rules_found(previous, min_confidence)[0]:
+            # Unchanged pages that were read well before: reuse, no model call.
+            previous.last_checked_at = now
+            previous.save(update_fields=['last_checked_at', 'updated_at'])
+            vd.reconfirm_live_venue(previous, now)
+            item = previous
+            break
+        candidate, _attempts = extract_with_escalation(record, pages, config, hints, escalation=escalation,
+                                                       min_confidence=min_confidence, extractor=extractor, run=run)
+        if candidate is None:
+            errors.append('The AI could not extract rules from the pages.')
             break  # the pages were read; another URL on the same journal would not help the model
+        item, _outcome = vd.upsert_candidate(candidate, fingerprint)
+        break
 
     if item is not None:
         if item.origin != 'index' and not item.added_venue_id and item.discovery_status != 'ignored':
@@ -183,9 +205,11 @@ def run_rules(run, profile, budget, *, say=lambda m: None, fetcher=None, extract
                      ai_provider=os.getenv('VENUE_INDEX_RULES_AI_PROVIDER', 'ollama').strip().lower() or 'ollama',
                      max_pages_per_run=len(due) * 6 + 10)
     fetcher = fetcher or SafeFetcher(config)
+    from .rules_escalation import Escalation
+    escalation = Escalation.from_env()
     provider = 'local Ollama' if config.ai_provider == 'ollama' else config.ai_provider
     say(f'Reading the rules of up to {min(limit, total_due)} of {total_due} {label} journals from their official '
-        f'pages ({provider}; every rule must be quoted on the page)…')
+        f'pages ({provider}, {escalation.describe()}; every rule must be quoted on the page)…')
     blocked_sites = set()
     read = skipped = 0
     for record_id in due:
@@ -199,14 +223,16 @@ def run_rules(run, profile, budget, *, say=lambda m: None, fetcher=None, extract
             continue
         if _only_blocked_sites(record, blocked_sites):
             # Same publisher site as one that refused us a moment ago: record it, no request made.
-            read_rules_for(record, fetcher, config, extractor=extractor, blocked_sites=blocked_sites)
+            read_rules_for(record, fetcher, config, extractor=extractor, blocked_sites=blocked_sites,
+                           escalation=escalation, run=run)
             skipped += 1
             continue
         read += 1
         run.rules_attempted += 1
+        retried, escalated = escalation.retried, escalation.escalated
         try:
             status = read_rules_for(record, fetcher, config, extractor=extractor, min_confidence=min_confidence,
-                                    blocked_sites=blocked_sites)
+                                    blocked_sites=blocked_sites, escalation=escalation, run=run)
         except RulesModelUnavailable as exc:
             from .venue_index import _record_error
             _record_error(run, 'ai', exc)
@@ -222,8 +248,14 @@ def run_rules(run, profile, budget, *, say=lambda m: None, fetcher=None, extract
             run.rules_ready += 1
         else:
             run.rules_failed += 1
+        run.rules_retried += escalation.retried - retried
+        run.rules_escalated += escalation.escalated - escalated
         run.save()
-        say(f'[{read}/{min(limit, total_due)}] {record.title}: {STATUS_TEXT.get(status, status)}')
+        how = (' (after escalation to Anthropic)' if escalation.escalated > escalated
+               else ' (after a local retry)' if escalation.retried > retried else '')
+        say(f'[{read}/{min(limit, total_due)}] {record.title}: {STATUS_TEXT.get(status, status)}{how}')
+    if escalation.cloud_blocked:
+        say(f'Escalation to the cloud stopped: {escalation.cloud_blocked}')
     if skipped:
         say(f'Skipped {skipped} journals on sites that block automated reading '
             f'({", ".join(sorted(blocked_sites))}); they are tried again after {BLOCKED_RETRY_DAYS} days.')

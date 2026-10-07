@@ -754,8 +754,11 @@ def _screening_pass(run, config, budget, say, *, page_fetcher=None, read_pages=T
 
 def _summary(run):
     if run.mode == 'rules':
+        extra = ''
+        if run.rules_retried or run.rules_escalated:
+            extra = f' Local retries: {run.rules_retried}; escalated to the cloud: {run.rules_escalated}.'
         return (f'Rules read for {run.rules_attempted} journals: {run.rules_ready} ready for approval, '
-                f'{run.rules_failed} not found or unreadable.')
+                f'{run.rules_failed} not found or unreadable.{extra}')
     parts = []
     if run.mode == 'full':
         parts.append(f'{run.created_count} new and {run.updated_count} refreshed journals '

@@ -11,7 +11,7 @@ from .services.email_service import send_acceptance_email, send_rejection_email,
 from .audit import ADMIN_AUTH_RESOURCE_TYPE, audit_event_payload, record_audit_event
 from .monitoring import capture_exception
 from .storage_security import secure_download_response
-from .author_api import _json_body, _submission_payload, _venue_config_payload, _venue_payload
+from .author_api import _json_body, _submission_payload, _venue_config_payload, _venue_payload, mark_editor_confirmed
 
 
 ALLOWED_VENUE_TYPES = {value for value, _ in Venue.TYPE_CHOICES}
@@ -97,7 +97,7 @@ def admin_venue_detail(request, venue_id):
         return JsonResponse({'detail': 'Forbidden'}, status=403)
 
     if request.method == 'GET':
-        return JsonResponse({'venue': _venue_payload(venue)})
+        return JsonResponse({'venue': _venue_payload(venue, internal=True)})
     if request.method not in {'PATCH', 'POST'}:
         return JsonResponse({'detail': 'Method not allowed'}, status=405)
 
@@ -116,6 +116,14 @@ def admin_venue_detail(request, venue_id):
         venue.description = str(data.get('description', '')).strip()
     if 'active' in data:
         venue.active = bool(data.get('active'))
+    if 'trust_tier' in data:
+        # Only Flexee staff may say who stands behind a record; editors claim venues through the claim flow.
+        if not request.editor_user.platform_superuser:
+            return JsonResponse({'detail': 'Only platform administrators can change the trust tier'}, status=403)
+        tier = str(data.get('trust_tier', '')).strip()
+        if tier not in dict(Venue.TRUST_TIER_CHOICES):
+            return JsonResponse({'detail': 'trust_tier must be claimed, verified_index, or listed'}, status=400)
+        venue.trust_tier = tier
     venue.save()
     record_audit_event(
         request,
@@ -124,9 +132,11 @@ def admin_venue_detail(request, venue_id):
         resource_id=venue.id,
         organization_id=venue.organization_id,
         venue_id=venue.id,
-        detail={'changed_fields': sorted([key for key in data.keys() if key in {'name', 'venue_type', 'description', 'active'}])},
+        detail={'changed_fields': sorted([key for key in data.keys()
+                                          if key in {'name', 'venue_type', 'description', 'active', 'trust_tier'}]),
+                **({'trust_tier': venue.trust_tier} if 'trust_tier' in data else {})},
     )
-    return JsonResponse({'venue': _venue_payload(venue)})
+    return JsonResponse({'venue': _venue_payload(venue, internal=True)})
 
 
 @require_GET
@@ -168,6 +178,7 @@ def admin_activate_venue_config(request, venue_id, config_id):
     if not config.active:
         config.active = True
         config.save(update_fields=['active'])
+    mark_editor_confirmed(venue)
     record_audit_event(
         request,
         'venue_config.activated',

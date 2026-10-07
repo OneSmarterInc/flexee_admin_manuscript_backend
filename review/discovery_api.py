@@ -347,6 +347,9 @@ def discovery_add_to_venue_agent(request, discovered_id):
                 venue_type=item.venue_type,
                 description=(item.description or '')[:2000],
                 active=True,
+                trust_tier=Venue.TIER_VERIFIED_INDEX,
+                last_verified_at=item.last_checked_at,
+                source_urls=list(item.source_urls or [])[:20],
             )
             config = VenueAgentConfig.objects.create(venue=venue, version=1, active=True, **config_fields)
 

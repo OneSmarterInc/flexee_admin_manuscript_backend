@@ -2,6 +2,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from review.models import Organization, Venue, VenueAgentConfig
+from review.author_api import mark_editor_confirmed
 
 
 FIELD_NOTES_CONFIG = {
@@ -207,6 +208,8 @@ class Command(BaseCommand):
                 active=True,
                 **seed['config'],
             )
+            # Flexee publishes these venues and configures them itself, so they are editor-claimed.
+            mark_editor_confirmed(venue)
             self.stdout.write(self.style.SUCCESS(f'Activated {venue.name} configuration v{config.version}'))
 
         self.stdout.write(self.style.SUCCESS('Flexee venue setup complete.'))

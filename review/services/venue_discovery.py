@@ -1342,7 +1342,21 @@ def upsert_candidate(candidate, fingerprint):
         elif record.discovery_status == 'error':
             record.discovery_status = 'new'
         record.save()
+        if outcome == 'updated':
+            reconfirm_live_venue(record, now)
         return record, outcome
+
+
+def reconfirm_live_venue(record, when):
+    """The official pages were read again and still say the same thing, so the live
+    venue added from this record is re-confirmed. A venue whose pages changed keeps
+    its old date until an admin reviews the change."""
+    if record.discovery_status != 'added' or not record.added_venue_id:
+        return
+    from ..models import Venue
+    Venue.objects.filter(id=record.added_venue_id, trust_tier=Venue.TIER_VERIFIED_INDEX).update(
+        last_verified_at=when, source_urls=list(record.source_urls or [])[:20], updated_at=when,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1611,6 +1625,7 @@ def process_candidate(entry_url, fetcher, config, *, extractor=None, hints=None)
     if previous:
         previous.last_checked_at = timezone.now()
         previous.save(update_fields=['last_checked_at', 'updated_at'])
+        reconfirm_live_venue(previous, previous.last_checked_at)
         return previous, 'unchanged'
 
     try:

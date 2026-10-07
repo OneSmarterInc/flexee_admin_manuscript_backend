@@ -1,5 +1,5 @@
 from django.urls import path
-from . import views, discovery_api, index_api, journal_index_api
+from . import views, discovery_api, index_api, claims_api, journal_index_api
 from . import author_api
 from . import editor_api
 from .api_summary import admin_submission_api_summary
@@ -40,6 +40,12 @@ urlpatterns = [
     path('journals/', journal_index_api.journal_search),
     path('journals/v/<slug:slug>/', journal_index_api.journal_venue_page),
     path('journals/i/<uuid:record_id>/', journal_index_api.journal_listed_page),
+    path('journals/claim/', claims_api.claim_create),
+    path('journals/claim/verify/', claims_api.claim_verify),
+    path('admin/claims/', claims_api.admin_claims),
+    path('admin/claims/<uuid:claim_id>/approve/', claims_api.admin_claim_approve),
+    path('admin/claims/<uuid:claim_id>/reject/', claims_api.admin_claim_reject),
+    path('admin/set-password/', claims_api.editor_set_password),
     path('author/venue-submissions/<uuid:submission_id>/', author_api.author_submission_detail),
     path('author/venue-submissions/<uuid:submission_id>/assessment/run/', author_api.author_run_venue_assessment),
     path('author/venue-submissions/<uuid:submission_id>/requirements/', author_api.author_save_submission_requirements),

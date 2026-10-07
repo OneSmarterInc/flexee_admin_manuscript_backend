@@ -845,7 +845,9 @@ def run_semantic_matching(manuscript, *, venue_ids=None):
     if not isinstance(profile, dict) or not profile:
         raise AgentInputError('Run semantic readiness before semantic venue matching.')
 
-    queryset = manuscript.venue_matches.select_related('venue', 'venue__organization', 'venue_config')
+    # Excluded venues are hidden from authors, so they are never reasoned over either.
+    queryset = (manuscript.venue_matches.filter(venue__excluded=False)
+                .select_related('venue', 'venue__organization', 'venue_config'))
     if venue_ids:
         queryset = queryset.filter(venue_id__in=venue_ids)
     matches = list(queryset)

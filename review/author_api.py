@@ -542,7 +542,25 @@ def _active_config(venue):
     return venue.agent_configs.filter(active=True).order_by('-version', '-created_at').first()
 
 
-def _venue_payload(venue, include_config=True):
+def mark_editor_confirmed(venue):
+    """An editor saved or activated rules for a venue they configure: their rules are current as of now."""
+    if venue.trust_tier == Venue.TIER_CLAIMED:
+        venue.last_verified_at = timezone.now()
+        venue.save(update_fields=['last_verified_at', 'updated_at'])
+
+
+def _venue_trust_payload(venue):
+    """Who stands behind this record, shown with every venue so an editor-configured venue
+    never looks the same as one Flexee read from the publisher's pages."""
+    return {
+        'tier': venue.trust_tier,
+        'label': dict(Venue.TRUST_TIER_CHOICES).get(venue.trust_tier, venue.trust_tier),
+        'last_verified_at': venue.last_verified_at.isoformat() if venue.last_verified_at else None,
+        'source_urls': list(venue.source_urls or [])[:10],
+    }
+
+
+def _venue_payload(venue, include_config=True, internal=False):
     payload = {
         'id': str(venue.id),
         'name': venue.name,
@@ -550,12 +568,17 @@ def _venue_payload(venue, include_config=True):
         'venue_type': venue.venue_type,
         'description': venue.description,
         'active': venue.active,
+        'trust': _venue_trust_payload(venue),
         'organization': {
             'id': str(venue.organization_id),
             'name': venue.organization.name,
             'organization_type': venue.organization.organization_type,
         } if venue.organization_id else None,
     }
+    if internal:
+        # Exclusion details are for the admin only; authors never see an excluded venue at all.
+        payload['excluded'] = venue.excluded
+        payload['exclusion_reason'] = venue.exclusion_reason or {}
     if include_config:
         payload['config'] = _venue_config_payload(_active_config(venue))
     return payload
@@ -1346,7 +1369,7 @@ def author_manuscripts_list(request):
             refresh_matches_for_new_venues(m)
         except Exception:
             pass  # matching problems must never break the dashboard
-        matches = m.venue_matches.all()
+        matches = m.venue_matches.filter(venue__excluded=False)
         payload['match_count'] = matches.count()
         payload['new_match_count'] = (matches.filter(created_at__gt=m.matches_seen_at).count()
                                       if m.matches_seen_at else 0)
@@ -1512,7 +1535,7 @@ def author_readiness(request, manuscript_id):
 
 @require_GET
 def public_venues(request):
-    items = Venue.objects.filter(active=True).select_related('organization')
+    items = Venue.objects.author_visible().select_related('organization')
     return JsonResponse({'venues': [_venue_payload(item) for item in items]})
 
 
@@ -1626,7 +1649,7 @@ def refresh_matches_for_new_venues(manuscript):
     if not latest_readiness or not latest_readiness.summary.get('ready_for_matching', False):
         return 0
     matched = set(manuscript.venue_matches.values_list('venue_id', flat=True))
-    new_venues = list(Venue.objects.filter(active=True).exclude(id__in=matched).select_related('organization'))
+    new_venues = list(Venue.objects.matchable().exclude(id__in=matched).select_related('organization'))
     if not new_venues:
         return 0
     return len(_generate_deterministic_matches(manuscript, latest_readiness, new_venues))
@@ -1648,7 +1671,7 @@ def author_generate_matches(request, manuscript_id):
     if not latest_readiness.summary.get('ready_for_matching', False):
         return JsonResponse({'detail': 'Resolve blocking readiness issues before generating venue matches'}, status=409)
 
-    venues = list(Venue.objects.filter(active=True).select_related('organization'))
+    venues = list(Venue.objects.matchable().select_related('organization'))
     generated = [_match_payload(match) for match in _generate_deterministic_matches(manuscript, latest_readiness, venues)]
 
     return JsonResponse({
@@ -1697,7 +1720,8 @@ def author_matches(request, manuscript_id):
         refresh_matches_for_new_venues(manuscript)
     except Exception:
         pass  # keep showing the existing matches
-    items = manuscript.venue_matches.select_related('venue', 'venue__organization', 'venue_config').all()
+    items = (manuscript.venue_matches.filter(venue__excluded=False)
+             .select_related('venue', 'venue__organization', 'venue_config'))
     seen_at = manuscript.matches_seen_at
     payloads = []
     for item in items:
@@ -1759,7 +1783,7 @@ def author_create_submission(request, manuscript_id):
     if not venue_id:
         return JsonResponse({'detail': 'venue_id is required'}, status=400)
     try:
-        venue = Venue.objects.get(id=venue_id, active=True)
+        venue = Venue.objects.matchable().get(id=venue_id)
     except (Venue.DoesNotExist, ValueError):
         return JsonResponse({'detail': 'Active venue not found'}, status=404)
 
@@ -2103,7 +2127,7 @@ def author_transfer_submission(request, submission_id):
     if not venue_id:
         return JsonResponse({'detail': 'venue_id is required'}, status=400)
     try:
-        target_venue = Venue.objects.get(id=venue_id, active=True)
+        target_venue = Venue.objects.matchable().get(id=venue_id)
     except (Venue.DoesNotExist, ValueError):
         return JsonResponse({'detail': 'Active venue not found'}, status=404)
     if target_venue.id == source.venue_id:
@@ -2165,7 +2189,7 @@ def admin_venues(request):
         if not request.editor_user.platform_superuser:
             org_ids = request.editor_user.memberships.values_list('organization_id', flat=True)
             items = items.filter(organization_id__in=org_ids)
-        return JsonResponse({'venues': [_venue_payload(item) for item in items]})
+        return JsonResponse({'venues': [_venue_payload(item, internal=True) for item in items]})
     if request.method != 'POST':
         return JsonResponse({'detail': 'Method not allowed'}, status=405)
 
@@ -2257,6 +2281,7 @@ def admin_venue_config(request, venue_id):
             **config_fields,
         )
         venue.agent_configs.filter(active=True).exclude(id=config.id).update(active=False)
+        mark_editor_confirmed(venue)
         record_audit_event(
             request,
             'venue_config.created',

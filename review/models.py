@@ -204,12 +204,35 @@ class Membership(models.Model):
         return f'{self.user.email} - {self.organization.name} ({self.role})'
 
 
+class VenueQuerySet(models.QuerySet):
+    def author_visible(self):
+        """Venues an author may see at all. Excluded venues simply do not appear."""
+        return self.filter(active=True, excluded=False)
+
+    def matchable(self):
+        """Venues whose rules have been read, so a manuscript can be checked against them."""
+        return self.author_visible().filter(trust_tier__in=Venue.RULE_TIERS)
+
+
 class Venue(models.Model):
     TYPE_CHOICES = [
         ('journal', 'Journal'),
         ('conference', 'Conference'),
         ('publisher', 'Publisher'),
     ]
+
+    # Who stands behind this record. These must never render identically to authors.
+    TIER_CLAIMED = 'claimed'                # the venue's editor configured it themselves
+    TIER_VERIFIED_INDEX = 'verified_index'  # an agent read the official pages and the quotes were validated
+    TIER_LISTED = 'listed'                  # basic metadata only, no rules read yet
+    TRUST_TIER_CHOICES = [
+        (TIER_CLAIMED, 'Claimed by the editor'),
+        (TIER_VERIFIED_INDEX, 'Verified from official pages'),
+        (TIER_LISTED, 'Listed'),
+    ]
+    RULE_TIERS = (TIER_CLAIMED, TIER_VERIFIED_INDEX)
+
+    objects = VenueQuerySet.as_manager()
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     organization = models.ForeignKey(
@@ -226,6 +249,17 @@ class Venue(models.Model):
     venue_type = models.CharField(max_length=30, choices=TYPE_CHOICES)
     description = models.TextField(blank=True)
     active = models.BooleanField(default=True, db_index=True)
+
+    trust_tier = models.CharField(max_length=20, choices=TRUST_TIER_CHOICES, default=TIER_CLAIMED, db_index=True)
+    # When the rules were last confirmed: by the editor (claimed) or by re-reading the official pages (verified_index).
+    last_verified_at = models.DateTimeField(null=True, blank=True)
+    # The official pages each claim came from.
+    source_urls = models.JSONField(default=list, blank=True)
+    # Excluded venues are never shown to authors. The reason is internal only and is a list of
+    # failed criteria with evidence, never a label: {'criteria': [...], 'evidence_urls': [...],
+    # 'decided_at': iso, 'decided_by': email, 'note': str}.
+    excluded = models.BooleanField(default=False, db_index=True)
+    exclusion_reason = models.JSONField(default=dict, blank=True)
 
     class Meta:
         ordering = ['name']

@@ -30,6 +30,12 @@ Journals must also have at least `VENUE_INDEX_MIN_WORKS` works and have publishe
 example after the rules were narrowed) is removed at the next refresh, unless it is linked to a
 live venue.
 
+Even with these rules the fields hold more than 3,000 genuine journals, so the index is capped
+at the `VENUE_INDEX_MAX_RECORDS` (2,500) most-published ones. OpenAlex returns journals largest
+first, so reaching the cap is a size cutoff: the run records it (for example "down to 180
+works"), journals below it leave the index (unless linked to a live venue), and the pass still
+counts as complete, so journals above the cutoff that vanish from OpenAlex are flagged.
+
 The first real import (October 2026) with a looser 25% rule kept ~3,000 journals: 1,121 mainly
 education, 225 mainly AI, and ~500 whose main subject was outside the fields. These rules
 target the plan's 1,500 to 2,500.

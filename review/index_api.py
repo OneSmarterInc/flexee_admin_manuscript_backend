@@ -87,6 +87,7 @@ def run_payload(run):
         'completed_at': _iso(run.completed_at),
         'catalogue_method': run.catalogue_method,
         'catalogue_complete': run.catalogue_complete,
+        'size_cutoff': run.size_cutoff,
         'pages_fetched': run.pages_fetched,
         'records_seen': run.records_seen,
         'out_of_scope': run.out_of_scope,

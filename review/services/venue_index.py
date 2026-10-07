@@ -86,7 +86,8 @@ def _env_float(name, default, low, high):
 class IndexConfig:
     def __init__(self):
         self.profile = os.getenv('VENUE_INDEX_PROFILE', DEFAULT_PROFILE).strip() or DEFAULT_PROFILE
-        self.max_records = _env_int('VENUE_INDEX_MAX_RECORDS', 3000, 1, 50000)
+        # The index keeps the N most-published journals in the fields (build plan 3.1: ~1,500-2,500).
+        self.max_records = _env_int('VENUE_INDEX_MAX_RECORDS', 2500, 1, 50000)
         self.max_pages = _env_int('VENUE_INDEX_MAX_PAGES', 400, 1, 5000)
         self.min_works = _env_int('VENUE_INDEX_MIN_WORKS', 30, 0, 100000)
         # A journal whose main subject is outside the fields needs this share of its output inside them.
@@ -601,6 +602,7 @@ def _catalogue_pass(run, config, http, now, budget, say=lambda m: None):
     this_year = now.year
     seen_ids = set()
     kept = 0
+    cutoff = None
 
     def page_done(_event):
         run.pages_fetched = catalogue.pages
@@ -628,8 +630,12 @@ def _catalogue_pass(run, config, http, now, budget, say=lambda m: None):
             _upsert(run, config, openalex_id, fields, now)
             kept += 1
             if kept >= config.max_records:
+                # Results come largest first, so the cap is a size cutoff: the index is the N
+                # most-published journals in the fields, and everything smaller is outside it.
+                cutoff = int(source.get('works_count') or 0)
                 catalogue.complete = False
-                say(f'Reached the {config.max_records:,}-journal limit (VENUE_INDEX_MAX_RECORDS).')
+                say(f'Reached {config.max_records:,} journals (VENUE_INDEX_MAX_RECORDS): keeping the '
+                    f'{config.max_records:,} most-published journals in your fields (cutoff {cutoff:,} works).')
                 break
     except IndexSourceError as exc:
         _record_error(run, 'openalex', exc)
@@ -637,12 +643,19 @@ def _catalogue_pass(run, config, http, now, budget, say=lambda m: None):
         catalogue.complete = False
     run.pages_fetched = catalogue.pages
     run.catalogue_method = catalogue.method
-    run.catalogue_complete = catalogue.complete and budget()
+    reached_cutoff = cutoff is not None and catalogue.method == 'subfield_filter' and not run.errors
+    run.catalogue_complete = (catalogue.complete or reached_cutoff) and budget()
+    run.size_cutoff = cutoff if reached_cutoff else None
     if run.catalogue_complete:
+        unseen = IndexedVenue.objects.filter(field_profile=config.profile).exclude(openalex_id__in=seen_ids)
+        if reached_cutoff:
+            # Smaller than the cutoff: no longer among the N largest, so out of the index (unless linked).
+            small = [r.id for r in unseen.only('id', 'metrics')
+                     if int((r.metrics or {}).get('works_count') or 0) <= cutoff]
+            run.removed_count += IndexedVenue.objects.filter(id__in=small, venue__isnull=True).delete()[0]
+            unseen = unseen.exclude(id__in=small)  # a linked small journal stays, and is not 'missing'
         # Only a complete pass can say a journal left the catalogue. Keep it, flag it.
-        gone = (IndexedVenue.objects.filter(field_profile=config.profile, missing_since__isnull=True)
-                .exclude(openalex_id__in=seen_ids))
-        run.flagged_missing = gone.update(missing_since=now)
+        run.flagged_missing = unseen.filter(missing_since__isnull=True).update(missing_since=now)
     run.save()
     method = ' (keyword search: OpenAlex did not accept the subject filter)' if catalogue.method == 'keyword_search' else ''
     removed = f', {run.removed_count:,} no longer in scope removed' if run.removed_count else ''
@@ -725,6 +738,8 @@ def _summary(run):
                      f'({run.out_of_scope} outside the target fields skipped)')
         if run.removed_count:
             parts.append(f'{run.removed_count} no longer in scope removed')
+        if run.size_cutoff is not None:
+            parts.append(f'index holds the most-published journals down to {run.size_cutoff:,} works')
         if not run.catalogue_complete:
             parts.append('catalogue pass stopped early, so nothing was flagged as missing')
         elif run.flagged_missing:

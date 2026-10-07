@@ -308,11 +308,38 @@ def test_filter_that_matches_nothing_falls_back_too():
 
 
 @pytest.mark.django_db
-def test_record_cap_stops_early_without_flagging(monkeypatch):
+def test_cap_is_a_size_cutoff_that_cleans_up_below_it(monkeypatch):
+    big = source('S20', 'Big Management Journal', issn_l='0000-0078', works=900)
+    gone_big = source('S21', 'Vanished Big Journal', issn_l='0000-0086', works=800)
+    mid = source('S22', 'Mid Management Journal', issn_l='0000-0094', works=600)
+    small = source('S23', 'Small Management Journal', issn_l='0000-0108', works=60)
+    small_linked = source('S24', 'Small Linked Journal', issn_l='0000-0116', works=50)
+    run_full(FakeHttp([[big, gone_big, mid, small, small_linked]]))
+    org = Organization.objects.create(name='Org')
+    venue = Venue.objects.create(organization=org, name='Small Linked Journal', slug='slj', venue_type='journal')
+    IndexedVenue.objects.filter(openalex_id='S24').update(venue=venue)
+
+    monkeypatch.setenv('VENUE_INDEX_MAX_RECORDS', '2')
+    run = run_full(FakeHttp([[big, mid, small, small_linked]]))  # S21 no longer returned by OpenAlex
+    assert run.catalogue_complete and run.size_cutoff == 600
+    assert run.removed_count == 1 and run.flagged_missing == 1
+    remaining = dict(IndexedVenue.objects.values_list('openalex_id', 'missing_since'))
+    assert set(remaining) == {'S20', 'S21', 'S22', 'S24'}  # small removed; linked small kept
+    assert remaining['S21'] is not None  # bigger than the cutoff and gone: kept, flagged
+    assert 'most-published journals down to 600 works' in run.summary
+
+
+@pytest.mark.django_db
+def test_cap_reached_by_keyword_search_does_not_clean_up(monkeypatch):
     run_full(FakeHttp([[MIS, OPS]]))
     monkeypatch.setenv('VENUE_INDEX_MAX_RECORDS', '1')
-    run = run_full(FakeHttp([[OPS, MIS]]))
-    assert not run.catalogue_complete and run.flagged_missing == 0
+    run = run_full(FakeHttp([], filter_status=400, search_pages={'management': [[OPS, MIS]]}))
+    assert not run.catalogue_complete and run.size_cutoff is None
+    assert run.flagged_missing == 0 and run.removed_count == 0 and IndexedVenue.objects.count() == 2
+
+
+def test_default_cap_matches_the_plan():
+    assert vi.IndexConfig().max_records == 2500
 
 
 @pytest.mark.django_db

@@ -151,9 +151,10 @@ Rule extraction never uses a router model. The page validator already knows whet
 good enough, so it decides: the local model reads first; if the result has no rule quoted on the
 page, or a required field (`VENUE_INDEX_REQUIRED_FIELDS`, default aims & scope and article types)
 is missing, the local model gets one retry told exactly what failed (optionally a different model,
-`VENUE_INDEX_RETRY_OLLAMA_MODEL`); if that also fails, Anthropic reads the same pages. Pages are
-fetched once for all attempts. The cloud step is on when `ANTHROPIC_API_KEY` is set
-(`VENUE_INDEX_ESCALATE=auto`), is capped per run (`VENUE_INDEX_ESCALATIONS_PER_RUN`, 10) and goes
+`VENUE_INDEX_RETRY_OLLAMA_MODEL`). Pages are fetched once for all attempts. By default that is the
+end: rule reading uses local models only (`VENUE_INDEX_ESCALATE=off`), even when an Anthropic key is
+configured. `auto` (Anthropic as a third attempt when `ANTHROPIC_API_KEY` is set) or `anthropic`
+turns the cloud step on; it is capped per run (`VENUE_INDEX_ESCALATIONS_PER_RUN`, 10) and goes
 through the AI budget; if the budget is reached, escalation stops for the run and reading continues
 locally. Unchanged pages that were read well before are reused without any model call.
 

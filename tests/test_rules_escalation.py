@@ -195,3 +195,15 @@ def test_required_fields_can_be_configured(monkeypatch):
     monkeypatch.setenv('VENUE_INDEX_REQUIRED_FIELDS', 'article_types, nonsense')
     assert esc.required_fields() == ('article_types',)
     assert esc.missing_fields({'source_evidence': [1], 'confidence': 80, 'article_types': []}, 40) == ['article_types']
+
+
+@pytest.mark.django_db
+def test_local_only_by_default_even_with_an_anthropic_key(monkeypatch):
+    monkeypatch.setenv('ANTHROPIC_API_KEY', 'sk-test')
+    item = journal()
+    fetcher, _ = make_fetcher(JOURNAL_PAGES)
+    extractor = Scripted(NAME_ONLY, NAME_ONLY, cloud=journal_extraction)
+    run_rules(fetcher, extractor=extractor)
+    assert extractor.calls == ['ollama', 'ollama'] and 'anthropic' not in {a.provider for a in RulesAttempt.objects.all()}
+    monkeypatch.setenv('VENUE_INDEX_ESCALATE', 'auto')
+    assert esc.Escalation.from_env().cloud_enabled  # opt-in still works

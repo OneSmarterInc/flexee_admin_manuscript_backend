@@ -5,7 +5,8 @@ decides. For rule extraction:
 
     1. local model                       adequate? done
     2. one local retry, told what failed adequate? done
-    3. cloud model (Anthropic)           only if enabled, within the per-run ceiling and AI budget
+    3. cloud model (Anthropic)           only if VENUE_INDEX_ESCALATE turns it on (off by default:
+                                         local models only), within the per-run ceiling and AI budget
 
 Each attempt is stored as a RulesAttempt (stage, model, outcome, missing fields), and cloud calls go
 through the existing AI usage accounting under their own operation name, so escalation cost is
@@ -88,7 +89,7 @@ class Escalation:
 
     @classmethod
     def from_env(cls):
-        mode = os.getenv('VENUE_INDEX_ESCALATE', 'auto').strip().lower()
+        mode = os.getenv('VENUE_INDEX_ESCALATE', 'off').strip().lower()  # local only unless turned on
         has_key = bool(os.getenv('ANTHROPIC_API_KEY', '').strip())
         enabled = mode == 'anthropic' or (mode == 'auto' and has_key)
         return cls(cloud_enabled=enabled, cloud_left=_env_int('VENUE_INDEX_ESCALATIONS_PER_RUN', 10, 0, 1000),

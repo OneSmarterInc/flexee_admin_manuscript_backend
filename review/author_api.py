@@ -608,7 +608,8 @@ def _match_payload(item):
     violations = sum(1 for entry in (item.evidence or []) if isinstance(entry, dict) and entry.get('rule'))
     return {
         'match_score': compute_match_score(item.manuscript, item.venue_config,
-                                           eligibility=item.eligibility, violations=violations),
+                                           eligibility=item.eligibility, violations=violations,
+                                           topic_similarity=item.topic_similarity),
         'id': str(item.id),
         'manuscript_id': str(item.manuscript_id),
         'venue': _venue_payload(item.venue, include_config=False),
@@ -1646,7 +1647,9 @@ def _generate_deterministic_matches(manuscript, latest_readiness, venues):
 def _apply_shortlist(manuscript, matches, info):
     """Store each match's topical similarity and shortlist rank (build plan step 5)."""
     for match in matches:
-        similarity = info['similarity'].get(match.venue_id)
+        # Only embedding similarities are stored: keyword overlap is on a different scale and the
+        # match score already counts shared words.
+        similarity = info['similarity'].get(match.venue_id) if info['method'] == 'embedding' else None
         rank = info['rank'].get(match.venue_id)
         if match.topic_similarity != similarity or match.shortlist_rank != rank:
             match.topic_similarity, match.shortlist_rank = similarity, rank

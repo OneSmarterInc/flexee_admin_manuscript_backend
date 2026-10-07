@@ -50,7 +50,7 @@ def _normalise(label):
     return re.sub(r'[^a-z0-9]+', '_', str(label or '').strip().lower()).strip('_')
 
 
-def compute_match_score(manuscript, config, *, eligibility='needs_changes', violations=0):
+def compute_match_score(manuscript, config, *, eligibility='needs_changes', violations=0, topic_similarity=None):
     """Return {'score', 'label', 'breakdown', 'matched_terms'} for one manuscript-venue pair."""
     if config is None:
         return {'score': 0, 'label': 'Not configured', 'breakdown': {k: 0 for k in WEIGHTS}, 'matched_terms': []}
@@ -74,6 +74,12 @@ def compute_match_score(manuscript, config, *, eligibility='needs_changes', viol
             scope_ratio = 0.6 * term_ratio + 0.4 * keyword_ratio
         else:
             scope_ratio = term_ratio
+        if topic_similarity is not None:
+            # Build plan step 5/8: the local embedding similarity also counts for scope, so a venue whose
+            # aims are close in meaning (not just in shared words) is not scored as off-topic.
+            # nomic-embed-text cosines run about 0.40 (unrelated) to 0.70 (very close).
+            semantic_ratio = max(0.0, min(1.0, (topic_similarity - 0.40) / 0.30))
+            scope_ratio = max(scope_ratio, semantic_ratio)
     scope = round(WEIGHTS['scope'] * min(1.0, scope_ratio))
 
     # 2. Accepted article type.

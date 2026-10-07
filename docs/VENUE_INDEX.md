@@ -187,6 +187,19 @@ python manage.py import_venue_index --calls-only      # re-confirm open calls no
 python manage.py ensure_venue_index_schedule          # monthly, daily checks, daily calls, weekly rules
 ```
 
+## The author-facing journal index (build plan step 8)
+
+`/journals` (public, read-only) searches every venue an author may see plus the journals Flexee has
+only listed so far: live venues first (editor-confirmed, then checked from official pages), then
+listed journals by size. Search covers name, publisher, ISSN and subject; filters for tier and open
+access. Every result and every journal page shows the tier badge and the check date. A live
+journal's page (`/journals/v/<slug>`) shows its rules, its source pages and only live open calls; a
+listed journal's page (`/journals/i/<id>`) shows catalogue facts and says plainly that its rules
+were not read. Excluded journals and journals waiting for an exclusion decision never appear.
+Match results link to each journal's page, and the match score's scope part now also counts the
+embedding similarity (cosine 0.40 to 0.70 mapped to 0 to 100 percent; it never lowers the
+word-based score). `import_venue_index --force` closes a run left "processing" by a restart.
+
 ## Topical shortlist for matching (build plan step 5)
 
 Before any AI looks at a manuscript-venue pair, a local embedding model narrows the matchable

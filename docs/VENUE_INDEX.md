@@ -1,0 +1,45 @@
+# Venue index, layer 1: the spine
+
+Build plan step 2. A catalogue of journals in the target fields, built from free structured
+sources with no AI. Records are labelled **Listed** until the agent reads their rules (step 4).
+
+## Sources
+
+| Source | What it gives | Calls |
+|---|---|---|
+| OpenAlex `/sources` | The journal list: title, ISSNs, publisher, country, open access, subject mix, output and citation counts, first and last publication year | ~1 per 100 journals |
+| Crossref `/journals/{issn}` | Whether the journal registers DOIs, how many, and the first year with DOIs | 1 per journal |
+| DOAJ `/api/search/journals/issn:{issn}` | Open-access titles only: DOAJ listing, review type and time, APC, and the official guideline, scope and board pages | 1 per open-access journal |
+| ISSN | Checksum validation, and whether Crossref lists the same ISSNs | none |
+
+The ISSN Portal itself is a paid service and disallows automated access, so it is not called.
+
+## Which journals are kept
+
+The `business-is` profile covers OpenAlex subfields for business and management, information
+systems, decision sciences and operations research, AI, industrial engineering and education.
+OpenAlex lists every topic a journal ever published in, so one stray paper must not pull a
+journal in. A journal is kept when its main subject is in scope, or at least
+`VENUE_INDEX_MIN_SCOPE_SHARE` (25%) of its output is; it must also have at least
+`VENUE_INDEX_MIN_WORKS` works and have published within `VENUE_INDEX_MAX_INACTIVE_YEARS`.
+
+If OpenAlex rejects the subfield filter, the importer falls back to keyword searches with the
+same scope check, and records which method it used on the run.
+
+## Running it
+
+```
+python manage.py import_venue_index               # full: catalogue refresh, then Crossref/DOAJ checks
+python manage.py import_venue_index --enrich-only # only the checks that are due
+python manage.py ensure_venue_index_schedule      # monthly refresh on the 1st + daily catch-up
+```
+
+The admin page **Venue Index** shows coverage, the last run, and every record, and can start a
+run or turn the schedule on.
+
+Each run stops after `VENUE_INDEX_TIME_LIMIT_MINUTES` and saves as it goes; unfinished checks
+continue in the next run. A journal that drops out of the catalogue is kept and flagged
+("missing"), never deleted, and only a complete catalogue pass can flag it.
+
+Cost: a full pass of ~2,500 journals is about 25 OpenAlex list calls plus one Crossref call per
+journal, well within OpenAlex's free daily allowance even without a key.

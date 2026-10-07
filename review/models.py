@@ -343,6 +343,9 @@ class Manuscript(models.Model):
     access_token_hash = models.CharField(max_length=64, blank=True, db_index=True)
     parsed_profile = models.JSONField(default=dict, blank=True)
     content_purged_at = models.DateTimeField(null=True, blank=True)
+    # When the topical venue shortlist was last made (build plan step 5); venues changed after this
+    # are checked against the shortlist when the author next opens their matches.
+    shortlisted_at = models.DateTimeField(null=True, blank=True)
     # When the author last opened their venue matches; matches created later are shown as new.
     matches_seen_at = models.DateTimeField(null=True, blank=True)
 
@@ -400,6 +403,10 @@ class VenueMatch(models.Model):
     reasons = models.JSONField(default=list, blank=True)
     gaps = models.JSONField(default=list, blank=True)
     evidence = models.JSONField(default=list, blank=True)
+    # Build plan step 5: how close the venue's scope is to the manuscript (cosine of local embeddings,
+    # or keyword overlap when the embedding model is unavailable) and its place in the topical shortlist.
+    topic_similarity = models.FloatField(null=True, blank=True)
+    shortlist_rank = models.PositiveIntegerField(null=True, blank=True)
 
     class Meta:
         ordering = ['created_at', 'id']
@@ -930,3 +937,23 @@ class BlockedPublisher(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class VenueEmbedding(models.Model):
+    """Topic vector of a venue's name, description and aims & scope (build plan step 5).
+
+    Made by a local embedding model (Ollama, CPU). Re-made only when the text or the model changes."""
+    venue = models.OneToOneField(Venue, on_delete=models.CASCADE, related_name='embedding')
+    model = models.CharField(max_length=120)
+    text_hash = models.CharField(max_length=64)
+    vector = models.JSONField(default=list)  # unit length, so cosine similarity is a dot product
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class ManuscriptEmbedding(models.Model):
+    """Topic vector of a manuscript's title, keywords, abstract and profile. Deleted with its content."""
+    manuscript = models.OneToOneField(Manuscript, on_delete=models.CASCADE, related_name='embedding')
+    model = models.CharField(max_length=120)
+    text_hash = models.CharField(max_length=64)
+    vector = models.JSONField(default=list)
+    updated_at = models.DateTimeField(auto_now=True)

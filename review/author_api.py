@@ -613,6 +613,8 @@ def _match_payload(item):
         'reasons': item.reasons,
         'gaps': item.gaps,
         'evidence': item.evidence,
+        'topic_similarity': item.topic_similarity,
+        'shortlist_rank': item.shortlist_rank,
         'created_at': item.created_at.isoformat(),
     }
 
@@ -1636,23 +1638,47 @@ def _generate_deterministic_matches(manuscript, latest_readiness, venues):
     return created
 
 
+def _apply_shortlist(manuscript, matches, info):
+    """Store each match's topical similarity and shortlist rank (build plan step 5)."""
+    for match in matches:
+        similarity = info['similarity'].get(match.venue_id)
+        rank = info['rank'].get(match.venue_id)
+        if match.topic_similarity != similarity or match.shortlist_rank != rank:
+            match.topic_similarity, match.shortlist_rank = similarity, rank
+            match.save(update_fields=['topic_similarity', 'shortlist_rank'])
+    return matches
+
+
 def refresh_matches_for_new_venues(manuscript):
-    """Match a manuscript against active venues added after it was matched (admin added venues later).
+    """Match a manuscript against venues added after it was matched (admin added venues later).
 
     Only runs for manuscripts the author has already matched and whose latest
-    readiness check allows matching; existing matches are never touched.
+    readiness check allows matching; existing matches are never touched. A new venue is
+    added only if it makes the manuscript's topical shortlist.
     Returns the number of new matches created.
     """
+    from .services.venue_shortlist import build_shortlist
     if not manuscript.venue_matches.exists():
         return 0
     latest_readiness = manuscript.readiness_assessments.filter(status='completed').first()
     if not latest_readiness or not latest_readiness.summary.get('ready_for_matching', False):
         return 0
     matched = set(manuscript.venue_matches.values_list('venue_id', flat=True))
-    new_venues = list(Venue.objects.matchable().exclude(id__in=matched).select_related('organization'))
+    changed = Venue.objects.matchable().exclude(id__in=matched)
+    if manuscript.shortlisted_at:
+        changed = changed.filter(updated_at__gt=manuscript.shortlisted_at)  # only venues added or changed since
+    if not changed.exists():
+        return 0
+    venues = list(Venue.objects.matchable().select_related('organization'))
+    kept, info = build_shortlist(manuscript, venues, prefer=matched)
+    changed_ids = set(changed.values_list('id', flat=True))
+    new_venues = [v for v in kept if v.id in changed_ids]
+    Manuscript.objects.filter(id=manuscript.id).update(shortlisted_at=timezone.now())
     if not new_venues:
         return 0
-    return len(_generate_deterministic_matches(manuscript, latest_readiness, new_venues))
+    created = _generate_deterministic_matches(manuscript, latest_readiness, new_venues)
+    _apply_shortlist(manuscript, created, info)
+    return len(created)
 
 
 @require_POST
@@ -1671,13 +1697,25 @@ def author_generate_matches(request, manuscript_id):
     if not latest_readiness.summary.get('ready_for_matching', False):
         return JsonResponse({'detail': 'Resolve blocking readiness issues before generating venue matches'}, status=409)
 
+    # Build plan step 5: a local embedding model narrows the venues to the topical shortlist first;
+    # only those get the policy gate and, later, the AI fit explanation.
+    from .services.venue_shortlist import build_shortlist, shortlist_summary
     venues = list(Venue.objects.matchable().select_related('organization'))
-    generated = [_match_payload(match) for match in _generate_deterministic_matches(manuscript, latest_readiness, venues)]
+    kept, info = build_shortlist(manuscript, venues)
+    matches = _apply_shortlist(manuscript, _generate_deterministic_matches(manuscript, latest_readiness, kept), info)
+    Manuscript.objects.filter(id=manuscript.id).update(shortlisted_at=timezone.now())
+    if info['considered'] > info['kept']:
+        # Re-running matching replaces matches that are no longer on the shortlist.
+        manuscript.venue_matches.exclude(venue_id__in=[v.id for v in kept]).delete()
+    matches.sort(key=lambda m: (m.shortlist_rank or 10**6))
+    generated = [_match_payload(match) for match in matches]
 
     return JsonResponse({
         'matches': generated,
         'matching_stage': 'deterministic_policy_gate_v1',
-        'note': 'No semantic fit ranking is performed by this endpoint. The AI matching agent will extend these persisted records.',
+        'shortlist': shortlist_summary(info),
+        'note': 'No semantic fit ranking is performed by this endpoint: venues are only shortlisted by topic '
+                '(local embeddings) before the policy gate. The AI matching agent will extend these persisted records.',
     }, status=201)
 
 
@@ -1724,7 +1762,8 @@ def author_matches(request, manuscript_id):
              .select_related('venue', 'venue__organization', 'venue_config'))
     seen_at = manuscript.matches_seen_at
     payloads = []
-    for item in items:
+    # Closest topic first (shortlist rank); matches made before step 5 keep their original order after.
+    for item in sorted(items, key=lambda m: (m.shortlist_rank is None, m.shortlist_rank or 0)):
         payload = _match_payload(item)
         payload['is_new'] = bool(seen_at and item.created_at > seen_at)
         payloads.append(payload)

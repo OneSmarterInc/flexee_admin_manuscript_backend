@@ -93,6 +93,7 @@ def run_payload(run):
         'created': run.created_count,
         'updated': run.updated_count,
         'linked': run.linked_count,
+        'removed': run.removed_count,
         'enriched': run.enriched_count,
         'flagged_missing': run.flagged_missing,
         'pending_after': run.pending_after,

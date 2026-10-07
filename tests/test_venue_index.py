@@ -149,9 +149,65 @@ def test_scope_keeps_target_journals_and_drops_the_rest():
     assert vi.assess_scope(MEDICINE, config, this_year=2026)[1]['reason'] == 'mostly outside the target fields'
     assert vi.assess_scope(TINY, config, this_year=2026)[1]['reason'] == 'too few works'
     assert vi.assess_scope(DEAD, config, this_year=2026)[1]['reason'] == 'no longer publishing'
-    mixed = source('S9', 'Mixed', issn_l='0000-0043', topics=[topic('2705', 'Cardiology', 60),
-                                                             topic('1404', 'Management Information Systems', 40)])
-    assert vi.assess_scope(mixed, config, this_year=2026)[0]  # 40% in scope clears the 25% bar
+
+
+def journal(*topics):
+    return source('S9', 'Case', issn_l='0000-0043', topics=[topic(sid, name, count) for sid, name, count in topics])
+
+
+EDU, AI, IS, LING, CIVIL, ACC = (('3304', 'Education'), ('1702', 'Artificial Intelligence'), ('1710', 'Information Systems'),
+                                 ('1203', 'Language and Linguistics'), ('2205', 'Civil and Structural Engineering'),
+                                 ('1402', 'Accounting'))
+
+
+@pytest.mark.parametrize('topics,keep,reason', [
+    # Cases seen in the first real import
+    ([(*EDU, 100)], False, 'Education journal with little business or IS content'),     # school teaching
+    ([(*EDU, 85), (*IS, 15)], True, ''),                                                  # education + IS / ed-tech
+    ([(*EDU, 92), (*AI, 8), (*IS, 4)], True, ''),                                         # AI in education: 12% other
+    ([(*AI, 95), ('1703', 'Computational Theory and Mathematics', 5)], False,
+     'Artificial Intelligence journal with little business or IS content'),               # pure AI
+    ([(*AI, 70), (*IS, 30)], True, ''),                                                   # AI in organizations
+    ([(*LING, 45), (*EDU, 55)], False, 'Education journal with little business or IS content'),
+    ([(*CIVIL, 61), (*IS, 39)], False, 'mostly outside the target fields'),               # 39% < 50%
+    ([(*LING, 50), (*EDU, 30), (*IS, 5)], False, 'mostly outside the target fields'),     # 35% in scope
+    ([(*ACC, 40), (*IS, 30), ('1408', 'Strategy and Management', 30)], True, ''),         # 60% core: still a fit
+])
+def test_scope_rules_from_the_first_real_import(topics, keep, reason):
+    kept, details = vi.assess_scope(journal(*topics), vi.IndexConfig(), this_year=2026)
+    assert (kept, details['reason']) == (keep, reason)
+
+
+def test_scope_settings_can_be_changed(monkeypatch):
+    monkeypatch.setenv('VENUE_INDEX_BRIDGING_SUBFIELDS', '')  # treat education like a core subject
+    assert vi.assess_scope(journal((*EDU, 100)), vi.IndexConfig(), this_year=2026)[0]
+    monkeypatch.delenv('VENUE_INDEX_BRIDGING_SUBFIELDS')
+    monkeypatch.setenv('VENUE_INDEX_MIN_SCOPE_SHARE', '0.35')
+    assert vi.assess_scope(journal((*CIVIL, 61), (*IS, 39)), vi.IndexConfig(), this_year=2026)[0]
+
+
+def test_titles_are_cleaned_of_invisible_characters():
+    assert vi.clean_title('\ue000The \ue000American school board journal') == 'The American school board journal'
+    assert vi.clean_title('Journal\u2028of  Testing\u200b ') == 'Journal of Testing'
+    assert vi.clean_title('Ámbitos de Psicopedagogía') == 'Ámbitos de Psicopedagogía'
+
+
+@pytest.mark.django_db
+def test_journals_that_no_longer_qualify_are_removed_unless_linked(monkeypatch):
+    lang_heavy = source('S7', 'Language Teaching Review', issn_l='0000-0051',
+                        topics=[topic('1203', 'Language and Linguistics', 60), topic('1404', 'Management Information Systems', 40)])
+    linked_one = {**lang_heavy, 'id': 'https://openalex.org/S8', 'display_name': 'Linked Language Journal', 'issn_l': '0000-006X'}
+    monkeypatch.setenv('VENUE_INDEX_MIN_SCOPE_SHARE', '0.25')  # the old, looser rule
+    run_full(FakeHttp([[MIS, lang_heavy, linked_one]]))
+    assert IndexedVenue.objects.count() == 3
+    org = Organization.objects.create(name='Org')
+    venue = Venue.objects.create(organization=org, name='Linked', slug='linked', venue_type='journal')
+    IndexedVenue.objects.filter(openalex_id='S8').update(venue=venue)
+
+    monkeypatch.delenv('VENUE_INDEX_MIN_SCOPE_SHARE')  # back to the default 50%
+    run = run_full(FakeHttp([[MIS, lang_heavy, linked_one]]))
+    assert run.removed_count == 1 and 'no longer in scope removed' in run.summary
+    assert set(IndexedVenue.objects.values_list('openalex_id', flat=True)) == {'S1', 'S8'}
 
 
 # ---------------------------------------------------------------------------

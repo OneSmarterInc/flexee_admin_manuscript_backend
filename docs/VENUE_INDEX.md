@@ -16,12 +16,23 @@ The ISSN Portal itself is a paid service and disallows automated access, so it i
 
 ## Which journals are kept
 
-The `business-is` profile covers OpenAlex subfields for business and management, information
-systems, decision sciences and operations research, AI, industrial engineering and education.
 OpenAlex lists every topic a journal ever published in, so one stray paper must not pull a
-journal in. A journal is kept when its main subject is in scope, or at least
-`VENUE_INDEX_MIN_SCOPE_SHARE` (25%) of its output is; it must also have at least
-`VENUE_INDEX_MIN_WORKS` works and have published within `VENUE_INDEX_MAX_INACTIVE_YEARS`.
+journal in. The subject mix of each journal's output decides:
+
+| Main subject | Kept when |
+|---|---|
+| A core field: business & management, MIS, information systems, decision sciences / operations research, strategy, OB/HRM, technology & innovation | Always |
+| A bridging field: Education, Artificial Intelligence, Industrial & Manufacturing Engineering | At least 10% of its output is in the other target fields (`VENUE_INDEX_MIN_CORE_SHARE`). Keeps business/IS education, ed-tech and AI-in-organizations journals; drops general school teaching and pure AI |
+| Anything else (accounting, linguistics, engineering, ...) | At least 50% of its output is in the target fields (`VENUE_INDEX_MIN_SCOPE_SHARE`) and 10% in core fields |
+
+Journals must also have at least `VENUE_INDEX_MIN_WORKS` works and have published within
+`VENUE_INDEX_MAX_INACTIVE_YEARS`. A journal already in the index that no longer qualifies (for
+example after the rules were narrowed) is removed at the next refresh, unless it is linked to a
+live venue.
+
+The first real import (October 2026) with a looser 25% rule kept ~3,000 journals: 1,121 mainly
+education, 225 mainly AI, and ~500 whose main subject was outside the fields. These rules
+target the plan's 1,500 to 2,500.
 
 If OpenAlex rejects the subfield filter, the importer falls back to keyword searches with the
 same scope check, and records which method it used on the run.

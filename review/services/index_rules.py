@@ -55,18 +55,22 @@ def rules_field():
 
 def rules_candidates(profile, now=None):
     """Journals in the first field whose rules should be read now: not excluded, not waiting for an
-    exclusion decision, not already live, never read (or a failed read older than 30 days; a site
-    that blocks automated reading after 90 days)."""
+    exclusion decision, and either not yet live (never read, a failed read older than 30 days, a
+    blocking site after 90 days) or live and due for the quarterly re-read (build plan step 7)."""
+    from .freshness import rules_refresh_days
     now = now or timezone.now()
     _key, _label, subfields = rules_field()
     retry = now - timedelta(days=RETRY_AFTER_DAYS)
     retry_blocked = now - timedelta(days=BLOCKED_RETRY_DAYS)
-    return (IndexedVenue.objects.filter(field_profile=profile, excluded=False, venue__isnull=True,
-                                        missing_since__isnull=True,
+    refresh = now - timedelta(days=rules_refresh_days())
+    not_live = Q(venue__isnull=True) & (
+        Q(rules_status='not_read') | Q(rules_status__in=['failed', 'incomplete'], rules_read_at__lt=retry)
+        | Q(rules_status='blocked', rules_read_at__lt=retry_blocked))
+    live_due = Q(venue__isnull=False, rules_read_at__lt=refresh)
+    return (IndexedVenue.objects.filter(field_profile=profile, excluded=False, missing_since__isnull=True,
                                         screening_status__in=['clear', 'kept'], subfields__0__id__in=list(subfields))
             .exclude(Q(homepage_url='') & (Q(doaj__guidelines_url__isnull=True) | Q(doaj__guidelines_url='')))
-            .filter(Q(rules_status='not_read') | Q(rules_status__in=['failed', 'incomplete'], rules_read_at__lt=retry)
-                    | Q(rules_status='blocked', rules_read_at__lt=retry_blocked)))
+            .filter(not_live | live_due))
 
 
 def reading_order(queryset):

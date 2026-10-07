@@ -536,7 +536,7 @@ def start_index_run(*, mode='full', trigger='schedule', requested_by=''):
     if active:
         return active, False
     config = IndexConfig()
-    return VenueIndexRun.objects.create(mode=mode if mode in {'full', 'enrich', 'screen', 'rules'} else 'full', trigger=trigger,
+    return VenueIndexRun.objects.create(mode=mode if mode in {'full', 'enrich', 'screen', 'rules', 'calls'} else 'full', trigger=trigger,
                                         requested_by=requested_by[:254], field_profile=config.profile), True
 
 
@@ -591,6 +591,9 @@ def run_index(run, *, http=None, now=None, clock=None, progress=None, time_limit
             from .index_rules import run_rules
             run_rules(run, config.profile, budget, say=say, fetcher=rules_fetcher, extractor=rules_extractor,
                       limit=rules_limit)
+        elif run.mode == 'calls':
+            from .freshness import run_calls
+            run_calls(run, budget, say=say, fetcher=rules_fetcher)
         else:
             if run.mode != 'screen':
                 _enrichment_pass(run, config, http, now, budget, say)
@@ -753,6 +756,10 @@ def _screening_pass(run, config, budget, say, *, page_fetcher=None, read_pages=T
 
 
 def _summary(run):
+    if run.mode == 'calls':
+        return (f'Open calls re-confirmed for {run.calls_checked} venues: {run.calls_open} open calls found'
+                + (f', {run.calls_failed} venues could not be read (their calls are hidden once unconfirmed).'
+                   if run.calls_failed else '.'))
     if run.mode == 'rules':
         extra = ''
         if run.rules_retried or run.rules_escalated:

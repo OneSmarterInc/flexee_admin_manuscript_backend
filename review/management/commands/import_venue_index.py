@@ -20,6 +20,9 @@ class Command(BaseCommand):
         parser.add_argument('--rules-only', action='store_true',
                             help='Read journal rules from their official pages with the AI (first field only). '
                                  'Results wait for approval in Venue Index; nothing is published.')
+        parser.add_argument('--calls-only', action='store_true',
+                            help='Re-confirm open calls for papers on Flexee-verified venues from their official '
+                                 'pages (no AI). Calls not re-confirmed in time are hidden from authors.')
         parser.add_argument('--limit', type=int, default=0,
                             help='With --rules-only: at most this many journals (default VENUE_INDEX_RULES_PER_RUN, 40).')
         parser.add_argument('--no-pages', action='store_true',
@@ -29,7 +32,7 @@ class Command(BaseCommand):
                                  'Unfinished checks continue next time.')
 
     def handle(self, *args, **options):
-        mode = ('rules' if options['rules_only'] else 'screen' if options['screen_only']
+        mode = ('calls' if options['calls_only'] else 'rules' if options['rules_only'] else 'screen' if options['screen_only']
                 else 'enrich' if options['enrich_only'] else 'full')
         run, created = start_index_run(mode=mode, trigger='command', requested_by='manage.py')
         if not created:
@@ -70,7 +73,7 @@ class Command(BaseCommand):
                           f"{counts['not_enriched']} not yet checked.")
         from review.services.index_screening import review_queue
         queue = review_queue(config.profile).count()
-        if queue and mode != 'rules':
+        if queue and mode not in ('rules', 'calls'):
             self.stdout.write(self.style.WARNING(f'{queue} journals need review: open Venue Index -> "Needs review".'))
         if mode == 'rules':
             from review.models import IndexedVenue

@@ -163,6 +163,30 @@ its own AI usage operation (`index_rules_local`, `index_rules_retry`, `index_rul
 cost of escalation is visible. Venue Index shows the escalation rate per field over 30 days: under
 20 percent the local model pays for itself; above it, that field should move to the cloud.
 
+## Freshness: cadence and stale-call suppression (build plan step 7)
+
+| What | Re-checked | On failure |
+|---|---|---|
+| Catalogue (OpenAlex, Crossref, DOAJ) | Monthly | Keep, flag |
+| Scope, article types, limits, required items | Every 90 days (`VENUE_INDEX_RULES_REFRESH_DAYS`), weekly schedule, local AI | Keep, show the age |
+| Open calls for papers and their deadlines | Weekly per venue (daily schedule, `VENUE_CALLS_RECHECK_DAYS`=6), no AI | Hide |
+
+Rule: an open call is shown to authors only while its deadline is ahead and, on journals Flexee
+checked from official pages, only if it was re-confirmed on those pages within
+`VENUE_CALLS_CONFIRM_DAYS` (10). Otherwise it is hidden, never shown with an old date. The same
+filter applies to what the matching AI is told. Calls on editor-configured venues are the editor's
+to maintain and are hidden once their deadline passes. Dated deadlines that have passed are not
+shown either.
+
+The re-read of a live journal never changes its live rules by itself: unchanged pages renew its
+check date; changed pages put it under Venue Index -> "Pages changed", where an admin applies the
+changes (a new rules version) or leaves the live rules, which keep their older check date.
+
+```
+python manage.py import_venue_index --calls-only      # re-confirm open calls now
+python manage.py ensure_venue_index_schedule          # monthly, daily checks, daily calls, weekly rules
+```
+
 ## Topical shortlist for matching (build plan step 5)
 
 Before any AI looks at a manuscript-venue pair, a local embedding model narrows the matchable

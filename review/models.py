@@ -260,6 +260,13 @@ class Venue(models.Model):
     # 'decided_at': iso, 'decided_by': email, 'note': str}.
     excluded = models.BooleanField(default=False, db_index=True)
     exclusion_reason = models.JSONField(default=dict, blank=True)
+    # Build plan step 7: open calls for papers, re-confirmed weekly from the official pages (no AI).
+    # Each call: {'title', 'deadline', 'url', 'evidence_text', 'confirmed_at'}. A call that was not
+    # re-confirmed inside its window, or whose deadline passed, is hidden from authors.
+    open_calls = models.JSONField(default=list, blank=True)
+    calls_checked_at = models.DateTimeField(null=True, blank=True)   # last successful check
+    calls_attempted_at = models.DateTimeField(null=True, blank=True)
+    calls_error = models.CharField(max_length=300, blank=True)
 
     class Meta:
         ordering = ['name']
@@ -865,7 +872,8 @@ class VenueIndexRun(models.Model):
         ('failed', 'Failed'),
     ]
     MODE_CHOICES = [('full', 'Catalogue refresh and enrichment'), ('enrich', 'Enrichment only'),
-                    ('screen', 'Screening only'), ('rules', 'Read rules from official pages')]
+                    ('screen', 'Screening only'), ('rules', 'Read rules from official pages'),
+                    ('calls', 'Re-confirm open calls for papers')]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -895,6 +903,9 @@ class VenueIndexRun(models.Model):
     rules_failed = models.PositiveIntegerField(default=0)
     rules_retried = models.PositiveIntegerField(default=0)     # step 6: a second local attempt was needed
     rules_escalated = models.PositiveIntegerField(default=0)   # step 6: sent to the cloud model
+    calls_checked = models.PositiveIntegerField(default=0)     # step 7: venues whose calls were re-confirmed
+    calls_open = models.PositiveIntegerField(default=0)        # step 7: open calls found in this run
+    calls_failed = models.PositiveIntegerField(default=0)
     catalogue_complete = models.BooleanField(default=False)
     # When VENUE_INDEX_MAX_RECORDS was reached: works count of the smallest journal kept.
     size_cutoff = models.PositiveIntegerField(null=True, blank=True)

@@ -380,7 +380,9 @@ def sweep_retention_task():
         with transaction.atomic():
             try:
                 submission = (
-                    VenueSubmission.objects.select_for_update()
+                    # Lock only the submission row: PostgreSQL refuses FOR UPDATE on the nullable side of the
+                    # outer join that select_related('venue_config') makes.
+                    VenueSubmission.objects.select_for_update(of=('self',))
                     .select_related('manuscript', 'venue', 'venue_config')
                     .get(id=submission_id)
                 )

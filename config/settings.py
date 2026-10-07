@@ -126,7 +126,13 @@ TEMPLATES = []
 WSGI_APPLICATION = 'config.wsgi.application'
 ASGI_APPLICATION = 'config.asgi.application'
 
-if os.getenv('DATABASE_URL') and not TESTING:
+if TESTING and os.getenv('TEST_DATABASE_URL'):
+    # Run the test suite on PostgreSQL like production: TEST_DATABASE_URL=postgres://user@host:5432/db pytest
+    # (Django creates and drops its own test_<db> database). Without it, tests use SQLite, which ignores
+    # row locks and connection handling that PostgreSQL enforces.
+    import dj_database_url
+    DATABASES = {'default': dj_database_url.parse(os.environ['TEST_DATABASE_URL'])}
+elif os.getenv('DATABASE_URL') and not TESTING:
     import dj_database_url
     DATABASES = {'default': dj_database_url.config(conn_max_age=600, ssl_require=PRODUCTION)}
 elif PRODUCTION:

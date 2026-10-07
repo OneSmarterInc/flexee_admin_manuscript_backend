@@ -1,5 +1,5 @@
 from django.urls import path
-from . import views, discovery_api, index_api
+from . import views, discovery_api, index_api, journal_index_api
 from . import author_api
 from . import editor_api
 from .api_summary import admin_submission_api_summary
@@ -37,6 +37,9 @@ urlpatterns = [
     path('author/manuscripts/<uuid:manuscript_id>/matches/semantic/', author_api.author_run_semantic_matches),
     path('author/manuscripts/<uuid:manuscript_id>/submissions/', author_api.author_create_submission),
     path('author/venues/', author_api.public_venues),
+    path('journals/', journal_index_api.journal_search),
+    path('journals/v/<slug:slug>/', journal_index_api.journal_venue_page),
+    path('journals/i/<uuid:record_id>/', journal_index_api.journal_listed_page),
     path('author/venue-submissions/<uuid:submission_id>/', author_api.author_submission_detail),
     path('author/venue-submissions/<uuid:submission_id>/assessment/run/', author_api.author_run_venue_assessment),
     path('author/venue-submissions/<uuid:submission_id>/requirements/', author_api.author_save_submission_requirements),

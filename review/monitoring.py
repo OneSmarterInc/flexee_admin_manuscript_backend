@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import os
 from copy import deepcopy
 from functools import wraps
 from urllib.parse import urlsplit, urlunsplit
+
+logger = logging.getLogger(__name__)
 
 
 SENSITIVE_KEYS = {
@@ -153,6 +156,12 @@ def initialize_sentry(
 
     dsn = str(dsn or '').strip()
     if not dsn:
+        _ENABLED = False
+        return False
+    if 'CHANGE_ME' in dsn.upper() or not dsn.lower().startswith(('https://', 'http://')):
+        # A template placeholder or malformed value: start without Sentry so
+        # verify_production_readiness can report it, instead of crashing here.
+        logger.warning('SENTRY_DSN is not a valid DSN; error monitoring is off.')
         _ENABLED = False
         return False
 

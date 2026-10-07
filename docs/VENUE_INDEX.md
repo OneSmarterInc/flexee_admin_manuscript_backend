@@ -92,6 +92,9 @@ and scanned for exact phrases: guaranteed acceptance, publication or acceptance 
 within days, and metrics from unrecognised ranking bodies (SJIF, Global Impact Factor, Index
 Copernicus Value and similar). Any match puts the journal in the queue with the quote and the
 page link. Pages are re-read after 30 days. `VENUE_INDEX_READ_PAGES=false` turns this off.
+Up to `VENUE_INDEX_PAGE_WORKERS` (6) websites are read at the same time, but never two requests
+at once to the same site, with `VENUE_INDEX_PAGE_DELAY_SECONDS` between journals on one site
+(many journals share a publisher's site). Journals with the most concern points are read first.
 
 Decisions (admin, Venue Index -> a journal):
 - **Exclude**: choose criteria and evidence links; optionally block the publisher, which sends

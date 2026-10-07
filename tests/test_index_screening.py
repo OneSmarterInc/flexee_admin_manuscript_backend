@@ -361,3 +361,64 @@ def test_run_now_accepts_screen_mode():
     with mock.patch('django_q.tasks.async_task') as queued:
         response = post(client, '/api/admin/venue-index/run/', {'mode': 'screen'})
     assert response.status_code == 202 and response.json()['run']['mode'] == 'screen' and queued.called
+
+
+# ---------------------------------------------------------------------------
+# Parallel page reading: different websites at once, never two requests to one site
+# ---------------------------------------------------------------------------
+
+class SlowFetcher:
+    """Each fetch takes 0.2 s; records how many requests run at once, per site and overall."""
+
+    def __init__(self):
+        import threading
+        self.lock = threading.Lock()
+        self.active = {}
+        self.max_per_site = 0
+        self.max_overall = 0
+
+    def fetch(self, url):
+        import time as _time
+        from urllib.parse import urlsplit
+        site = urlsplit(url).hostname
+        with self.lock:
+            self.active[site] = self.active.get(site, 0) + 1
+            self.max_per_site = max(self.max_per_site, self.active[site])
+            self.max_overall = max(self.max_overall, sum(self.active.values()))
+        _time.sleep(0.2)
+        with self.lock:
+            self.active[site] -= 1
+        return FetchedPage(url=url, title='', text='Nothing unusual here.', links=[])
+
+
+@pytest.mark.django_db
+def test_pages_are_read_in_parallel_but_one_request_per_site(monkeypatch):
+    import time as _time
+    monkeypatch.setenv('VENUE_INDEX_PAGE_WORKERS', '6')
+    monkeypatch.setenv('VENUE_INDEX_PAGE_DELAY_SECONDS', '0')
+    for i in range(12):  # 12 journals on 12 different sites
+        record(f'Site Journal {i}', openalex_id=f'S{i}', homepage_url=f'https://site{i}.example/', screening_points=1)
+    for i in range(4):   # 4 journals on one publisher's site
+        record(f'Publisher Journal {i}', openalex_id=f'P{i}', homepage_url=f'https://www.bigpress.example/j{i}',
+               screening_points=1)
+    fetcher = SlowFetcher()
+    run = VenueIndexRun.objects.create(mode='screen')
+    started = _time.monotonic()
+    scr.gather_page_evidence(run, 'business-is', lambda: True, fetcher=fetcher)
+    elapsed = _time.monotonic() - started
+    assert run.pages_checked == 16 and IndexedVenue.objects.filter(pages_checked_at__isnull=False).count() == 16
+    assert fetcher.max_per_site == 1           # polite: never two at once on one site
+    assert fetcher.max_overall >= 4            # but different sites in parallel
+    assert elapsed < 16 * 0.2 * 0.6            # well under the one-at-a-time time (3.2 s)
+
+
+@pytest.mark.django_db
+def test_time_limit_stops_taking_new_sites(monkeypatch):
+    monkeypatch.setenv('VENUE_INDEX_PAGE_WORKERS', '2')
+    for i in range(10):
+        record(f'Site Journal {i}', openalex_id=f'S{i}', homepage_url=f'https://site{i}.example/', screening_points=1)
+    calls = iter([True] * 3 + [False] * 1000)
+    run = VenueIndexRun.objects.create(mode='screen')
+    scr.gather_page_evidence(run, 'business-is', lambda: next(calls), fetcher=SlowFetcher())
+    assert 1 <= run.pages_checked < 10  # what was started finishes and is saved; the rest waits for the next run
+    assert IndexedVenue.objects.filter(pages_checked_at__isnull=True).count() == 10 - run.pages_checked

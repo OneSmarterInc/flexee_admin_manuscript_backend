@@ -266,44 +266,111 @@ def page_candidates(profile, now):
             .filter(Q(pages_checked_at__isnull=True) | Q(pages_checked_at__lt=stale)))
 
 
+class HostGate:
+    """Politeness across threads: at most one request at a time to any one website, with a pause
+    between journals on the same site. Different websites are read in parallel."""
+
+    def __init__(self, delay):
+        import threading
+        self.delay = delay
+        self._lock = threading.Lock()
+        self._host_locks = {}
+        self._next_at = {}
+
+    def hold(self, host):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def held():
+            import threading
+            with self._lock:
+                host_lock = self._host_locks.setdefault(host, threading.Lock())
+            with host_lock:
+                wait = self._next_at.get(host, 0) - time.monotonic()
+                if wait > 0:
+                    time.sleep(wait)
+                try:
+                    yield
+                finally:
+                    self._next_at[host] = time.monotonic() + self.delay
+        return held()
+
+
+def _site(url):
+    from urllib.parse import urlsplit
+    host = (urlsplit(url or '').hostname or '').lower()
+    return host[4:] if host.startswith('www.') else host
+
+
 def gather_page_evidence(run, profile, budget, *, fetcher=None, say=lambda m: None, now=None):
-    """Read the official pages of candidate journals and record exact-quote evidence."""
+    """Read the official pages of candidate journals and record exact-quote evidence.
+
+    Several websites are read in parallel (VENUE_INDEX_PAGE_WORKERS, default 6), never two requests
+    to the same site at once. Network work happens in threads; every database write happens here."""
+    import threading
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
     from .venue_discovery import DiscoveryConfig, SafeFetcher
     now = now or timezone.now()
     due = list(page_candidates(profile, now).order_by('pages_checked_at', '-screening_points', 'title')
                .values_list('id', flat=True))
     if not due:
         return
-    if fetcher is None:
-        config = DiscoveryConfig.from_env()
-        config = replace(config, max_pages_per_run=len(due) * 4 + 10,
-                         per_domain_delay=float(os.getenv('VENUE_INDEX_PAGE_DELAY_SECONDS', '1.0') or 0))
-        fetcher = SafeFetcher(config)
-    say(f'Reading the official pages of {len(due):,} journals for evidence (exact quotes only)…')
-    blocked = blocked_publisher_names()
-    for index, record_id in enumerate(due, 1):
-        if not budget():
-            say('Time limit reached; the remaining pages are read in the next run.')
-            break
-        record = IndexedVenue.objects.filter(id=record_id).first()
-        if record is None:
-            continue
+    try:
+        workers = max(1, min(int(os.getenv('VENUE_INDEX_PAGE_WORKERS', '6')), 12))
+    except ValueError:
+        workers = 6
+    delay = float(os.getenv('VENUE_INDEX_PAGE_DELAY_SECONDS', '1.0') or 0)
+    gate = HostGate(delay)
+    local = threading.local()
+
+    def fetcher_for_thread():
+        if fetcher is not None:
+            return fetcher
+        if not hasattr(local, 'fetcher'):
+            config = replace(DiscoveryConfig.from_env(), max_pages_per_run=len(due) * 4 + 10, per_domain_delay=delay)
+            local.fetcher = SafeFetcher(config)
+        return local.fetcher
+
+    def read(record):
         try:
-            flags, problem = page_evidence(record, fetcher)
+            with gate.hold(_site(record.homepage_url)):
+                flags, problem = page_evidence(record, fetcher_for_thread())
         except Exception as exc:  # one bad site must not stop the run
             logger.warning('Page evidence failed for %s: %s', record.title, exc)
             flags, problem = [], str(exc)[:200]
-        record.page_flags = flags
-        record.pages_checked_at = timezone.now()
-        if problem and not flags:
-            record.last_error = f'Pages not read: {problem}'[:300]
-        record.save(update_fields=['page_flags', 'pages_checked_at', 'last_error', 'updated_at'])
-        screen_record(record, blocked)
-        run.pages_checked += 1
-        if index % 10 == 0 or index == len(due):
-            run.save()
-            say(f'Pages read for {index:,} of {len(due):,} journals')
-        time.sleep(0)  # cooperative point; pacing is per domain inside the fetcher
+        return record, flags, problem
+
+    say(f'Reading the official pages of {len(due):,} journals for evidence (exact quotes only, '
+        f'{workers} websites at a time)…')
+    blocked = blocked_publisher_names()
+    queue = list(due)
+    done_count = 0
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        in_flight = set()
+        while queue or in_flight:
+            while queue and len(in_flight) < workers * 2 and budget():
+                record = IndexedVenue.objects.filter(id=queue.pop(0)).first()
+                if record is not None:
+                    in_flight.add(executor.submit(read, record))
+            if not in_flight:
+                break
+            finished, in_flight = wait(in_flight, return_when=FIRST_COMPLETED)
+            for future in finished:
+                record, flags, problem = future.result()
+                record.page_flags = flags
+                record.pages_checked_at = timezone.now()
+                if problem and not flags:
+                    record.last_error = f'Pages not read: {problem}'[:300]
+                record.save(update_fields=['page_flags', 'pages_checked_at', 'last_error', 'updated_at'])
+                screen_record(record, blocked)
+                run.pages_checked += 1
+                done_count += 1
+                if done_count % 10 == 0 or done_count == len(due):
+                    run.save()
+                    say(f'Pages read for {done_count:,} of {len(due):,} journals')
+    if queue:
+        run.save()
+        say('Time limit reached; the remaining pages are read in the next run.')
 
 
 # ---------------------------------------------------------------------------

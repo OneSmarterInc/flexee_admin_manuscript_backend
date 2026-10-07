@@ -145,9 +145,18 @@ def extract_with_escalation(record, pages, config, hints, *, escalation, min_con
             provider, model, raw = _call(stage, pages, config, extractor=extractor, feedback=feedback,
                                          escalation=escalation)
         except vd.DiscoveryModelUnavailable as exc:
-            if stage != 'cloud':
-                raise RulesModelUnavailable(str(exc)) from exc
-            escalation.cloud_blocked, raw, error = str(exc), None, str(exc)
+            if stage == 'local':
+                raise RulesModelUnavailable(str(exc)) from exc  # the main model is down: stop the run
+            if stage == 'local_retry':
+                # The retry failed (often a larger retry model too heavy for the machine). Keep the first
+                # result, and stop using the separate retry model for the rest of the run.
+                raw, error = None, f'Local retry failed: {exc}'[:300]
+                if escalation.retry_model:
+                    escalation.notes.append(f'Retry model {escalation.retry_model} failed ({exc}); '
+                                            'retries use the main model for the rest of this run.')
+                    escalation.retry_model = ''
+            else:
+                escalation.cloud_blocked, raw, error = str(exc), None, str(exc)
         except AIBudgetExceeded as exc:
             escalation.cloud_blocked, raw, error = f'AI budget reached: {exc}', None, f'AI budget reached: {exc}'
         except vd.DiscoveryExtractionError as exc:

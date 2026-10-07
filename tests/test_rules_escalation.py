@@ -207,3 +207,28 @@ def test_local_only_by_default_even_with_an_anthropic_key(monkeypatch):
     assert extractor.calls == ['ollama', 'ollama'] and 'anthropic' not in {a.provider for a in RulesAttempt.objects.all()}
     monkeypatch.setenv('VENUE_INDEX_ESCALATE', 'auto')
     assert esc.Escalation.from_env().cloud_enabled  # opt-in still works
+
+
+@pytest.mark.django_db
+def test_failing_retry_model_does_not_stop_the_run(monkeypatch):
+    first = journal('One', openalex_id='S1')
+    second = journal('Two', openalex_id='S2', homepage='https://two.example/')
+    fetcher, _ = make_fetcher({**JOURNAL_PAGES, 'https://two.example': '<html><body><p>Two.</p></body></html>'})
+    models = []
+
+    def fake_extract(pages, config, *, operation, feedback='', model=None):
+        models.append((operation, model))
+        if model == 'qwen2.5:7b-instruct':
+            raise vd.DiscoveryModelUnavailable('Could not reach Ollama at http://127.0.0.1:11434.')
+        return NAME_ONLY
+    monkeypatch.setattr(vd, 'extract_with_ai', fake_extract)
+    monkeypatch.setenv('VENUE_DISCOVERY_OLLAMA_MODEL', 'qwen3:1.7b')
+    monkeypatch.setenv('VENUE_INDEX_RETRY_OLLAMA_MODEL', 'qwen2.5:7b-instruct')
+    run = run_rules(fetcher, extractor=None)
+    assert run.status == 'completed' and run.rules_attempted == 2  # both journals read
+    retry = RulesAttempt.objects.get(record=first, stage='local_retry')
+    assert retry.outcome == 'error' and 'Local retry failed' in retry.reason
+    # After the 7B failed once, the second journal's retry used the main model.
+    assert RulesAttempt.objects.get(record=second, stage='local_retry').model == 'qwen3:1.7b'
+    first.refresh_from_db()
+    assert first.rules_status in {'ready', 'incomplete'}

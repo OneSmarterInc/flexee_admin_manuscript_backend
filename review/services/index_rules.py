@@ -254,6 +254,8 @@ def run_rules(run, profile, budget, *, say=lambda m: None, fetcher=None, extract
         how = (' (after escalation to Anthropic)' if escalation.escalated > escalated
                else ' (after a local retry)' if escalation.retried > retried else '')
         say(f'[{read}/{min(limit, total_due)}] {record.title}: {STATUS_TEXT.get(status, status)}{how}')
+    for note in escalation.notes:
+        say(note)
     if escalation.cloud_blocked:
         say(f'Escalation to the cloud stopped: {escalation.cloud_blocked}')
     if skipped:

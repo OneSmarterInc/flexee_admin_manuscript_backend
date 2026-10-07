@@ -744,3 +744,104 @@ class VenueDiscoveryRun(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+
+
+class IndexedVenue(models.Model):
+    """One journal in the venue index spine (build plan layer 1).
+
+    Basic, structured facts from free catalogues (OpenAlex, Crossref, DOAJ) with no AI.
+    A record stays 'listed' until the agent reads its rules (layer 2) and it is linked to a
+    live Venue, whose own trust tier then applies.
+    """
+
+    TYPE_CHOICES = [('journal', 'Journal'), ('conference', 'Conference'), ('book_series', 'Book series')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    title = models.CharField(max_length=500)
+    normalized_title = models.CharField(max_length=500, db_index=True)
+    venue_type = models.CharField(max_length=20, choices=TYPE_CHOICES, default='journal')
+    issn_l = models.CharField(max_length=9, blank=True, db_index=True)
+    issns = models.JSONField(default=list, blank=True)
+    publisher = models.CharField(max_length=300, blank=True)
+    country_code = models.CharField(max_length=2, blank=True)
+    homepage_url = models.URLField(max_length=1000, blank=True)
+    open_access = models.BooleanField(default=False)
+    doaj_listed = models.BooleanField(default=False, db_index=True)
+    apc_usd = models.PositiveIntegerField(null=True, blank=True)
+
+    # Which target field this record was imported for, and how much of its output is in scope.
+    field_profile = models.CharField(max_length=40, db_index=True)
+    primary_subfield = models.CharField(max_length=200, blank=True, db_index=True)
+    subfields = models.JSONField(default=list, blank=True)  # [{'id': '1404', 'name': ..., 'share': 0.4}]
+    scope_share = models.FloatField(default=0)
+
+    metrics = models.JSONField(default=dict, blank=True)  # works_count, cited_by_count, h_index, is_core, ...
+    first_publication_year = models.PositiveSmallIntegerField(null=True, blank=True)
+    last_publication_year = models.PositiveSmallIntegerField(null=True, blank=True)
+
+    crossref = models.JSONField(default=dict, blank=True)    # registered, total_dois, first_year, publisher
+    doaj = models.JSONField(default=dict, blank=True)        # guideline/scope/board URLs, review weeks, APC
+    issn_checks = models.JSONField(default=dict, blank=True)  # valid_checksums, crossref_agrees
+    openalex_id = models.CharField(max_length=40, unique=True, null=True, blank=True)  # e.g. 'S9731383'
+    source_ids = models.JSONField(default=dict, blank=True)  # other catalogue ids, e.g. {'doaj': '...'}
+    checked = models.JSONField(default=dict, blank=True)     # last check time per source
+
+    venue = models.ForeignKey(Venue, null=True, blank=True, on_delete=models.SET_NULL, related_name='index_records')
+
+    first_imported_at = models.DateTimeField(default=timezone.now)
+    last_refreshed_at = models.DateTimeField(default=timezone.now, db_index=True)  # last seen in the catalogue
+    enriched_at = models.DateTimeField(null=True, blank=True, db_index=True)       # Crossref/DOAJ last checked
+    missing_since = models.DateTimeField(null=True, blank=True)  # no longer returned by the catalogue: kept, flagged
+    last_error = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['title']
+        indexes = [
+            models.Index(fields=['field_profile', 'title'], name='index_profile_title_idx'),
+        ]
+
+    def __str__(self):
+        return self.title
+
+    @property
+    def trust_tier(self):
+        return self.venue.trust_tier if self.venue_id else Venue.TIER_LISTED
+
+
+class VenueIndexRun(models.Model):
+    STATUS_CHOICES = [
+        ('queued', 'Queued'),
+        ('processing', 'Processing'),
+        ('completed', 'Completed'),
+        ('failed', 'Failed'),
+    ]
+    MODE_CHOICES = [('full', 'Catalogue refresh and enrichment'), ('enrich', 'Enrichment only')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='queued', db_index=True)
+    mode = models.CharField(max_length=10, choices=MODE_CHOICES, default='full')
+    trigger = models.CharField(max_length=20, default='schedule')  # schedule | manual | command
+    requested_by = models.CharField(max_length=254, blank=True)
+    field_profile = models.CharField(max_length=40, blank=True)
+    catalogue_method = models.CharField(max_length=20, blank=True)  # subfield_filter | keyword_search
+    pages_fetched = models.PositiveIntegerField(default=0)
+    records_seen = models.PositiveIntegerField(default=0)
+    out_of_scope = models.PositiveIntegerField(default=0)
+    created_count = models.PositiveIntegerField(default=0)
+    updated_count = models.PositiveIntegerField(default=0)
+    linked_count = models.PositiveIntegerField(default=0)
+    enriched_count = models.PositiveIntegerField(default=0)
+    flagged_missing = models.PositiveIntegerField(default=0)
+    pending_after = models.PositiveIntegerField(default=0)
+    catalogue_complete = models.BooleanField(default=False)
+    errors = models.JSONField(default=list, blank=True)
+    summary = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['-created_at']

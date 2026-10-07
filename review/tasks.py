@@ -499,3 +499,27 @@ def run_venue_discovery_task(run_id=None, schedule_tz=None):
             return str(run.id)  # a run is already in progress
     run_discovery(run)
     return str(run.id)
+
+
+def run_venue_index_task(run_id=None, mode='full'):
+    """Venue index import (build plan step 2). The monthly schedule runs a full refresh;
+    the daily one only finishes Crossref/DOAJ checks left over (and stops at once if none)."""
+    from .models import VenueIndexRun
+    from .services.venue_index import IndexConfig, pending_enrichment, run_index, start_index_run
+
+    if run_id:
+        run = VenueIndexRun.objects.filter(id=run_id).first()
+        if run is None or run.status != 'queued':
+            if run is not None and run.status == 'processing':
+                VenueIndexRun.objects.filter(id=run.id, status='processing').update(
+                    status='failed', completed_at=timezone.now(),
+                    summary='Interrupted (worker restarted or time limit reached). Records saved before that were kept.')
+            return None
+    else:
+        if mode == 'enrich' and not pending_enrichment(IndexConfig(), timezone.now()).exists():
+            return None  # nothing waiting: the daily catch-up costs nothing
+        run, created = start_index_run(mode=mode, trigger='schedule')
+        if not created:
+            return str(run.id)
+    run_index(run)
+    return str(run.id)

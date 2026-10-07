@@ -144,3 +144,27 @@ rules. Excluding a published journal later hides the live venue again.
 python manage.py import_venue_index --rules-only            # up to 40 journals
 python manage.py import_venue_index --rules-only --limit 5  # a quick trial
 ```
+
+## Topical shortlist for matching (build plan step 5)
+
+Before any AI looks at a manuscript-venue pair, a local embedding model narrows the matchable
+venues (claimed and verified_index) to the `VENUE_SHORTLIST_SIZE` (30) whose scope is closest to
+the manuscript. Only those get the policy gate, a match record and, later, the AI fit explanation,
+so matching cost no longer grows with the catalogue. No language model is involved and nothing
+escalates.
+
+The model is `VENUE_EMBED_MODEL=nomic-embed-text` through Ollama (`ollama pull nomic-embed-text`,
+about 270 MB, runs on CPU). A venue's vector comes from its name, description, aims and scope,
+article types, reviewer criteria and methods; a manuscript's from its title, keywords, abstract and
+semantic profile. Vectors are stored and re-made only when that text or the model changes; a
+manuscript's vector is deleted with its content. If Ollama or the model is unavailable, the
+shortlist uses keyword overlap instead, so matching never stops.
+
+Each match stores `topic_similarity` and `shortlist_rank`; the author can sort by closest topic.
+Re-running matching replaces matches that left the shortlist. A venue published later is added to
+an author's matches only if it makes that manuscript's shortlist.
+
+```
+python manage.py embed_venues --check   # does the embedding model answer?
+python manage.py embed_venues           # pre-compute vectors for all matchable venues (optional)
+```

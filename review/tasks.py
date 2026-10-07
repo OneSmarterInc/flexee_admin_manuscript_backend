@@ -5,7 +5,7 @@ import os
 import zipfile
 import concurrent.futures
 from io import BytesIO
-from .models import AuditEvent, ReviewJob, Manuscript, VenueSubmission, Submission, ReviewEvent
+from .models import AuditEvent, ReviewJob, Manuscript, ManuscriptEmbedding, VenueSubmission, Submission, ReviewEvent
 from .services.author_agents import (
     run_semantic_readiness,
     run_semantic_matching,
@@ -457,6 +457,7 @@ def sweep_retention_task():
             )
             manuscript.readiness_assessments.all().delete()
             manuscript.venue_matches.all().delete()
+            ManuscriptEmbedding.objects.filter(manuscript=manuscript).delete()  # derived from the content
             AuditEvent.objects.create(
                 actor_role='system',
                 action='manuscript.retention_purged',

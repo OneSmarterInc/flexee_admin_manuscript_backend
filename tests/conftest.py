@@ -19,6 +19,9 @@ def isolated_environment(monkeypatch):
     # Sessions need a signing secret; tests that check a specific one still set their own.
     if not os.environ.get('ADMIN_SESSION_SECRET'):
         monkeypatch.setenv('ADMIN_SESSION_SECRET', 'test-only-session-secret')
+    # The topical shortlist would call a local Ollama if one is running on the machine; tests use
+    # the keyword fallback unless they turn embeddings on with a fake model (tests/test_venue_shortlist.py).
+    monkeypatch.setenv('VENUE_EMBED_ENABLED', 'false')
     yield
 
 

@@ -536,7 +536,7 @@ def start_index_run(*, mode='full', trigger='schedule', requested_by=''):
     if active:
         return active, False
     config = IndexConfig()
-    return VenueIndexRun.objects.create(mode=mode if mode in {'full', 'enrich', 'screen'} else 'full', trigger=trigger,
+    return VenueIndexRun.objects.create(mode=mode if mode in {'full', 'enrich', 'screen', 'rules'} else 'full', trigger=trigger,
                                         requested_by=requested_by[:254], field_profile=config.profile), True
 
 
@@ -567,7 +567,7 @@ def link_to_venues(config):
 
 
 def run_index(run, *, http=None, now=None, clock=None, progress=None, time_limit_seconds=None, page_fetcher=None,
-              read_pages=True):
+              read_pages=True, rules_fetcher=None, rules_extractor=None, rules_limit=None):
     """Run one import. Saves as it goes, so a stopped run keeps what it found.
 
     progress, if given, is called with short status lines (the management command prints them).
@@ -587,9 +587,14 @@ def run_index(run, *, http=None, now=None, clock=None, progress=None, time_limit
         if run.mode == 'full':
             _catalogue_pass(run, config, http, now, budget, say)
             run.linked_count = link_to_venues(config)
-        if run.mode != 'screen':
-            _enrichment_pass(run, config, http, now, budget, say)
-        _screening_pass(run, config, budget, say, page_fetcher=page_fetcher, read_pages=read_pages)
+        if run.mode == 'rules':
+            from .index_rules import run_rules
+            run_rules(run, config.profile, budget, say=say, fetcher=rules_fetcher, extractor=rules_extractor,
+                      limit=rules_limit)
+        else:
+            if run.mode != 'screen':
+                _enrichment_pass(run, config, http, now, budget, say)
+            _screening_pass(run, config, budget, say, page_fetcher=page_fetcher, read_pages=read_pages)
         run.pending_after = pending_enrichment(config, now).count()
         run.status = 'completed'
         run.summary = _summary(run)
@@ -748,6 +753,9 @@ def _screening_pass(run, config, budget, say, *, page_fetcher=None, read_pages=T
 
 
 def _summary(run):
+    if run.mode == 'rules':
+        return (f'Rules read for {run.rules_attempted} journals: {run.rules_ready} ready for approval, '
+                f'{run.rules_failed} not found or unreadable.')
     parts = []
     if run.mode == 'full':
         parts.append(f'{run.created_count} new and {run.updated_count} refreshed journals '

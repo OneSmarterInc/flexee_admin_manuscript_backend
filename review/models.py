@@ -703,6 +703,9 @@ class DiscoveredVenue(models.Model):
     last_error = models.TextField(blank=True)
 
     added_at = models.DateTimeField(null=True, blank=True)
+    # 'discovery' = found by the daily discovery run; 'index' = rules read for a venue index journal
+    # (approved from the Venue Index page, so it is not listed in Venue Discovery).
+    origin = models.CharField(max_length=20, default='discovery', db_index=True)
     added_venue = models.ForeignKey(Venue, null=True, blank=True, on_delete=models.SET_NULL, related_name='discovery_records')
     added_venue_config = models.ForeignKey(
         VenueAgentConfig, null=True, blank=True, on_delete=models.SET_NULL, related_name='discovery_records'
@@ -818,6 +821,20 @@ class IndexedVenue(models.Model):
     excluded = models.BooleanField(default=False, db_index=True)
     exclusion_reason = models.JSONField(default=dict, blank=True)
 
+    # Rules read from the journal's own pages (build plan step 4, layer 2). Reading never publishes:
+    # an admin approves each journal, which creates the live venue ('verified_index').
+    RULES_CHOICES = [
+        ('not_read', 'Not read'),
+        ('ready', 'Rules ready for approval'),
+        ('incomplete', 'Rules not found on the pages'),
+        ('failed', 'Pages could not be read'),
+    ]
+    rules_status = models.CharField(max_length=20, choices=RULES_CHOICES, default='not_read', db_index=True)
+    rules_read_at = models.DateTimeField(null=True, blank=True)
+    rules_error = models.CharField(max_length=300, blank=True)
+    discovered = models.ForeignKey('DiscoveredVenue', null=True, blank=True, on_delete=models.SET_NULL,
+                                   related_name='index_records')
+
     class Meta:
         ordering = ['title']
         indexes = [
@@ -840,7 +857,7 @@ class VenueIndexRun(models.Model):
         ('failed', 'Failed'),
     ]
     MODE_CHOICES = [('full', 'Catalogue refresh and enrichment'), ('enrich', 'Enrichment only'),
-                    ('screen', 'Screening only')]
+                    ('screen', 'Screening only'), ('rules', 'Read rules from official pages')]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -865,6 +882,9 @@ class VenueIndexRun(models.Model):
     screened_count = models.PositiveIntegerField(default=0)
     flagged_count = models.PositiveIntegerField(default=0)
     pages_checked = models.PositiveIntegerField(default=0)
+    rules_attempted = models.PositiveIntegerField(default=0)
+    rules_ready = models.PositiveIntegerField(default=0)
+    rules_failed = models.PositiveIntegerField(default=0)
     catalogue_complete = models.BooleanField(default=False)
     # When VENUE_INDEX_MAX_RECORDS was reached: works count of the smallest journal kept.
     size_cutoff = models.PositiveIntegerField(null=True, blank=True)

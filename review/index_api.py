@@ -10,6 +10,7 @@ from .auth import require_platform_superuser
 from .index_schedule import get_index_schedule, set_index_schedule
 from .models import BlockedPublisher, IndexedVenue, VenueIndexRun
 from .services.index_screening import CRITERIA, FLAG_TO_CRITERION, DecisionError, decide, screen_record, blocked_publisher_names
+from .services.index_rules import rules_candidates, rules_field, rules_summary
 from .services.venue_discovery import normalize_name
 from .services.venue_index import PROFILES, IndexConfig, coverage_counts, start_index_run
 
@@ -25,6 +26,8 @@ FILTERS = {
     'review': Q(screening_status='flagged') | Q(rereview_suggested=True),
     'excluded': Q(excluded=True),
     'kept': Q(screening_status='kept'),
+    'rules_ready': Q(rules_status='ready', venue__isnull=True),
+    'rules_missing': Q(rules_status__in=['incomplete', 'failed'], venue__isnull=True),
 }
 
 
@@ -65,6 +68,7 @@ def record_payload(item, detail=False):
             'rereview_suggested': item.rereview_suggested,
         },
         'excluded': item.excluded,
+        'rules': {'status': item.rules_status, 'error': item.rules_error, 'read_at': _iso(item.rules_read_at)},
     }
     if detail:
         payload.update({
@@ -92,6 +96,7 @@ def record_payload(item, detail=False):
                  if f.get('kind') == 'negative' and f.get('evidence_url')] + [item.homepage_url]) if u][:5],
             'publisher_blocked': bool(item.publisher) and BlockedPublisher.objects.filter(
                 normalized_name=normalize_name(item.publisher)).exists(),
+            'rules_read': rules_summary(item.discovered),
             'decisions': [{
                 'decision': d.decision, 'criteria': d.criteria, 'evidence_urls': d.evidence_urls, 'note': d.note,
                 'decided_by': d.decided_by, 'decided_at': _iso(d.decided_at),
@@ -126,6 +131,9 @@ def run_payload(run):
         'screened': run.screened_count,
         'flagged': run.flagged_count,
         'pages_checked': run.pages_checked,
+        'rules_attempted': run.rules_attempted,
+        'rules_ready': run.rules_ready,
+        'rules_failed': run.rules_failed,
         'flagged_missing': run.flagged_missing,
         'pending_after': run.pending_after,
         'errors': (run.errors or [])[-10:],
@@ -162,6 +170,7 @@ def index_list(request):
     except (TypeError, ValueError):
         page = 1
 
+    rules_key, rules_label, _subfields = rules_field()
     return JsonResponse({
         'profile': {'key': config.profile, 'label': PROFILES.get(config.profile, {}).get('label', config.profile),
                     'subfields': config.subfields},
@@ -172,6 +181,7 @@ def index_list(request):
         'last_run': run_payload(VenueIndexRun.objects.order_by('-created_at').first()),
         'schedule': get_index_schedule(),
         'criteria': CRITERIA,
+        'rules_field': {'key': rules_key, 'label': rules_label, 'due': rules_candidates(config.profile).count()},
         'blocked_publishers': [{'id': str(b.id), 'name': b.name, 'added_by': b.added_by,
                                 'created_at': _iso(b.created_at)} for b in BlockedPublisher.objects.all()[:200]],
     })
@@ -180,7 +190,7 @@ def index_list(request):
 @require_GET
 @require_platform_superuser
 def index_detail(request, record_id):
-    item = IndexedVenue.objects.select_related('venue').filter(id=record_id).first()
+    item = IndexedVenue.objects.select_related('venue', 'discovered').filter(id=record_id).first()
     if not item:
         return JsonResponse({'detail': 'Index record not found'}, status=404)
     return JsonResponse({'item': record_payload(item, detail=True)})
@@ -193,7 +203,7 @@ def index_run_now(request):
         data = json.loads(request.body or b'{}')
     except ValueError:
         data = {}
-    mode = data.get('mode') if data.get('mode') in {'enrich', 'screen'} else 'full'
+    mode = data.get('mode') if data.get('mode') in {'enrich', 'screen', 'rules'} else 'full'
     run, created = start_index_run(mode=mode, trigger='manual', requested_by=request.editor_user.email)
     if created:
         from django_q.tasks import async_task
@@ -262,3 +272,30 @@ def index_unblock_publisher(request, block_id):
         if normalize_name(record.publisher) == name:
             screen_record(record, names)
     return JsonResponse({'removed': True})
+
+
+@require_POST
+@require_platform_superuser
+def index_publish(request, record_id):
+    """An admin approves the rules the AI read: the journal becomes a live venue for authors,
+    labelled "Checked from official pages". Reading rules never publishes by itself."""
+    from .discovery_api import AddToVenueError, add_discovered_to_venue_agent
+    item = IndexedVenue.objects.select_related('discovered').filter(id=record_id).first()
+    if not item:
+        return JsonResponse({'detail': 'Index record not found'}, status=404)
+    if item.excluded:
+        return JsonResponse({'detail': 'This journal is excluded. Restore it before publishing.'}, status=409)
+    if item.screening_status == 'flagged':
+        return JsonResponse({'detail': 'Decide the exclusion review first (Keep or Exclude).'}, status=409)
+    if item.rules_status != 'ready' or not item.discovered_id:
+        return JsonResponse({'detail': 'Its rules have not been read successfully yet.'}, status=409)
+    try:
+        discovered, _already = add_discovered_to_venue_agent(request, item.discovered_id)
+    except AddToVenueError as exc:
+        return JsonResponse({'detail': exc.detail}, status=exc.status)
+    item.venue_id = discovered.added_venue_id
+    item.save(update_fields=['venue', 'updated_at'])
+    record_audit_event(request, 'venue_index.published', resource_type='indexed_venue', resource_id=item.id,
+                       venue_id=item.venue_id, detail={'title': item.title, 'confidence': discovered.confidence})
+    item = IndexedVenue.objects.select_related('venue', 'discovered').get(id=item.id)
+    return JsonResponse({'item': record_payload(item, detail=True)})

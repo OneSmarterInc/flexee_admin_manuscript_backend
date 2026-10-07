@@ -110,3 +110,29 @@ python manage.py import_venue_index --screen-only            # screen + read pag
 python manage.py import_venue_index --screen-only --no-pages # catalogue signals only
 ```
 Full and daily runs screen automatically after their Crossref/DOAJ checks.
+
+## Reading the rules (build plan step 4, layer 2)
+
+For the first field (`VENUE_INDEX_RULES_FIELD=information-systems`: Information Systems, MIS,
+Information Systems and Management), journals that are not excluded, not waiting for an
+exclusion decision and not yet live have their rules read from their own pages: the DOAJ
+author-guidelines page when there is one, otherwise the homepage plus linked author and
+submission pages. The Venue Discovery pipeline does the reading, so the same guarantees apply:
+every rule must be backed by a quote found on the fetched page, invented limits are dropped,
+and confidence is computed from the sources, never chosen by the AI.
+
+The AI is local Ollama by default (`VENUE_INDEX_RULES_AI_PROVIDER=ollama`, model from
+`VENUE_DISCOVERY_OLLAMA_MODEL`, a 7B to 8B model recommended). If Ollama cannot be reached the
+run stops with that reason instead of failing every journal. `VENUE_INDEX_RULES_PER_RUN` (40)
+is the per-run ceiling, together with the time limit.
+
+Outcomes: **Rules ready** (quoted rules found), **Rules not found** (with the reason) or pages
+unreadable; failed reads are retried after 30 days. Reading never publishes. In Venue Index ->
+"Rules ready", an admin checks what was read (each rule with its quote and link) and clicks
+**Publish**, which creates the live venue labelled "Checked from official pages" with those
+rules. Excluding a published journal later hides the live venue again.
+
+```
+python manage.py import_venue_index --rules-only            # up to 40 journals
+python manage.py import_venue_index --rules-only --limit 5  # a quick trial
+```

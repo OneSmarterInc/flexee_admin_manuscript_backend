@@ -160,13 +160,14 @@ def test_scope_keeps_target_journals_and_drops_the_rest():
 
 @pytest.mark.django_db
 def test_full_run_builds_listed_records_and_enriches_them():
-    http = FakeHttp([[MIS, MEDICINE], [OPS, TINY, DEAD]],
+    http = FakeHttp([[MIS, MEDICINE], [OPS, DEAD, TINY]],  # OpenAlex sorts largest first
                     crossref={'0048-7333': crossref_payload(['0048-7333', '1873-7625'])},
                     doaj={'1932-6203': DOAJ_PAYLOAD})
     run = run_full(http)
 
     assert run.status == 'completed' and run.catalogue_method == 'subfield_filter' and run.catalogue_complete
-    assert (run.records_seen, run.out_of_scope, run.created_count, run.enriched_count) == (5, 3, 2, 2)
+    # TINY is below the size floor: paging stops there, and that still counts as a complete pass.
+    assert (run.records_seen, run.out_of_scope, run.created_count, run.enriched_count) == (4, 2, 2, 2)
     assert IndexedVenue.objects.count() == 2
 
     mis = IndexedVenue.objects.get(openalex_id='S1')
@@ -186,6 +187,23 @@ def test_full_run_builds_listed_records_and_enriches_them():
 
     first_call = http.calls[0][2]
     assert first_call['filter'].startswith('type:journal,topics.subfield.id:') and '1404' in first_call['filter']
+    assert first_call['filter'].endswith(',works_count:>29') and 'topics' in first_call['select']
+    assert first_call['sort'] == 'works_count:desc'
+
+
+@pytest.mark.django_db
+def test_rejected_optional_parts_are_dropped_before_falling_back():
+    class Picky(FakeHttp):
+        def get_json(self, source, url, params=None):
+            if source == 'openalex' and ('works_count' in (params or {}).get('filter', '') or 'select' in (params or {})):
+                self.calls.append((source, url, dict(params)))
+                return 400, None
+            return super().get_json(source, url, params)
+    http = Picky([[MIS]])
+    run = run_full(http)
+    assert run.catalogue_method == 'subfield_filter' and run.created_count == 1 and run.catalogue_complete
+    tried = [c[2] for c in http.calls if c[0] == 'openalex']
+    assert 'works_count' in tried[0]['filter'] and 'select' in tried[1] and 'select' not in tried[2]
 
 
 @pytest.mark.django_db
@@ -339,6 +357,19 @@ def test_management_command_imports(monkeypatch, capsys):
     call_command('import_venue_index')
     out = capsys.readouterr().out
     assert 'Completed' in out and 'Index now holds 1 journals' in out
+    assert '] OpenAlex page 1:' in out and 'Checked 1 of 1' in out  # live progress lines
+
+
+@pytest.mark.django_db
+def test_ctrl_c_closes_the_run_so_the_next_one_can_start(monkeypatch, capsys):
+    def interrupted(run, **kwargs):
+        raise KeyboardInterrupt
+    monkeypatch.setattr('review.management.commands.import_venue_index.run_index', interrupted)
+    call_command('import_venue_index')
+    assert 'Everything saved so far was kept' in capsys.readouterr().out
+    assert VenueIndexRun.objects.get().status == 'failed'
+    _, created = vi.start_index_run(trigger='command')
+    assert created
 
 
 # ---------------------------------------------------------------------------
@@ -433,3 +464,34 @@ def test_http_sends_openalex_key_and_contact_when_set(monkeypatch):
     params = catalogue._params({'filter': 'type:journal'})
     assert params['api_key'] == 'k-123' and params['mailto'] == 'editor@flexee.org' and params['per_page'] == 100
     assert config.user_agent == 'FlexeeVenueIndex/1.0 (mailto:editor@flexee.org)'
+
+
+@pytest.mark.django_db
+def test_parallel_enrichment_saves_every_record(monkeypatch):
+    monkeypatch.setenv('VENUE_INDEX_CONTACT_EMAIL', 'editor@flexee.org')  # polite pool: 3 in parallel
+    many = [source(f'S{i}', f'Management Journal {i}', issn_l='0048-7333', works=900 - i) for i in range(20, 50)]
+    run = run_full(FakeHttp([many], crossref={'0048-7333': crossref_payload(['0048-7333'])}))
+    assert vi.IndexConfig().workers == 3
+    assert run.enriched_count == 30 and run.pending_after == 0
+    assert IndexedVenue.objects.filter(crossref__registered=True).count() == 30
+
+
+def test_without_contact_email_crossref_is_one_at_a_time(monkeypatch):
+    monkeypatch.delenv('VENUE_INDEX_CONTACT_EMAIL', raising=False)
+    monkeypatch.delenv('VENUE_DISCOVERY_CONTACT_EMAIL', raising=False)
+    config = vi.IndexConfig()
+    assert config.workers == 1 and not config.polite
+    sent = []
+    http = vi.IndexHttp(config, get=lambda url, **kw: sent.append(kw) or _Resp(404), sleep=lambda s: None)
+    http.get_json('crossref', 'https://api.crossref.org/journals/0048-7333')
+    assert 'mailto' not in sent[0]['params']
+
+
+@pytest.mark.django_db
+def test_progress_lines_are_reported():
+    lines = []
+    run, _ = vi.start_index_run(mode='full', trigger='command')
+    vi.run_index(run, http=FakeHttp([[MIS], [OPS]], crossref={}), progress=lines.append)
+    text = '\n'.join(lines)
+    assert 'OpenAlex page 1:' in text and 'OpenAlex page 2:' in text and 'Catalogue done' in text
+    assert 'Checking 2 journals against Crossref and DOAJ' in text and 'Checked 2 of 2' in text

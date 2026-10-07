@@ -92,6 +92,8 @@ class IndexConfig:
         self.http_timeout = _env_float('VENUE_INDEX_HTTP_TIMEOUT_SECONDS', 20, 2, 120)
         self.delay_scale = _env_float('VENUE_INDEX_POLITE_DELAY', 1.0, 0.0, 10.0)
         self.openalex_api_key = os.getenv('OPENALEX_API_KEY', '').strip()
+        # Crossref allows 3 parallel requests to callers who send a contact email, 1 otherwise.
+        self.workers = _env_int('VENUE_INDEX_WORKERS', 3, 1, 3)
         self.contact_email = (os.getenv('VENUE_INDEX_CONTACT_EMAIL', '')
                               or os.getenv('VENUE_DISCOVERY_CONTACT_EMAIL', '')).strip()
         override = [x.strip() for x in os.getenv('VENUE_INDEX_SUBFIELDS', '').split(',') if x.strip()]
@@ -99,6 +101,12 @@ class IndexConfig:
         self.subfields = {sid: base['subfields'].get(sid, f'Subfield {sid}') for sid in override} if override \
             else dict(base['subfields'])
         self.search_terms = list(base['search_terms'])
+        if not self.contact_email:
+            self.workers = 1
+
+    @property
+    def polite(self):
+        return bool(self.contact_email)
 
     @property
     def user_agent(self):
@@ -110,32 +118,58 @@ class IndexConfig:
 # HTTP: polite, retrying, injectable for tests
 # ---------------------------------------------------------------------------
 
-HOST_DELAY = {'openalex': 0.15, 'crossref': 0.1, 'doaj': 0.6}  # seconds between calls (DOAJ allows ~2/s)
+# Seconds between calls per catalogue. Crossref: 10/s for callers with a contact email, 5/s otherwise.
+HOST_DELAY = {'openalex': 0.15, 'crossref': 0.1, 'crossref_public': 0.2, 'doaj': 0.6}
 
 
 class IndexHttp:
+    """Polite, retrying GETs. Safe to call from several threads: each catalogue is paced
+    across threads, and Crossref gets at most `workers` requests in flight."""
+
     def __init__(self, config, *, get=None, sleep=None):
+        import threading
         self.config = config
         self._get = get or httpx.get
         self._sleep = sleep or time.sleep
-        self._last = {}
+        self._lock = threading.Lock()
+        self._next_at = {}
+        self._slots = {
+            'crossref': threading.BoundedSemaphore(config.workers),
+            'doaj': threading.BoundedSemaphore(1),
+            'openalex': threading.BoundedSemaphore(1),
+        }
+
+    def _delay(self, source):
+        if source == 'crossref' and not self.config.polite:
+            source = 'crossref_public'
+        return HOST_DELAY.get(source, 0.2) * self.config.delay_scale
+
+    def _pace(self, source):
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next_at.get(source, 0))
+            self._next_at[source] = start + self._delay(source)
+        if start > now:
+            self._sleep(start - now)
 
     def get_json(self, source, url, params=None):
         """Return (status, json_or_None). Retries on network errors, 429 and 5xx."""
-        delay = HOST_DELAY.get(source, 0.2) * self.config.delay_scale
+        params = dict(params or {})
+        if source == 'crossref' and self.config.contact_email:
+            params.setdefault('mailto', self.config.contact_email)  # Crossref's polite pool
         last_error = ''
+        slot = self._slots.get(source)
         for attempt in range(3):
-            wait = delay - (time.monotonic() - self._last.get(source, 0))
-            if wait > 0:
-                self._sleep(wait)
+            self._pace(source)
+            if slot:
+                slot.acquire()
             try:
-                response = self._get(url, params=params or {}, timeout=self.config.http_timeout,
+                response = self._get(url, params=params, timeout=self.config.http_timeout,
                                      headers={'User-Agent': self.config.user_agent, 'Accept': 'application/json'},
                                      follow_redirects=True)
             except httpx.HTTPError as exc:
                 last_error = f'could not reach {source} ({exc.__class__.__name__})'
             else:
-                self._last[source] = time.monotonic()
                 if response.status_code == 404:
                     return 404, None
                 if response.status_code == 429 or response.status_code >= 500:
@@ -147,7 +181,9 @@ class IndexHttp:
                         return response.status_code, response.json()
                     except ValueError:
                         raise IndexSourceError(f'{source} did not return JSON')
-            self._last[source] = time.monotonic()
+            finally:
+                if slot:
+                    slot.release()
             self._sleep((1.5 * (attempt + 1)) * self.config.delay_scale)
         raise IndexSourceError(last_error or f'{source} failed')
 
@@ -236,6 +272,12 @@ class OpenAlexCatalogue:
         self.method = ''
         self.complete = False
         self.pages = 0
+        self.progress = None
+
+    # Only the fields the spine uses: pages are several times smaller and faster.
+    SELECT = ('id,issn_l,issn,display_name,host_organization_name,country_code,type,is_oa,is_in_doaj,'
+              'is_core,is_ojs,homepage_url,apc_usd,works_count,cited_by_count,summary_stats,'
+              'first_publication_year,last_publication_year,topics')
 
     def _params(self, extra):
         params = {'per_page': 100, 'sort': 'works_count:desc', **extra}
@@ -245,16 +287,33 @@ class OpenAlexCatalogue:
             params['mailto'] = self.config.contact_email
         return params
 
-    def _walk(self, params, budget):
+    def _walk(self, base_filter, budget, *, search=None):
+        """Pages one query, largest journals first. Stops by itself once journals fall below the
+        minimum size (everything after is smaller), which counts as reaching the end."""
+        variants = [  # if OpenAlex rejects an optional part, the next variant drops it
+            {'filter': f'{base_filter},works_count:>{max(self.config.min_works - 1, 0)}', 'select': self.SELECT},
+            {'filter': base_filter, 'select': self.SELECT},
+            {'filter': base_filter},
+        ]
+        if search:
+            for v in variants:
+                v['search'] = search
         cursor = '*'
         while cursor and self.pages < self.config.max_pages and budget():
-            status, payload = self.http.get_json('openalex', OPENALEX_SOURCES, self._params({**params, 'cursor': cursor}))
+            status, payload = self.http.get_json('openalex', OPENALEX_SOURCES, self._params({**variants[0], 'cursor': cursor}))
+            if status in (400, 403) and cursor == '*' and len(variants) > 1:
+                variants.pop(0)
+                continue
             if status != 200 or payload is None:
                 raise IndexSourceError(f'OpenAlex returned HTTP {status}')
             self.pages += 1
             results = payload.get('results') or []
             for item in results:
+                if int(item.get('works_count') or 0) < self.config.min_works:
+                    return  # sorted by size: nothing further can qualify
                 yield item
+            if self.progress:
+                self.progress('catalogue_page')
             cursor = (payload.get('meta') or {}).get('next_cursor')
             if not results:
                 cursor = None
@@ -266,7 +325,7 @@ class OpenAlexCatalogue:
         first_page_seen = False
         try:
             self.method = 'subfield_filter'
-            for item in self._walk({'filter': f'type:journal,topics.subfield.id:{ids}'}, budget):
+            for item in self._walk(f'type:journal,topics.subfield.id:{ids}', budget):
                 first_page_seen = True
                 yield item
             if first_page_seen:
@@ -282,7 +341,7 @@ class OpenAlexCatalogue:
         seen = set()
         try:
             for term in self.config.search_terms:
-                for item in self._walk({'filter': 'type:journal', 'search': term}, budget):
+                for item in self._walk('type:journal', budget, search=term):
                     key = item.get('id')
                     if key in seen:
                         continue
@@ -393,6 +452,13 @@ def doaj_facts(http, issns, now):
 
 
 def enrich_record(record, http, now):
+    fetch_enrichment(record, http, now)
+    record.save()
+
+
+def fetch_enrichment(record, http, now):
+    """Fill in the Crossref/DOAJ facts on the in-memory record (network only, no database),
+    so several records can be fetched in parallel and saved by the caller."""
     issns = [x for x in [record.issn_l, *record.issns] if x]
     issns = list(dict.fromkeys(issns))
     record.issn_checks = {
@@ -413,7 +479,7 @@ def enrich_record(record, http, now):
     record.checked = checked
     record.enriched_at = now
     record.last_error = ''
-    record.save()
+    return record
 
 
 # ---------------------------------------------------------------------------
@@ -464,13 +530,17 @@ def link_to_venues(config):
     return linked
 
 
-def run_index(run, *, http=None, now=None, clock=None):
-    """Run one import. Saves as it goes, so a stopped run keeps what it found."""
+def run_index(run, *, http=None, now=None, clock=None, progress=None, time_limit_seconds=None):
+    """Run one import. Saves as it goes, so a stopped run keeps what it found.
+
+    progress, if given, is called with short status lines (the management command prints them).
+    """
     config = IndexConfig()
     clock = clock or time.monotonic
-    deadline = clock() + config.time_limit_seconds
+    deadline = clock() + (time_limit_seconds or config.time_limit_seconds)
     budget = lambda: clock() < deadline  # noqa: E731
     http = http or IndexHttp(config)
+    say = progress or (lambda message: None)
     now = now or timezone.now()
     run.status = 'processing'
     run.started_at = timezone.now()
@@ -478,9 +548,9 @@ def run_index(run, *, http=None, now=None, clock=None):
     run.save(update_fields=['status', 'started_at', 'field_profile'])
     try:
         if run.mode == 'full':
-            _catalogue_pass(run, config, http, now, budget)
+            _catalogue_pass(run, config, http, now, budget, say)
             run.linked_count = link_to_venues(config)
-        _enrichment_pass(run, config, http, now, budget)
+        _enrichment_pass(run, config, http, now, budget, say)
         run.pending_after = pending_enrichment(config, now).count()
         run.status = 'completed'
         run.summary = _summary(run)
@@ -494,11 +564,19 @@ def run_index(run, *, http=None, now=None, clock=None):
     return run
 
 
-def _catalogue_pass(run, config, http, now, budget):
+def _catalogue_pass(run, config, http, now, budget, say=lambda m: None):
     catalogue = OpenAlexCatalogue(http, config)
     this_year = now.year
     seen_ids = set()
     kept = 0
+
+    def page_done(_event):
+        run.pages_fetched = catalogue.pages
+        run.save()
+        say(f'OpenAlex page {catalogue.pages}: {run.records_seen:,} journals read, {kept:,} in your fields')
+    catalogue.progress = page_done
+
+    say('Reading the journal catalogue from OpenAlex (largest journals first)…')
     try:
         for source in catalogue.sources(budget):
             run.records_seen += 1
@@ -515,12 +593,11 @@ def _catalogue_pass(run, config, http, now, budget):
             kept += 1
             if kept >= config.max_records:
                 catalogue.complete = False
+                say(f'Reached the {config.max_records:,}-journal limit (VENUE_INDEX_MAX_RECORDS).')
                 break
-            if run.records_seen % 200 == 0:
-                run.pages_fetched = catalogue.pages
-                run.save()
     except IndexSourceError as exc:
         _record_error(run, 'openalex', exc)
+        say(f'OpenAlex problem: {exc}')
         catalogue.complete = False
     run.pages_fetched = catalogue.pages
     run.catalogue_method = catalogue.method
@@ -531,6 +608,9 @@ def _catalogue_pass(run, config, http, now, budget):
                 .exclude(openalex_id__in=seen_ids))
         run.flagged_missing = gone.update(missing_since=now)
     run.save()
+    method = ' (keyword search: OpenAlex did not accept the subject filter)' if catalogue.method == 'keyword_search' else ''
+    say(f'Catalogue done{method}: {run.created_count:,} new, {run.updated_count:,} refreshed, '
+        f'{run.out_of_scope:,} outside your fields skipped.')
 
 
 def _upsert(run, config, openalex_id, fields, now):
@@ -555,25 +635,50 @@ def _upsert(run, config, openalex_id, fields, now):
         run.updated_count += 1
 
 
-def _enrichment_pass(run, config, http, now, budget):
-    failures_in_a_row = 0
-    queue = pending_enrichment(config, now).order_by('enriched_at', 'title')
-    for record in queue.iterator():
-        if not budget():
-            break
+def _enrichment_pass(run, config, http, now, budget, say=lambda m: None):
+    """Crossref/DOAJ checks. Network calls run in parallel (up to config.workers);
+    every database write happens here, on the calling thread."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    due = list(pending_enrichment(config, now).order_by('enriched_at', 'title').values_list('id', flat=True))
+    if not due:
+        return
+    pool = 'parallel, polite pool' if config.polite else 'one at a time; set VENUE_INDEX_CONTACT_EMAIL to go 3x faster'
+    say(f'Checking {len(due):,} journals against Crossref and DOAJ ({pool})…')
+
+    def fetch(record):
         try:
-            enrich_record(record, http, timezone.now())
-            run.enriched_count += 1
-            failures_in_a_row = 0
+            return record, fetch_enrichment(record, http, timezone.now()), None
         except IndexSourceError as exc:
-            failures_in_a_row += 1
-            IndexedVenue.objects.filter(id=record.id).update(last_error=str(exc)[:300])
-            _record_error(run, 'enrichment', f'{record.title}: {exc}')
-            if failures_in_a_row >= 5:
-                _record_error(run, 'enrichment', 'Five lookups failed in a row; stopping enrichment for this run.')
+            return record, None, exc
+
+    failures_in_a_row = 0
+    batch_size = max(1, config.workers) * 8
+    with ThreadPoolExecutor(max_workers=max(1, config.workers)) as executor:
+        for start in range(0, len(due), batch_size):
+            if not budget():
+                say('Time limit reached; the remaining checks continue in the next run.')
                 break
-        if run.enriched_count and run.enriched_count % 50 == 0:
+            records = list(IndexedVenue.objects.filter(id__in=due[start:start + batch_size]).order_by('enriched_at', 'title'))
+            stop = False
+            for record, done, exc in executor.map(fetch, records):
+                if done is not None:
+                    done.save()
+                    run.enriched_count += 1
+                    failures_in_a_row = 0
+                    continue
+                failures_in_a_row += 1
+                IndexedVenue.objects.filter(id=record.id).update(last_error=str(exc)[:300])
+                _record_error(run, 'enrichment', f'{record.title}: {exc}')
+                if failures_in_a_row >= 5:
+                    _record_error(run, 'enrichment', 'Five lookups failed in a row; stopping enrichment for this run.')
+                    say('Five lookups failed in a row; stopping checks for now (they are retried next run).')
+                    stop = True
+                    break
             run.save()
+            say(f'Checked {min(start + batch_size, len(due)):,} of {len(due):,}')
+            if stop:
+                break
 
 
 def _summary(run):

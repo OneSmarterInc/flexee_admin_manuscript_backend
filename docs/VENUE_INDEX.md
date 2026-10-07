@@ -34,6 +34,16 @@ python manage.py import_venue_index --enrich-only # only the checks that are due
 python manage.py ensure_venue_index_schedule      # monthly refresh on the 1st + daily catch-up
 ```
 
+The command prints progress as it goes (each OpenAlex page, then "Checked N of M"). Ctrl+C stops
+it cleanly: everything saved is kept, and running it again skips checks already done.
+`--minutes 10` stops it after ten minutes.
+
+Speed: OpenAlex pages are requested largest journals first with only the needed fields, and
+paging stops once journals fall below `VENUE_INDEX_MIN_WORKS`. Crossref allows 3 parallel
+requests (10 per second) to callers who send a contact email and 1 request (5 per second)
+otherwise, so set `VENUE_INDEX_CONTACT_EMAIL`. DOAJ is called one at a time (about 2 per
+second) and only for open-access titles.
+
 The admin page **Venue Index** shows coverage, the last run, and every record, and can start a
 run or turn the schedule on.
 

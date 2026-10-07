@@ -523,6 +523,14 @@ def run_venue_index_task(run_id=None, mode='full'):
             now = timezone.now()
             if not pending_enrichment(config, now).exists() and not page_candidates(config.profile, now).exists():
                 return None  # nothing waiting: the daily catch-up costs nothing
+        if mode == 'calls':
+            from .services.freshness import calls_due
+            if not calls_due().exists():
+                return None
+        if mode == 'rules':
+            from .services.index_rules import rules_candidates
+            if not rules_candidates(IndexConfig().profile).exists():
+                return None
         run, created = start_index_run(mode=mode, trigger='schedule')
         if not created:
             return str(run.id)

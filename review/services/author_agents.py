@@ -640,6 +640,9 @@ def _bounded(value, *, depth=0):
 
 
 def _config_context(config):
+    from .freshness import author_config_view
+    fresh = author_config_view(config.venue, config, {'deadlines': config.deadlines,
+                                                      'current_demand': config.current_demand}) if config.venue_id else {}
     return {
         'version': config.version,
         'aims_scope': config.aims_scope,
@@ -653,9 +656,11 @@ def _config_context(config):
         'desk_rejection_rules': config.desk_rejection_rules,
         'structured_desk_rejection_rules': config.structured_desk_rejection_rules,
         'required_submission_items': config.required_submission_items,
-        'deadlines': config.deadlines,
+        # Only calls and deadlines an author may act on: expired or unconfirmed calls are left out.
+        'deadlines': fresh.get('deadlines', config.deadlines),
         'submission_capacity': config.submission_capacity,
-        'current_demand': config.current_demand,
+        'current_demand': dict(fresh.get('current_demand', config.current_demand) or {},
+                               open_calls=fresh.get('open_calls', [])),
     }
 
 

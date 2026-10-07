@@ -12,6 +12,7 @@ from .models import BlockedPublisher, IndexedVenue, VenueIndexRun
 from .services.index_screening import CRITERIA, FLAG_TO_CRITERION, DecisionError, decide, screen_record, blocked_publisher_names
 from .services.index_rules import rules_candidates, rules_field, rules_summary
 from .services.rules_escalation import escalation_stats
+from .services.freshness import freshness_stats
 from .services.venue_discovery import normalize_name
 from .services.venue_index import PROFILES, IndexConfig, coverage_counts, start_index_run
 
@@ -29,6 +30,7 @@ FILTERS = {
     'kept': Q(screening_status='kept'),
     'rules_ready': Q(rules_status='ready', venue__isnull=True),
     'rules_missing': Q(rules_status__in=['incomplete', 'failed', 'blocked'], venue__isnull=True),
+    'rules_changed': Q(venue__isnull=False, discovered__discovery_status='changed'),
 }
 
 
@@ -69,8 +71,17 @@ def record_payload(item, detail=False):
             'rereview_suggested': item.rereview_suggested,
         },
         'excluded': item.excluded,
-        'rules': {'status': item.rules_status, 'error': item.rules_error, 'read_at': _iso(item.rules_read_at)},
+        'rules': {'status': item.rules_status, 'error': item.rules_error, 'read_at': _iso(item.rules_read_at),
+                  # step 7: a live journal whose pages now say something different waits for an admin
+                  'changes': (item.discovered.change_summary or 'The official pages changed.')
+                  if venue and item.discovered_id and item.discovered.discovery_status == 'changed' else ''},
     }
+    if detail and venue:
+        from .services.freshness import visible_calls
+        config = venue.agent_configs.filter(active=True).order_by('-version').first()
+        shown, hidden = visible_calls(venue, config)
+        payload['calls'] = {'shown': shown, 'hidden': hidden, 'checked_at': _iso(venue.calls_checked_at),
+                            'error': venue.calls_error}
     if detail:
         payload.update({
             'openalex_id': item.openalex_id,
@@ -141,6 +152,9 @@ def run_payload(run):
         'rules_failed': run.rules_failed,
         'rules_retried': run.rules_retried,
         'rules_escalated': run.rules_escalated,
+        'calls_checked': run.calls_checked,
+        'calls_open': run.calls_open,
+        'calls_failed': run.calls_failed,
         'flagged_missing': run.flagged_missing,
         'pending_after': run.pending_after,
         'errors': (run.errors or [])[-10:],
@@ -152,7 +166,7 @@ def run_payload(run):
 @require_platform_superuser
 def index_list(request):
     config = IndexConfig()
-    base = IndexedVenue.objects.filter(field_profile=config.profile).select_related('venue')
+    base = IndexedVenue.objects.filter(field_profile=config.profile).select_related('venue', 'discovered')
     query = request.GET.get('q', '').strip()
     if query:
         base = base.filter(Q(title__icontains=query) | Q(publisher__icontains=query) |
@@ -190,6 +204,7 @@ def index_list(request):
         'criteria': CRITERIA,
         'rules_field': {'key': rules_key, 'label': rules_label, 'due': rules_candidates(config.profile).count()},
         'escalation': escalation_stats(),
+        'freshness': freshness_stats(),
         'blocked_publishers': [{'id': str(b.id), 'name': b.name, 'added_by': b.added_by,
                                 'created_at': _iso(b.created_at)} for b in BlockedPublisher.objects.all()[:200]],
     })
@@ -211,7 +226,7 @@ def index_run_now(request):
         data = json.loads(request.body or b'{}')
     except ValueError:
         data = {}
-    mode = data.get('mode') if data.get('mode') in {'enrich', 'screen', 'rules'} else 'full'
+    mode = data.get('mode') if data.get('mode') in {'enrich', 'screen', 'rules', 'calls'} else 'full'
     run, created = start_index_run(mode=mode, trigger='manual', requested_by=request.editor_user.email)
     if created:
         from django_q.tasks import async_task
@@ -280,6 +295,24 @@ def index_unblock_publisher(request, block_id):
         if normalize_name(record.publisher) == name:
             screen_record(record, names)
     return JsonResponse({'removed': True})
+
+
+@require_POST
+@require_platform_superuser
+def index_apply_changes(request, record_id):
+    """The quarterly re-read found different rules on a live journal's pages: an admin applies them."""
+    from .discovery_api import AddToVenueError, apply_discovered_changes
+    item = IndexedVenue.objects.select_related('discovered').filter(id=record_id).first()
+    if not item or not item.discovered_id:
+        return JsonResponse({'detail': 'Index record not found'}, status=404)
+    if item.excluded:
+        return JsonResponse({'detail': 'This journal is excluded.'}, status=409)
+    try:
+        apply_discovered_changes(request, item.discovered_id)
+    except AddToVenueError as exc:
+        return JsonResponse({'detail': exc.detail}, status=exc.status)
+    item = IndexedVenue.objects.select_related('venue', 'discovered').get(id=item.id)
+    return JsonResponse({'item': record_payload(item, detail=True)})
 
 
 @require_POST

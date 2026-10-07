@@ -580,7 +580,12 @@ def _venue_payload(venue, include_config=True, internal=False):
         payload['excluded'] = venue.excluded
         payload['exclusion_reason'] = venue.exclusion_reason or {}
     if include_config:
-        payload['config'] = _venue_config_payload(_active_config(venue))
+        config = _active_config(venue)
+        payload['config'] = _venue_config_payload(config)
+        if not internal:
+            # Authors never see a call that expired or was not re-confirmed in time (build plan step 7).
+            from .services.freshness import author_config_view
+            payload['config'] = author_config_view(venue, config, payload['config'])
     return payload
 
 

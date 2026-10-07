@@ -20,4 +20,5 @@ class Command(BaseCommand):
         state = set_index_schedule(enabled=True, tz_name=options['timezone'] or default_timezone())
         self.stdout.write(self.style.SUCCESS(
             f"Venue index: monthly refresh next at {state['next_full_refresh']}, "
-            f"daily checks next at {state['next_daily_checks']} (via qcluster)."))
+            f"daily checks next at {state['next_daily_checks']}, open calls daily at {state['next_calls_check']}, "
+            f"rules weekly at {state['next_rules_read'] or 'off'} (via qcluster)."))

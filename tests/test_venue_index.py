@@ -423,7 +423,7 @@ def test_schedule_installs_monthly_and_daily_and_removes_both():
     from django_q.models import Schedule
     from review.index_schedule import set_index_schedule, first_of_next_month
     state = set_index_schedule(enabled=True, tz_name='Asia/Kolkata')
-    assert state['enabled'] and Schedule.objects.filter(func='review.tasks.run_venue_index_task').count() == 2
+    assert state['enabled'] and Schedule.objects.filter(func='review.tasks.run_venue_index_task').count() == 4
     monthly = Schedule.objects.get(name='flexee-venue-index-monthly')
     assert monthly.schedule_type == Schedule.MONTHLY and "'full'" in monthly.kwargs
     assert monthly.next_run.astimezone(timezone.get_default_timezone()).tzinfo is not None

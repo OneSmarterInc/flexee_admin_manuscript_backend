@@ -363,6 +363,11 @@ def add_discovered_to_venue_agent(request, discovered_id):
                 trust_tier=Venue.TIER_VERIFIED_INDEX,
                 last_verified_at=item.last_checked_at,
                 source_urls=list(item.source_urls or [])[:20],
+                # The calls read from the pages count as confirmed when they were read (step 7).
+                open_calls=[dict(c, confirmed_at=item.last_checked_at.isoformat()) for c in
+                            ((item.current_demand or {}).get('calls_for_papers') or []) if isinstance(c, dict)][:10],
+                calls_checked_at=item.last_checked_at,
+                calls_attempted_at=item.last_checked_at,
             )
             config = VenueAgentConfig.objects.create(venue=venue, version=1, active=True, **config_fields)
 
@@ -398,6 +403,43 @@ def add_discovered_to_venue_agent(request, discovered_id):
         raise AddToVenueError(f'The discovered configuration is not valid: {exc}', status=422)
     item.refresh_from_db()
     return item, False
+
+
+def apply_discovered_changes(request, discovered_id):
+    """A live venue's official pages changed: make what was read the new active config version.
+    Only an admin does this; re-reading never changes a live config by itself (build plan step 7)."""
+    from .author_api import build_venue_config_fields
+    try:
+        with transaction.atomic():
+            try:
+                item = DiscoveredVenue.objects.select_for_update().get(id=discovered_id)
+            except DiscoveredVenue.DoesNotExist:
+                raise AddToVenueError('Discovered venue not found', status=404)
+            if not item.added_venue_id:
+                raise AddToVenueError('This venue is not live yet; publish it instead.')
+            if item.discovery_status != 'changed':
+                raise AddToVenueError('There are no changes waiting for this venue.')
+            venue = Venue.objects.select_for_update().get(id=item.added_venue_id)
+            fields = build_venue_config_fields(_config_data(item))
+            version = (venue.agent_configs.order_by('-version').values_list('version', flat=True).first() or 0) + 1
+            venue.agent_configs.filter(active=True).update(active=False)
+            config = VenueAgentConfig.objects.create(venue=venue, version=version, active=True, **fields)
+            venue.last_verified_at = item.last_checked_at
+            venue.source_urls = list(item.source_urls or [])[:20]
+            venue.save(update_fields=['last_verified_at', 'source_urls', 'updated_at'])
+            summary = item.change_summary
+            item.added_venue_config = config
+            item.discovery_status = 'added'
+            item.change_summary = ''
+            item.save(update_fields=['added_venue_config', 'discovery_status', 'change_summary', 'updated_at'])
+            record_audit_event(request, 'venue_config.updated_from_discovery', resource_type='venue_config',
+                               resource_id=config.id, organization_id=venue.organization_id, venue_id=venue.id,
+                               detail={'version': version, 'discovered_venue_id': str(item.id),
+                                       'change_summary': summary[:500]})
+    except (ValueError, TypeError) as exc:
+        raise AddToVenueError(f'The changed configuration is not valid: {exc}', status=422)
+    item.refresh_from_db()
+    return item
 
 
 @require_POST

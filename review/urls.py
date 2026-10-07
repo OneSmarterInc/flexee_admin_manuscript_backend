@@ -82,6 +82,7 @@ urlpatterns = [
     path('admin/venue-index/<uuid:record_id>/', index_api.index_detail),
     path('admin/venue-index/<uuid:record_id>/decision/', index_api.index_decision),
     path('admin/venue-index/<uuid:record_id>/publish/', index_api.index_publish),
+    path('admin/venue-index/<uuid:record_id>/apply-changes/', index_api.index_apply_changes),
     path('admin/venue-index/blocked-publishers/<uuid:block_id>/', index_api.index_unblock_publisher),
     path('admin/venue-discovery/', discovery_api.discovery_list),
     path('admin/venue-discovery/run/', discovery_api.discovery_run_now),

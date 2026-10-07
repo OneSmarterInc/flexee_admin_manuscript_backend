@@ -336,7 +336,7 @@ def admin_claim_approve(request, claim_id):
     data = _json(request) or {}
     note = str(data.get('note') or '').strip()[:2000]
     with transaction.atomic():
-        claim = VenueClaim.objects.select_for_update().select_related('venue', 'indexed').filter(id=claim_id).first()
+        claim = VenueClaim.objects.select_for_update(of=('self',)).select_related('venue', 'indexed').filter(id=claim_id).first()
         if claim is None:
             return JsonResponse({'detail': 'Claim not found'}, status=404)
         if claim.status != 'pending_review':

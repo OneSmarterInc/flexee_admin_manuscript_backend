@@ -70,3 +70,77 @@ continue in the next run. A journal that drops out of the catalogue is kept and 
 
 Cost: a full pass of ~2,500 journals is about 25 OpenAlex list calls plus one Crossref call per
 journal, well within OpenAlex's free daily allowance even without a key.
+
+## Exclusion screening (build plan step 3)
+
+Automated screening only **flags** journals for a person to review. Nothing is excluded without
+a reviewer choosing the criteria it fails and at least one evidence link, and every decision is
+stored (`IndexReviewDecision`) and reversible. Wording is always about criteria, never a label:
+excluded journals are hidden from authors and never listed publicly.
+
+Catalogue signals (no AI, takes seconds): no Crossref DOIs (2 points), no ISSN (2) or an ISSN
+that fails its check digit (3), publisher not stated (1), under two years of publishing (1),
+DOAJ submission-to-publication of 3 weeks or less (2), output spread across four or more
+unrelated fields (2), charging authors while not in DOAJ (1), publisher on the internal
+blocklist (3), and at least 500 items with fewer than 0.1 citations per item (3; typical of
+magazines and news titles, pre-fills "Not a peer-reviewed journal"). Three points put a journal in the **Needs review** queue. Positive signals
+(DOAJ, long Crossref history, CWTS core source, ISSN confirmed by Crossref) are shown to the
+reviewer and never used to exclude.
+
+Evidence from the journal's own pages: for journals with any concern, or that charge authors
+outside DOAJ, the homepage and up to two author or fee pages are read (robots.txt respected)
+and scanned for exact phrases: guaranteed acceptance, publication or acceptance promised
+within days, and metrics from unrecognised ranking bodies (SJIF, Global Impact Factor, Index
+Copernicus Value and similar). Any match puts the journal in the queue with the quote and the
+page link. Pages are re-read after 30 days. `VENUE_INDEX_READ_PAGES=false` turns this off.
+Up to `VENUE_INDEX_PAGE_WORKERS` (6) websites are read at the same time, but never two requests
+at once to the same site, with `VENUE_INDEX_PAGE_DELAY_SECONDS` between journals on one site
+(many journals share a publisher's site). Journals with the most concern points are read first.
+
+Decisions (admin, Venue Index -> a journal):
+- **Exclude**: choose criteria and evidence links; optionally block the publisher, which sends
+  its other titles to the queue (never excludes them automatically). A linked live venue is
+  excluded too, so authors never see it. Excluded journals are kept in the index (never deleted
+  by scope or size changes), and Venue Discovery refuses to re-add them.
+- **Keep**: the journal leaves the queue and only returns if a new kind of concern appears.
+- **Restore**: reverses an exclusion. When the criteria behind an exclusion are no longer
+  detected, the journal returns to the queue as "re-review suggested".
+
+```
+python manage.py import_venue_index --screen-only            # screen + read pages
+python manage.py import_venue_index --screen-only --no-pages # catalogue signals only
+```
+Full and daily runs screen automatically after their Crossref/DOAJ checks.
+
+## Reading the rules (build plan step 4, layer 2)
+
+For the first field (`VENUE_INDEX_RULES_FIELD=information-systems`: Information Systems, MIS,
+Information Systems and Management), journals that are not excluded, not waiting for an
+exclusion decision and not yet live have their rules read from their own pages: the DOAJ
+author-guidelines page when there is one, otherwise the homepage plus linked author and
+submission pages. The Venue Discovery pipeline does the reading, so the same guarantees apply:
+every rule must be backed by a quote found on the fetched page, invented limits are dropped,
+and confidence is computed from the sources, never chosen by the AI.
+
+The AI is local Ollama by default (`VENUE_INDEX_RULES_AI_PROVIDER=ollama`, model from
+`VENUE_DISCOVERY_OLLAMA_MODEL`, a 7B to 8B model recommended). If Ollama cannot be reached the
+run stops with that reason instead of failing every journal. `VENUE_INDEX_RULES_PER_RUN` (40)
+is the per-run ceiling, together with the time limit.
+
+Journals with a DOAJ author-guidelines page are read first (those pages are usually readable).
+If one official URL cannot be read, the other (guidelines page or homepage) is tried.
+
+Outcomes: **Rules ready** (quoted rules found), **Rules not found** (with the reason), pages
+unreadable, or **Site blocks reading** (HTTP 401/403/429 or robots.txt). Failed reads are
+retried after 30 days. Blocked sites are respected, never worked around: other journals on the
+same site are skipped for the rest of the run, and blocked journals are retried after 90 days.
+For those, enter the rules by hand in Venue Agents, wait for the editor to claim the venue
+(step 9), or leave the journal as Listed only. Reading never publishes. In Venue Index ->
+"Rules ready", an admin checks what was read (each rule with its quote and link) and clicks
+**Publish**, which creates the live venue labelled "Checked from official pages" with those
+rules. Excluding a published journal later hides the live venue again.
+
+```
+python manage.py import_venue_index --rules-only            # up to 40 journals
+python manage.py import_venue_index --rules-only --limit 5  # a quick trial
+```

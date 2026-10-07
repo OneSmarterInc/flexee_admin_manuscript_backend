@@ -516,8 +516,12 @@ def run_venue_index_task(run_id=None, mode='full'):
                     summary='Interrupted (worker restarted or time limit reached). Records saved before that were kept.')
             return None
     else:
-        if mode == 'enrich' and not pending_enrichment(IndexConfig(), timezone.now()).exists():
-            return None  # nothing waiting: the daily catch-up costs nothing
+        if mode == 'enrich':
+            from .services.index_screening import page_candidates
+            config = IndexConfig()
+            now = timezone.now()
+            if not pending_enrichment(config, now).exists() and not page_candidates(config.profile, now).exists():
+                return None  # nothing waiting: the daily catch-up costs nothing
         run, created = start_index_run(mode=mode, trigger='schedule')
         if not created:
             return str(run.id)

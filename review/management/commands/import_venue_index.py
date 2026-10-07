@@ -15,12 +15,22 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--enrich-only', action='store_true',
                             help='Skip the OpenAlex refresh; only finish Crossref/DOAJ checks that are due.')
+        parser.add_argument('--screen-only', action='store_true',
+                            help='Only run exclusion screening (catalogue signals, then evidence from journal pages).')
+        parser.add_argument('--rules-only', action='store_true',
+                            help='Read journal rules from their official pages with the AI (first field only). '
+                                 'Results wait for approval in Venue Index; nothing is published.')
+        parser.add_argument('--limit', type=int, default=0,
+                            help='With --rules-only: at most this many journals (default VENUE_INDEX_RULES_PER_RUN, 40).')
+        parser.add_argument('--no-pages', action='store_true',
+                            help='Screen with catalogue signals only; do not read journal websites.')
         parser.add_argument('--minutes', type=int, default=0,
                             help='Stop after this many minutes (default VENUE_INDEX_TIME_LIMIT_MINUTES, 25). '
                                  'Unfinished checks continue next time.')
 
     def handle(self, *args, **options):
-        mode = 'enrich' if options['enrich_only'] else 'full'
+        mode = ('rules' if options['rules_only'] else 'screen' if options['screen_only']
+                else 'enrich' if options['enrich_only'] else 'full')
         run, created = start_index_run(mode=mode, trigger='command', requested_by='manage.py')
         if not created:
             raise CommandError(f'An index run is already {run.status} (started {run.created_at:%Y-%m-%d %H:%M}). '
@@ -40,7 +50,8 @@ class Command(BaseCommand):
 
         minutes = options['minutes']
         try:
-            run = run_index(run, progress=progress, time_limit_seconds=minutes * 60 if minutes > 0 else None)
+            run = run_index(run, progress=progress, time_limit_seconds=minutes * 60 if minutes > 0 else None,
+                            read_pages=not options['no_pages'], rules_limit=options['limit'] or None)
         except KeyboardInterrupt:
             VenueIndexRun.objects.filter(id=run.id).update(
                 status='failed', completed_at=timezone.now(),
@@ -57,5 +68,14 @@ class Command(BaseCommand):
         self.stdout.write(f"Index now holds {counts['total']} journals: {counts['crossref']} registered with Crossref, "
                           f"{counts['doaj']} in DOAJ, {counts['linked']} linked to live venues, "
                           f"{counts['not_enriched']} not yet checked.")
+        from review.services.index_screening import review_queue
+        queue = review_queue(config.profile).count()
+        if queue and mode != 'rules':
+            self.stdout.write(self.style.WARNING(f'{queue} journals need review: open Venue Index -> "Needs review".'))
+        if mode == 'rules':
+            from review.models import IndexedVenue
+            ready = IndexedVenue.objects.filter(rules_status='ready', venue__isnull=True).count()
+            self.stdout.write(self.style.WARNING(f'{ready} journals have rules ready: open Venue Index -> "Rules ready" '
+                                                 'to check and publish them.'))
         if run.status != 'completed':
             raise CommandError('The import did not complete; records saved before the problem were kept.')

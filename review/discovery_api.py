@@ -145,7 +145,8 @@ def discovery_list(request):
 
     # Type and search filters apply to the tab counts too, so a count always
     # matches what the table can show; the status filter is reported separately.
-    base = DiscoveredVenue.objects.all()
+    # Index journals are approved from Venue Index ("Publish"), so they are not listed here.
+    base = DiscoveredVenue.objects.exclude(origin='index')
     if venue_type in {'journal', 'publisher', 'conference'}:
         base = base.filter(venue_type=venue_type)
     if query:
@@ -319,24 +320,36 @@ def _added_response(item, *, already_added, status=200):
     }, status=status)
 
 
-@require_POST
-@require_platform_superuser
-def discovery_add_to_venue_agent(request, discovered_id):
+class AddToVenueError(Exception):
+    def __init__(self, detail, status=409, code=''):
+        super().__init__(detail)
+        self.detail, self.status, self.code = detail, status, code
+
+
+def add_discovered_to_venue_agent(request, discovered_id):
+    """Turn a staged DiscoveredVenue into a live Venue plus an active VenueAgentConfig (one transaction).
+
+    Shared by Venue Discovery's "Add to Venue Agent" and Venue Index's "Publish".
+    Returns (item, already_added). Raises AddToVenueError."""
     from .author_api import build_venue_config_fields, unique_venue_slug
     try:
         with transaction.atomic():
             try:
                 item = DiscoveredVenue.objects.select_for_update().get(id=discovered_id)
             except DiscoveredVenue.DoesNotExist:
-                return JsonResponse({'detail': 'Discovered venue not found'}, status=404)
+                raise AddToVenueError('Discovered venue not found', status=404)
             if item.added_venue_id:
-                return _added_response(item, already_added=True)
+                return item, True
             if item.discovery_status == 'ignored':
-                return JsonResponse({'detail': 'Restore this venue before adding it.'}, status=409)
+                raise AddToVenueError('Restore this venue before adding it.')
             if item.acceptance_status == 'closed':
-                return JsonResponse({'detail': 'This venue is closed to submissions, so it cannot be added.'}, status=409)
+                raise AddToVenueError('This venue is closed to submissions, so it cannot be added.')
             if not item.name.strip() or item.venue_type not in {'journal', 'conference', 'publisher'}:
-                return JsonResponse({'detail': 'This discovered venue is incomplete and cannot be added.'}, status=409)
+                raise AddToVenueError('This discovered venue is incomplete and cannot be added.')
+            from .services.index_screening import excluded_match
+            blocked_reason = excluded_match(item.name, item.organization_name)
+            if blocked_reason:
+                raise AddToVenueError(blocked_reason, code='excluded_from_index')
 
             config_fields = build_venue_config_fields(_config_data(item))
             organization, org_created = _organization_for(item)
@@ -369,6 +382,7 @@ def discovery_add_to_venue_agent(request, discovered_id):
                 'confidence': item.confidence,
                 'acceptance_status': item.acceptance_status,
                 'organization_created': org_created,
+                'origin': item.origin,
             }
             record_audit_event(request, 'venue.created_from_discovery', resource_type='venue', resource_id=venue.id,
                                organization_id=organization.id, venue_id=venue.id,
@@ -381,10 +395,22 @@ def discovery_add_to_venue_agent(request, discovered_id):
                                detail=audit_detail)
     except (ValueError, TypeError) as exc:
         # Validation failed: the transaction rolled back, so nothing was created.
-        return JsonResponse({'detail': f'The discovered configuration is not valid: {exc}'}, status=422)
-
+        raise AddToVenueError(f'The discovered configuration is not valid: {exc}', status=422)
     item.refresh_from_db()
-    return _added_response(item, already_added=False, status=201)
+    return item, False
+
+
+@require_POST
+@require_platform_superuser
+def discovery_add_to_venue_agent(request, discovered_id):
+    try:
+        item, already = add_discovered_to_venue_agent(request, discovered_id)
+    except AddToVenueError as exc:
+        body = {'detail': exc.detail}
+        if exc.code:
+            body['code'] = exc.code
+        return JsonResponse(body, status=exc.status)
+    return _added_response(item, already_added=already, status=200 if already else 201)
 
 
 @require_POST

@@ -703,6 +703,9 @@ class DiscoveredVenue(models.Model):
     last_error = models.TextField(blank=True)
 
     added_at = models.DateTimeField(null=True, blank=True)
+    # 'discovery' = found by the daily discovery run; 'index' = rules read for a venue index journal
+    # (approved from the Venue Index page, so it is not listed in Venue Discovery).
+    origin = models.CharField(max_length=20, default='discovery', db_index=True)
     added_venue = models.ForeignKey(Venue, null=True, blank=True, on_delete=models.SET_NULL, related_name='discovery_records')
     added_venue_config = models.ForeignKey(
         VenueAgentConfig, null=True, blank=True, on_delete=models.SET_NULL, related_name='discovery_records'
@@ -797,6 +800,42 @@ class IndexedVenue(models.Model):
     missing_since = models.DateTimeField(null=True, blank=True)  # no longer returned by the catalogue: kept, flagged
     last_error = models.TextField(blank=True)
 
+    # Exclusion screening (build plan step 3). Automated screening only ever flags; a person decides.
+    SCREENING_CHOICES = [
+        ('not_screened', 'Not screened'),
+        ('clear', 'No concerns found'),
+        ('flagged', 'Needs review'),
+        ('kept', 'Reviewed and kept'),
+        ('excluded', 'Excluded'),
+    ]
+    screening_status = models.CharField(max_length=20, choices=SCREENING_CHOICES, default='not_screened', db_index=True)
+    # [{'code', 'label', 'kind': 'negative'|'positive', 'weight', 'detail', 'evidence_url', 'quote', 'source'}]
+    screening_flags = models.JSONField(default=list, blank=True)
+    screening_points = models.PositiveSmallIntegerField(default=0)
+    screened_at = models.DateTimeField(null=True, blank=True)
+    pages_checked_at = models.DateTimeField(null=True, blank=True)  # official pages scanned for evidence
+    page_flags = models.JSONField(default=list, blank=True)  # evidence found on the journal's own pages
+    kept_flag_codes = models.JSONField(default=list, blank=True)  # concerns a reviewer already saw and kept
+    rereview_suggested = models.BooleanField(default=False)  # excluded, but the criteria are no longer detected
+    # Never shown to authors, never published. Same shape as Venue.exclusion_reason.
+    excluded = models.BooleanField(default=False, db_index=True)
+    exclusion_reason = models.JSONField(default=dict, blank=True)
+
+    # Rules read from the journal's own pages (build plan step 4, layer 2). Reading never publishes:
+    # an admin approves each journal, which creates the live venue ('verified_index').
+    RULES_CHOICES = [
+        ('not_read', 'Not read'),
+        ('ready', 'Rules ready for approval'),
+        ('incomplete', 'Rules not found on the pages'),
+        ('failed', 'Pages could not be read'),
+        ('blocked', 'Site blocks automated reading'),
+    ]
+    rules_status = models.CharField(max_length=20, choices=RULES_CHOICES, default='not_read', db_index=True)
+    rules_read_at = models.DateTimeField(null=True, blank=True)
+    rules_error = models.CharField(max_length=300, blank=True)
+    discovered = models.ForeignKey('DiscoveredVenue', null=True, blank=True, on_delete=models.SET_NULL,
+                                   related_name='index_records')
+
     class Meta:
         ordering = ['title']
         indexes = [
@@ -818,7 +857,8 @@ class VenueIndexRun(models.Model):
         ('completed', 'Completed'),
         ('failed', 'Failed'),
     ]
-    MODE_CHOICES = [('full', 'Catalogue refresh and enrichment'), ('enrich', 'Enrichment only')]
+    MODE_CHOICES = [('full', 'Catalogue refresh and enrichment'), ('enrich', 'Enrichment only'),
+                    ('screen', 'Screening only'), ('rules', 'Read rules from official pages')]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -840,6 +880,12 @@ class VenueIndexRun(models.Model):
     enriched_count = models.PositiveIntegerField(default=0)
     flagged_missing = models.PositiveIntegerField(default=0)
     pending_after = models.PositiveIntegerField(default=0)
+    screened_count = models.PositiveIntegerField(default=0)
+    flagged_count = models.PositiveIntegerField(default=0)
+    pages_checked = models.PositiveIntegerField(default=0)
+    rules_attempted = models.PositiveIntegerField(default=0)
+    rules_ready = models.PositiveIntegerField(default=0)
+    rules_failed = models.PositiveIntegerField(default=0)
     catalogue_complete = models.BooleanField(default=False)
     # When VENUE_INDEX_MAX_RECORDS was reached: works count of the smallest journal kept.
     size_cutoff = models.PositiveIntegerField(null=True, blank=True)
@@ -848,3 +894,39 @@ class VenueIndexRun(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+
+
+class IndexReviewDecision(models.Model):
+    """A person's decision on an index record: the evidence trail for every exclusion. Never deleted."""
+
+    DECISION_CHOICES = [('exclude', 'Exclude'), ('keep', 'Keep'), ('restore', 'Restore')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    record = models.ForeignKey(IndexedVenue, on_delete=models.CASCADE, related_name='review_decisions')
+    decision = models.CharField(max_length=10, choices=DECISION_CHOICES)
+    criteria = models.JSONField(default=list, blank=True)
+    evidence_urls = models.JSONField(default=list, blank=True)
+    note = models.TextField(blank=True)
+    flags_snapshot = models.JSONField(default=list, blank=True)  # what the screening showed at decision time
+    decided_by = models.CharField(max_length=254)
+    decided_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['-decided_at']
+
+
+class BlockedPublisher(models.Model):
+    """Internal publisher blocklist (build plan 4.2). Internal only; never published."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=300)
+    normalized_name = models.CharField(max_length=300, unique=True)
+    note = models.TextField(blank=True)
+    added_by = models.CharField(max_length=254)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name

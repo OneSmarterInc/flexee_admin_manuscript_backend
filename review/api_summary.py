@@ -10,12 +10,13 @@ from django.views.decorators.http import require_POST
 
 from .auth import require_platform_superuser
 from .models import ReviewEvent, Submission
+from .services.ai_provider import DEFAULT_ANTHROPIC_MODEL
 from .services.review_engine import extract_text, word_count
 
 
 ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
 ANTHROPIC_VERSION = '2023-06-01'
-DEFAULT_API_MODEL = 'claude-haiku-4-5-20251001'
+DEFAULT_API_MODEL = DEFAULT_ANTHROPIC_MODEL
 
 
 def _json_body(request):
@@ -135,7 +136,7 @@ def admin_submission_api_summary(request, submission_id):
 
     data = _json_body(request)
     api_key = str(data.get('api_key') or os.getenv('ANTHROPIC_API_KEY', '')).strip()
-    model = str(data.get('model') or os.getenv('ANTHROPIC_MODEL', DEFAULT_API_MODEL)).strip() or DEFAULT_API_MODEL
+    model = str(data.get('model') or os.getenv('ANTHROPIC_MODEL', '').strip() or DEFAULT_API_MODEL).strip() or DEFAULT_API_MODEL
     if not api_key:
         return JsonResponse({'detail': 'API key is required. Paste a temporary key or configure ANTHROPIC_API_KEY.'}, status=400)
 

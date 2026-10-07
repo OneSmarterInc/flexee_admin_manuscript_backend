@@ -20,6 +20,15 @@ from ..ai_usage import (
 from .local_llm import estimate_prompt_tokens, ollama_chat_json, shared_qwen_chat_json
 
 
+# Review, readiness, match reasons and the editorial brief are judgment an
+# author or editor acts on, so the review path defaults to a Sonnet-class model.
+DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-5-5'
+
+
+def anthropic_model() -> str:
+    return os.getenv('ANTHROPIC_MODEL', '').strip() or DEFAULT_ANTHROPIC_MODEL
+
+
 ANTHROPIC_SYSTEM = (
     'You are an expert scholarly manuscript analyst. '
     'You always respond with valid JSON exactly matching the requested schema. '
@@ -50,7 +59,7 @@ def _anthropic_chat_json(
             'ANTHROPIC_API_KEY is not set. Cannot use Anthropic provider.'
         )
 
-    model = os.getenv('ANTHROPIC_MODEL', 'claude-haiku-4-5-20251001').strip()
+    model = anthropic_model()
     client = _anthropic_sdk.Anthropic(api_key=api_key, timeout=timeout)
 
     try:
@@ -95,7 +104,7 @@ def _strip_fences(text: str) -> str:
 
 def _model_hint(provider: str) -> str:
     if provider == 'anthropic':
-        return os.getenv('ANTHROPIC_MODEL', 'claude-haiku-4-5-20251001').strip()
+        return anthropic_model()
     if provider == 'ollama':
         return os.getenv('OLLAMA_MODEL', 'qwen2.5:0.5b-instruct').strip()
     if provider == 'shared_qwen':

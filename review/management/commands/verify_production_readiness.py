@@ -6,6 +6,7 @@ from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
 from review.ai_usage import budget_limits, pricing_for
+from review.services.ai_provider import anthropic_model
 from review.storage_quota import storage_limits
 
 
@@ -15,11 +16,15 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         errors = []
         checks = []
+        warnings = []
 
         def require(condition, message):
             checks.append((bool(condition), message))
             if not condition:
                 errors.append(message)
+
+        def warn(message):
+            warnings.append(message)
 
         def configured(name):
             value = os.getenv(name, '').strip()
@@ -59,28 +64,61 @@ class Command(BaseCommand):
         require(bool(os.getenv('BACKUP_ROOT', '').strip()), 'BACKUP_ROOT must be configured for durable backups.')
 
         provider = os.getenv('AI_PROVIDER', '').strip().lower()
-        require(provider in {'anthropic', 'ollama'}, 'AI_PROVIDER must be explicitly set to anthropic or ollama in production.')
-        if provider == 'anthropic':
-            require(configured('ANTHROPIC_API_KEY'), 'ANTHROPIC_API_KEY must be configured when AI_PROVIDER=anthropic.')
-            require(importlib.util.find_spec('anthropic') is not None, 'The anthropic Python SDK must be installed when AI_PROVIDER=anthropic.')
-        elif provider == 'ollama':
+        require(
+            provider in {'anthropic', 'ollama', 'shared_qwen'},
+            'AI_PROVIDER must be explicitly set to anthropic, ollama or shared_qwen in production.',
+        )
+        truthy = {'1', 'true', 'yes', 'on'}
+        cloud_fallback = os.getenv('ENABLE_CLOUD_FALLBACK', 'false').strip().lower() in truthy
+        uses_anthropic = provider == 'anthropic' or cloud_fallback
+        if provider == 'ollama':
             model = os.getenv('OLLAMA_MODEL', '').strip()
             require(bool(model), 'OLLAMA_MODEL must be configured when AI_PROVIDER=ollama.')
             require(
                 model.lower() != 'qwen2.5:0.5b-instruct',
                 'qwen2.5:0.5b-instruct is a development model and may not be used for production editorial judgment.',
             )
-
+        elif provider == 'shared_qwen':
+            require(
+                os.getenv('SHARED_QWEN_QUEUE_ENABLED', '').strip().lower() in truthy,
+                'SHARED_QWEN_QUEUE_ENABLED must be true when AI_PROVIDER=shared_qwen.',
+            )
+            redis_name = 'SHARED_QWEN_REDIS_URL' if os.getenv('SHARED_QWEN_REDIS_URL', '').strip() else 'REDIS_URL'
+            redis_url = os.getenv(redis_name, '').strip()
+            require(
+                configured(redis_name) and redis_url.startswith(('redis://', 'rediss://', 'unix://')),
+                'SHARED_QWEN_REDIS_URL must be a real redis:// or rediss:// URL when AI_PROVIDER=shared_qwen.',
+            )
+            require(
+                importlib.util.find_spec('redis') is not None,
+                'The redis Python package must be installed when AI_PROVIDER=shared_qwen.',
+            )
+        if uses_anthropic:
+            reason = 'AI_PROVIDER=anthropic' if provider == 'anthropic' else 'ENABLE_CLOUD_FALLBACK=true'
+            require(configured('ANTHROPIC_API_KEY'), f'ANTHROPIC_API_KEY must be configured when {reason}.')
+            require(
+                importlib.util.find_spec('anthropic') is not None,
+                f'The anthropic Python SDK must be installed when {reason}.',
+            )
+        if os.getenv('AI_PROVIDER_FALLBACK', '').strip():
+            warn(
+                'AI_PROVIDER_FALLBACK is not read by the application. '
+                'Use ENABLE_CLOUD_FALLBACK=true to send oversized reviews to Anthropic.'
+            )
         budgets = budget_limits()
         require(budgets['enabled'], 'AI_COST_ENFORCEMENT_ENABLED must be true in production.')
         require(
             budgets['daily_cost_limit_usd'] > 0 or budgets['monthly_cost_limit_usd'] > 0,
             'At least one positive AI daily or monthly cost ceiling must be configured.',
         )
-        if provider == 'anthropic':
-            model = os.getenv('ANTHROPIC_MODEL', 'claude-haiku-4-5-20251001').strip()
-            require(pricing_for(provider, model)['priced'], 'Anthropic input and output pricing must be configured for cost enforcement.')
-
+        if uses_anthropic:
+            model = anthropic_model()
+            require(pricing_for('anthropic', model)['priced'], 'Anthropic input and output pricing must be configured for cost enforcement.')
+            if 'haiku' in model.lower():
+                warn(
+                    f'ANTHROPIC_MODEL is {model}. Review findings, match reasons and the editorial brief '
+                    'should use a Sonnet-class model.'
+                )
         limits = storage_limits()
         require(limits['author_limit_bytes'] > 0, 'AUTHOR_STORAGE_LIMIT_BYTES must be positive.')
         require(limits['total_limit_bytes'] >= limits['author_limit_bytes'], 'TOTAL_STORAGE_LIMIT_BYTES must be at least the per-author storage limit.')
@@ -88,6 +126,8 @@ class Command(BaseCommand):
         for passed, message in checks:
             marker = 'PASS' if passed else 'FAIL'
             self.stdout.write(f'[{marker}] {message}')
+        for message in warnings:
+            self.stdout.write(self.style.WARNING(f'[WARN] {message}'))
 
         if errors:
             raise CommandError(f'Production readiness failed with {len(errors)} blocking configuration issue(s).')

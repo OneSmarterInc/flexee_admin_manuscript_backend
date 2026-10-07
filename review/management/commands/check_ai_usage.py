@@ -4,6 +4,7 @@ import os
 from django.core.management.base import BaseCommand, CommandError
 
 from review.ai_usage import ai_usage_snapshot, budget_limits, pricing_for
+from review.services.ai_provider import anthropic_model as configured_anthropic_model
 
 
 class Command(BaseCommand):
@@ -24,10 +25,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         snapshot = ai_usage_snapshot()
         provider = os.getenv('AI_PROVIDER', 'auto').strip().lower()
-        anthropic_model = os.getenv(
-            'ANTHROPIC_MODEL',
-            'claude-haiku-4-5-20251001',
-        ).strip()
+        anthropic_model = configured_anthropic_model()
         anthropic_pricing = pricing_for('anthropic', anthropic_model)
         limits = budget_limits()
 

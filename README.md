@@ -81,7 +81,7 @@ For Anthropic, change `.env`, restart both API and qcluster, and run the same ma
 ```env
 AI_PROVIDER=anthropic
 ANTHROPIC_API_KEY=your_real_key
-ANTHROPIC_MODEL=claude-haiku-4-5-20251001
+ANTHROPIC_MODEL=claude-sonnet-5-5
 ```
 
 ```powershell

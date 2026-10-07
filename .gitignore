@@ -3,6 +3,7 @@ venv/
 .env
 .env.*
 !.env.example
+!.env.production.example
 
 db.sqlite3
 *.sqlite3

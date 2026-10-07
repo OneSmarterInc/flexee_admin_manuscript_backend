@@ -143,3 +143,39 @@ class TemplateTests(SimpleTestCase):
         self.assertNotIn('AI_PROVIDER_FALLBACK', values)
         self.assertEqual(values['ENABLE_CLOUD_FALLBACK'], 'true')
         self.assertEqual(values['AI_PROVIDER'], 'shared_qwen')
+
+
+class PlaceholderSentryDsnTests(SimpleTestCase):
+    def test_placeholder_or_malformed_dsn_does_not_crash_startup(self):
+        from review import monitoring
+        with mock.patch('sentry_sdk.init') as init:
+            for dsn in ('CHANGE_ME_SENTRY_DSN', 'not-a-url'):
+                self.assertFalse(monitoring.initialize_sentry(dsn=dsn, environment='production'), dsn)
+            init.assert_not_called()
+
+    def test_real_dsn_still_initialises(self):
+        from review import monitoring
+        with mock.patch('sentry_sdk.init') as init:
+            self.assertTrue(monitoring.initialize_sentry(dsn='https://key@o1.ingest.sentry.io/1', environment='production'))
+            init.assert_called_once()
+        monitoring._ENABLED = False
+
+
+class UnfilledProductionTemplateTests(SimpleTestCase):
+    def test_template_placeholders_fail_readiness_clearly(self):
+        from django.conf import settings
+        path = settings.BASE_DIR / '.env.production.example'
+        if not path.exists():
+            self.skipTest('.env.production.example is not in the repository')
+        values = {}
+        for line in path.read_text(encoding='utf-8').splitlines():
+            if '=' in line and not line.lstrip().startswith('#'):
+                key, _, value = line.partition('=')
+                values[key.strip()] = value.strip()
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, values, clear=False):
+            with self.assertRaises(CommandError):
+                call_command('verify_production_readiness', stdout=out)
+        text = out.getvalue()
+        self.assertIn('[FAIL] DJANGO_SECRET_KEY must be a real production secret', text)
+        self.assertIn('[FAIL] SENTRY_DSN must be configured', text)

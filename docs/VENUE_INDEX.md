@@ -82,7 +82,8 @@ Catalogue signals (no AI, takes seconds): no Crossref DOIs (2 points), no ISSN (
 that fails its check digit (3), publisher not stated (1), under two years of publishing (1),
 DOAJ submission-to-publication of 3 weeks or less (2), output spread across four or more
 unrelated fields (2), charging authors while not in DOAJ (1), publisher on the internal
-blocklist (3). Three points put a journal in the **Needs review** queue. Positive signals
+blocklist (3), and at least 500 items with fewer than 0.5 citations per item (3; typical of
+magazines and news titles, pre-fills "Not a peer-reviewed journal"). Three points put a journal in the **Needs review** queue. Positive signals
 (DOAJ, long Crossref history, CWTS core source, ISSN confirmed by Crossref) are shown to the
 reviewer and never used to exclude.
 
@@ -126,8 +127,15 @@ The AI is local Ollama by default (`VENUE_INDEX_RULES_AI_PROVIDER=ollama`, model
 run stops with that reason instead of failing every journal. `VENUE_INDEX_RULES_PER_RUN` (40)
 is the per-run ceiling, together with the time limit.
 
-Outcomes: **Rules ready** (quoted rules found), **Rules not found** (with the reason) or pages
-unreadable; failed reads are retried after 30 days. Reading never publishes. In Venue Index ->
+Journals with a DOAJ author-guidelines page are read first (those pages are usually readable).
+If one official URL cannot be read, the other (guidelines page or homepage) is tried.
+
+Outcomes: **Rules ready** (quoted rules found), **Rules not found** (with the reason), pages
+unreadable, or **Site blocks reading** (HTTP 401/403/429 or robots.txt). Failed reads are
+retried after 30 days. Blocked sites are respected, never worked around: other journals on the
+same site are skipped for the rest of the run, and blocked journals are retried after 90 days.
+For those, enter the rules by hand in Venue Agents, wait for the editor to claim the venue
+(step 9), or leave the journal as Listed only. Reading never publishes. In Venue Index ->
 "Rules ready", an admin checks what was read (each rule with its quote and link) and clicks
 **Publish**, which creates the live venue labelled "Checked from official pages" with those
 rules. Excluding a published journal later hides the live venue again.

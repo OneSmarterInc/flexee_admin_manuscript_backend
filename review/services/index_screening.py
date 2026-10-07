@@ -48,12 +48,16 @@ FLAG_TO_CRITERION = {
     'invented_metrics': 'invented_metrics',
     'overbroad_scope': 'overbroad_scope',
     'blocked_publisher': 'internal_blocklist',
+    'magazine_like': 'not_peer_reviewed',
 }
 
 STRONG, MODERATE, WEAK = 3, 2, 1
 FLAG_THRESHOLD = 3          # catalogue points that put a journal in the review queue
 EVIDENCE_CODES = {'guaranteed_acceptance', 'rapid_review_promise', 'invented_metrics', 'blocked_publisher'}
 PAGE_RECHECK_DAYS = 30
+# Magazines and news titles publish many short items that are rarely cited.
+MAGAZINE_MIN_WORKS = 500
+MAGAZINE_MAX_CITES_PER_WORK = 0.5
 
 
 def _flag(code, label, weight, detail='', *, kind='negative', evidence_url='', quote='', source='catalogue'):
@@ -102,6 +106,13 @@ def catalogue_flags(record, blocked, *, this_year):
         names = ', '.join(s.get('name', '') for s in (record.subfields or [])[:4])
         neg.append(_flag('overbroad_scope', 'Scope spans unrelated disciplines', MODERATE,
                          f'Output spread across {len(fields)} unrelated fields ({names}).'))
+
+    works = int(metrics.get('works_count') or 0)
+    cites = metrics.get('cited_by_count')
+    if works >= MAGAZINE_MIN_WORKS and isinstance(cites, (int, float)) and cites / works < MAGAZINE_MAX_CITES_PER_WORK:
+        neg.append(_flag('magazine_like', 'Few citations per item, typical of magazines and news titles', STRONG,
+                         f'{works:,} items with {int(cites):,} citations in total '
+                         f'({cites / works:.2f} per item). Check that it is a peer-reviewed journal.'))
 
     if record.open_access and not record.doaj_listed and (record.apc_usd or 0) > 0:
         neg.append(_flag('apc_not_in_doaj', 'Charges authors but is not in DOAJ', WEAK,

@@ -828,6 +828,7 @@ class IndexedVenue(models.Model):
         ('ready', 'Rules ready for approval'),
         ('incomplete', 'Rules not found on the pages'),
         ('failed', 'Pages could not be read'),
+        ('blocked', 'Site blocks automated reading'),
     ]
     rules_status = models.CharField(max_length=20, choices=RULES_CHOICES, default='not_read', db_index=True)
     rules_read_at = models.DateTimeField(null=True, blank=True)

@@ -247,3 +247,75 @@ def test_excluding_a_published_journal_hides_the_live_venue():
     scr.decide(item, decision='exclude', user_email='r@x', criteria=['invented_metrics'],
                evidence_urls=['https://bad.example'])
     assert Venue.objects.get().excluded
+
+
+# ---------------------------------------------------------------------------
+# Sites that refuse automated reading (HTTP 401/403/429, robots.txt)
+# ---------------------------------------------------------------------------
+
+def forbidden(url):
+    import httpx
+    return {url: httpx.Response(403, text='forbidden', headers={'content-type': 'text/html'})}
+
+
+@pytest.mark.django_db
+def test_blocked_site_gets_its_own_status_and_waits_90_days():
+    item = journal('ACM Journal', homepage='https://cacm.example.org')
+    fetcher, _config = make_fetcher(forbidden('https://cacm.example.org'))
+    run = run_rules(fetcher)
+    item.refresh_from_db()
+    assert item.rules_status == 'blocked' and 'cacm.example.org blocks automated reading' in item.rules_error
+    assert 'HTTP 403' in item.rules_error and run.rules_failed == 1
+    IndexedVenue.objects.filter(id=item.id).update(rules_read_at=timezone.now() - timezone.timedelta(days=31))
+    assert not ir.rules_candidates('business-is').exists()       # a plain failure would be due again
+    IndexedVenue.objects.filter(id=item.id).update(rules_read_at=timezone.now() - timezone.timedelta(days=91))
+    assert ir.rules_candidates('business-is').exists()
+
+
+@pytest.mark.django_db
+def test_other_journals_on_a_blocked_site_are_skipped_without_a_request():
+    first = journal('Big Journal A', openalex_id='S1', homepage='https://pubs.example.org/a', metrics={'works_count': 9000})
+    second = journal('Big Journal B', openalex_id='S2', homepage='https://pubs.example.org/b', metrics={'works_count': 8000})
+    good = journal('Journal of Applied AI in Organizations', openalex_id='S3')
+    requested = []
+    pages = {**forbidden('https://pubs.example.org/a'), **forbidden('https://pubs.example.org/b'), **JOURNAL_PAGES}
+    fetcher, _config = make_fetcher(pages)
+    real_get = fetcher.client.send
+
+    def spy(request, **kw):
+        requested.append(str(request.url))
+        return real_get(request, **kw)
+    fetcher.client.send = spy
+    run = run_rules(fetcher, rules_limit=2)
+    for r in (first, second, good):
+        r.refresh_from_db()
+    assert first.rules_status == 'blocked' and second.rules_status == 'blocked'
+    assert 'earlier in this run' in second.rules_error
+    assert not any('/b' in u and 'robots' not in u for u in requested)  # never asked for B
+    assert good.rules_status == 'ready'                                  # the skip did not use up the ceiling
+    assert run.rules_attempted == 2
+
+
+@pytest.mark.django_db
+def test_blocked_guidelines_page_falls_back_to_the_homepage_on_another_site():
+    item = journal(doaj={'guidelines_url': 'https://submit.blocked.example/guide'})
+    fetcher, _config = make_fetcher({**forbidden('https://submit.blocked.example/guide'), **JOURNAL_PAGES})
+    run_rules(fetcher)
+    item.refresh_from_db()
+    assert item.rules_status == 'ready'
+
+
+@pytest.mark.django_db
+def test_journals_with_a_doaj_guidelines_page_are_read_first():
+    journal('Huge Publisher Journal', openalex_id='S1', homepage='https://huge.example/', metrics={'works_count': 50000})
+    journal('DOAJ Journal', openalex_id='S2', homepage='https://small.example/', metrics={'works_count': 600},
+            doaj={'guidelines_url': 'https://small.example/guide'})
+    order = list(ir.reading_order(ir.rules_candidates('business-is')).values_list('title', flat=True))
+    assert order == ['DOAJ Journal', 'Huge Publisher Journal']
+
+
+@pytest.mark.django_db
+def test_blocked_shows_in_the_missing_rules_filter():
+    journal('Blocked', openalex_id='S1', rules_status='blocked', rules_error='x blocks automated reading')
+    body = admin_client().get('/api/admin/venue-index/?filter=rules_missing').json()
+    assert [i['title'] for i in body['items']] == ['Blocked'] and body['items'][0]['rules']['status'] == 'blocked'

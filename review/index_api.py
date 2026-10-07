@@ -27,7 +27,7 @@ FILTERS = {
     'excluded': Q(excluded=True),
     'kept': Q(screening_status='kept'),
     'rules_ready': Q(rules_status='ready', venue__isnull=True),
-    'rules_missing': Q(rules_status__in=['incomplete', 'failed'], venue__isnull=True),
+    'rules_missing': Q(rules_status__in=['incomplete', 'failed', 'blocked'], venue__isnull=True),
 }
 
 

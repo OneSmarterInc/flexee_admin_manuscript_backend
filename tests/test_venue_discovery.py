@@ -1028,6 +1028,11 @@ def test_ollama_down_does_not_create_thin_records(monkeypatch):
 @pytest.mark.django_db
 def test_weaker_reading_keeps_the_previous_verified_result():
     record = stage_journal()
+    from datetime import timedelta
+    from django.utils import timezone
+    # Back-date the first check: on Windows two quick timezone.now() calls can return the same instant.
+    DiscoveredVenue.objects.filter(id=record.id).update(last_checked_at=timezone.now() - timedelta(minutes=5))
+    record.refresh_from_db()
     before = (record.acceptance_status, record.confidence, record.aims_scope)
     weak = journal_extraction()
     weak['source_evidence'] = []          # the model missed the quotes this time

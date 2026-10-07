@@ -70,3 +70,40 @@ continue in the next run. A journal that drops out of the catalogue is kept and 
 
 Cost: a full pass of ~2,500 journals is about 25 OpenAlex list calls plus one Crossref call per
 journal, well within OpenAlex's free daily allowance even without a key.
+
+## Exclusion screening (build plan step 3)
+
+Automated screening only **flags** journals for a person to review. Nothing is excluded without
+a reviewer choosing the criteria it fails and at least one evidence link, and every decision is
+stored (`IndexReviewDecision`) and reversible. Wording is always about criteria, never a label:
+excluded journals are hidden from authors and never listed publicly.
+
+Catalogue signals (no AI, takes seconds): no Crossref DOIs (2 points), no ISSN (2) or an ISSN
+that fails its check digit (3), publisher not stated (1), under two years of publishing (1),
+DOAJ submission-to-publication of 3 weeks or less (2), output spread across four or more
+unrelated fields (2), charging authors while not in DOAJ (1), publisher on the internal
+blocklist (3). Three points put a journal in the **Needs review** queue. Positive signals
+(DOAJ, long Crossref history, CWTS core source, ISSN confirmed by Crossref) are shown to the
+reviewer and never used to exclude.
+
+Evidence from the journal's own pages: for journals with any concern, or that charge authors
+outside DOAJ, the homepage and up to two author or fee pages are read (robots.txt respected)
+and scanned for exact phrases: guaranteed acceptance, publication or acceptance promised
+within days, and metrics from unrecognised ranking bodies (SJIF, Global Impact Factor, Index
+Copernicus Value and similar). Any match puts the journal in the queue with the quote and the
+page link. Pages are re-read after 30 days. `VENUE_INDEX_READ_PAGES=false` turns this off.
+
+Decisions (admin, Venue Index -> a journal):
+- **Exclude**: choose criteria and evidence links; optionally block the publisher, which sends
+  its other titles to the queue (never excludes them automatically). A linked live venue is
+  excluded too, so authors never see it. Excluded journals are kept in the index (never deleted
+  by scope or size changes), and Venue Discovery refuses to re-add them.
+- **Keep**: the journal leaves the queue and only returns if a new kind of concern appears.
+- **Restore**: reverses an exclusion. When the criteria behind an exclusion are no longer
+  detected, the journal returns to the queue as "re-review suggested".
+
+```
+python manage.py import_venue_index --screen-only            # screen + read pages
+python manage.py import_venue_index --screen-only --no-pages # catalogue signals only
+```
+Full and daily runs screen automatically after their Crossref/DOAJ checks.

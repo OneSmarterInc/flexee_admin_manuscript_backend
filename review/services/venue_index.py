@@ -199,6 +199,9 @@ class IndexHttp:
                 if slot:
                     slot.release()
             self._sleep((1.5 * (attempt + 1)) * self.config.delay_scale)
+        if source == 'openalex' and 'HTTP 429' in last_error:
+            last_error = ('OpenAlex daily free allowance used up (HTTP 429). Add OPENALEX_API_KEY to .env '
+                          '(free at openalex.org/settings/api), or run again after midnight UTC (5:30 AM IST).')
         raise IndexSourceError(last_error or f'{source} failed')
 
 
@@ -533,7 +536,7 @@ def start_index_run(*, mode='full', trigger='schedule', requested_by=''):
     if active:
         return active, False
     config = IndexConfig()
-    return VenueIndexRun.objects.create(mode=mode if mode in {'full', 'enrich'} else 'full', trigger=trigger,
+    return VenueIndexRun.objects.create(mode=mode if mode in {'full', 'enrich', 'screen'} else 'full', trigger=trigger,
                                         requested_by=requested_by[:254], field_profile=config.profile), True
 
 
@@ -563,7 +566,8 @@ def link_to_venues(config):
     return linked
 
 
-def run_index(run, *, http=None, now=None, clock=None, progress=None, time_limit_seconds=None):
+def run_index(run, *, http=None, now=None, clock=None, progress=None, time_limit_seconds=None, page_fetcher=None,
+              read_pages=True):
     """Run one import. Saves as it goes, so a stopped run keeps what it found.
 
     progress, if given, is called with short status lines (the management command prints them).
@@ -583,7 +587,9 @@ def run_index(run, *, http=None, now=None, clock=None, progress=None, time_limit
         if run.mode == 'full':
             _catalogue_pass(run, config, http, now, budget, say)
             run.linked_count = link_to_venues(config)
-        _enrichment_pass(run, config, http, now, budget, say)
+        if run.mode != 'screen':
+            _enrichment_pass(run, config, http, now, budget, say)
+        _screening_pass(run, config, budget, say, page_fetcher=page_fetcher, read_pages=read_pages)
         run.pending_after = pending_enrichment(config, now).count()
         run.status = 'completed'
         run.summary = _summary(run)
@@ -620,7 +626,7 @@ def _catalogue_pass(run, config, http, now, budget, say=lambda m: None):
                 # A journal already in the index that no longer qualifies (e.g. the scope was narrowed)
                 # is taken out, unless an admin linked it to a live venue.
                 run.removed_count += IndexedVenue.objects.filter(
-                    openalex_id=_short_id(source.get('id')), venue__isnull=True).delete()[0]
+                    openalex_id=_short_id(source.get('id')), venue__isnull=True, excluded=False).delete()[0]
                 continue
             openalex_id = _short_id(source.get('id'))
             fields = spine_fields(source, details)
@@ -652,7 +658,7 @@ def _catalogue_pass(run, config, http, now, budget, say=lambda m: None):
             # Smaller than the cutoff: no longer among the N largest, so out of the index (unless linked).
             small = [r.id for r in unseen.only('id', 'metrics')
                      if int((r.metrics or {}).get('works_count') or 0) <= cutoff]
-            run.removed_count += IndexedVenue.objects.filter(id__in=small, venue__isnull=True).delete()[0]
+            run.removed_count += IndexedVenue.objects.filter(id__in=small, venue__isnull=True, excluded=False).delete()[0]
             unseen = unseen.exclude(id__in=small)  # a linked small journal stays, and is not 'missing'
         # Only a complete pass can say a journal left the catalogue. Keep it, flag it.
         run.flagged_missing = unseen.filter(missing_since__isnull=True).update(missing_since=now)
@@ -731,6 +737,16 @@ def _enrichment_pass(run, config, http, now, budget, say=lambda m: None):
                 break
 
 
+def _screening_pass(run, config, budget, say, *, page_fetcher=None, read_pages=True):
+    """Step 3: flag journals for human review (catalogue signals, then evidence from their own pages)."""
+    from .index_screening import gather_page_evidence, review_queue, screen_all
+    run.screened_count, _ = screen_all(config.profile, say=say)
+    if read_pages and os.getenv('VENUE_INDEX_READ_PAGES', 'true').strip().lower() not in {'0', 'false', 'no', 'off'}:
+        gather_page_evidence(run, config.profile, budget, fetcher=page_fetcher, say=say)
+    run.flagged_count = review_queue(config.profile).count()
+    run.save()
+
+
 def _summary(run):
     parts = []
     if run.mode == 'full':
@@ -746,7 +762,11 @@ def _summary(run):
             parts.append(f'{run.flagged_missing} no longer in the catalogue (kept, flagged)')
         if run.linked_count:
             parts.append(f'{run.linked_count} linked to live venues')
-    parts.append(f'{run.enriched_count} checked against Crossref/DOAJ')
+    if run.mode != 'screen':
+        parts.append(f'{run.enriched_count} checked against Crossref/DOAJ')
+    if run.screened_count:
+        parts.append(f'{run.flagged_count} need review'
+                     + (f' ({run.pages_checked} journals\' pages read for evidence)' if run.pages_checked else ''))
     if run.pending_after:
         parts.append(f'{run.pending_after} still to check (continues next run)')
     return '; '.join(parts) + '.'

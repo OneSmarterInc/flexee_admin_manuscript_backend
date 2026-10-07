@@ -19,6 +19,7 @@ def env(monkeypatch):
     monkeypatch.setenv('TEST_BYPASS_ORIGIN', '1')
     monkeypatch.setenv('VENUE_INDEX_POLITE_DELAY', '0')
     monkeypatch.setenv('VENUE_INDEX_MIN_WORKS', '30')
+    monkeypatch.setenv('VENUE_INDEX_READ_PAGES', 'false')  # page evidence is tested in test_index_screening.py
 
 
 # ---------------------------------------------------------------------------

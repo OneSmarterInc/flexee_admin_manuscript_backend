@@ -337,6 +337,10 @@ def discovery_add_to_venue_agent(request, discovered_id):
                 return JsonResponse({'detail': 'This venue is closed to submissions, so it cannot be added.'}, status=409)
             if not item.name.strip() or item.venue_type not in {'journal', 'conference', 'publisher'}:
                 return JsonResponse({'detail': 'This discovered venue is incomplete and cannot be added.'}, status=409)
+            from .services.index_screening import excluded_match
+            blocked_reason = excluded_match(item.name, item.organization_name)
+            if blocked_reason:
+                return JsonResponse({'detail': blocked_reason, 'code': 'excluded_from_index'}, status=409)
 
             config_fields = build_venue_config_fields(_config_data(item))
             organization, org_created = _organization_for(item)

@@ -8,7 +8,9 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 from .audit import record_audit_event
 from .auth import require_platform_superuser
 from .index_schedule import get_index_schedule, set_index_schedule
-from .models import IndexedVenue, VenueIndexRun
+from .models import BlockedPublisher, IndexedVenue, VenueIndexRun
+from .services.index_screening import CRITERIA, FLAG_TO_CRITERION, DecisionError, decide, screen_record, blocked_publisher_names
+from .services.venue_discovery import normalize_name
 from .services.venue_index import PROFILES, IndexConfig, coverage_counts, start_index_run
 
 FILTERS = {
@@ -20,6 +22,9 @@ FILTERS = {
     'linked': Q(venue__isnull=False),
     'not_checked': Q(enriched_at__isnull=True),
     'missing': Q(missing_since__isnull=False),
+    'review': Q(screening_status='flagged') | Q(rereview_suggested=True),
+    'excluded': Q(excluded=True),
+    'kept': Q(screening_status='kept'),
 }
 
 
@@ -53,6 +58,13 @@ def record_payload(item, detail=False):
             'last_verified_at': _iso(venue.last_verified_at) if venue else None,
         },
         'venue': {'id': str(venue.id), 'name': venue.name} if venue else None,
+        'screening': {
+            'status': item.screening_status,
+            'points': item.screening_points,
+            'concerns': [f['label'] for f in (item.screening_flags or []) if f.get('kind') == 'negative'][:4],
+            'rereview_suggested': item.rereview_suggested,
+        },
+        'excluded': item.excluded,
     }
     if detail:
         payload.update({
@@ -69,6 +81,21 @@ def record_payload(item, detail=False):
             'checked': item.checked,
             'first_imported_at': _iso(item.first_imported_at),
             'last_error': item.last_error,
+            'screening_flags': item.screening_flags,
+            'screened_at': _iso(item.screened_at),
+            'pages_checked_at': _iso(item.pages_checked_at),
+            'exclusion_reason': item.exclusion_reason,
+            'suggested_criteria': sorted({FLAG_TO_CRITERION[f['code']] for f in (item.screening_flags or [])
+                                          if f.get('code') in FLAG_TO_CRITERION}),
+            'suggested_evidence': [u for u in dict.fromkeys(
+                [f.get('evidence_url') for f in (item.screening_flags or [])
+                 if f.get('kind') == 'negative' and f.get('evidence_url')] + [item.homepage_url]) if u][:5],
+            'publisher_blocked': bool(item.publisher) and BlockedPublisher.objects.filter(
+                normalized_name=normalize_name(item.publisher)).exists(),
+            'decisions': [{
+                'decision': d.decision, 'criteria': d.criteria, 'evidence_urls': d.evidence_urls, 'note': d.note,
+                'decided_by': d.decided_by, 'decided_at': _iso(d.decided_at),
+            } for d in item.review_decisions.all()[:20]],
         })
     return payload
 
@@ -96,6 +123,9 @@ def run_payload(run):
         'linked': run.linked_count,
         'removed': run.removed_count,
         'enriched': run.enriched_count,
+        'screened': run.screened_count,
+        'flagged': run.flagged_count,
+        'pages_checked': run.pages_checked,
         'flagged_missing': run.flagged_missing,
         'pending_after': run.pending_after,
         'errors': (run.errors or [])[-10:],
@@ -141,6 +171,9 @@ def index_list(request):
         'pagination': {'page': page, 'page_size': page_size, 'total': total, 'pages': pages},
         'last_run': run_payload(VenueIndexRun.objects.order_by('-created_at').first()),
         'schedule': get_index_schedule(),
+        'criteria': CRITERIA,
+        'blocked_publishers': [{'id': str(b.id), 'name': b.name, 'added_by': b.added_by,
+                                'created_at': _iso(b.created_at)} for b in BlockedPublisher.objects.all()[:200]],
     })
 
 
@@ -160,7 +193,7 @@ def index_run_now(request):
         data = json.loads(request.body or b'{}')
     except ValueError:
         data = {}
-    mode = 'enrich' if data.get('mode') == 'enrich' else 'full'
+    mode = data.get('mode') if data.get('mode') in {'enrich', 'screen'} else 'full'
     run, created = start_index_run(mode=mode, trigger='manual', requested_by=request.editor_user.email)
     if created:
         from django_q.tasks import async_task
@@ -186,3 +219,46 @@ def index_schedule(request):
     record_audit_event(request, 'venue_index.schedule_changed', resource_type='venue_index_schedule',
                        resource_id='venue-index', detail={'enabled': state['enabled']})
     return JsonResponse({'schedule': state})
+
+
+@require_POST
+@require_platform_superuser
+def index_decision(request, record_id):
+    """A person excludes, keeps or restores a journal. Exclusion needs criteria and evidence."""
+    item = IndexedVenue.objects.filter(id=record_id).first()
+    if not item:
+        return JsonResponse({'detail': 'Index record not found'}, status=404)
+    try:
+        data = json.loads(request.body or b'{}')
+    except ValueError:
+        return JsonResponse({'detail': 'Invalid JSON'}, status=400)
+    try:
+        item = decide(item, decision=str(data.get('decision', '')), user_email=request.editor_user.email,
+                      criteria=data.get('criteria') or [], evidence_urls=data.get('evidence_urls') or [],
+                      note=data.get('note', ''), block_publisher=bool(data.get('block_publisher')))
+    except DecisionError as exc:
+        return JsonResponse({'detail': str(exc)}, status=400)
+    record_audit_event(request, f'venue_index.{item.screening_status if data.get("decision") != "restore" else "restored"}',
+                       resource_type='indexed_venue', resource_id=item.id, venue_id=item.venue_id,
+                       detail={'decision': data.get('decision'), 'criteria': (item.exclusion_reason or {}).get('criteria', []),
+                               'block_publisher': bool(data.get('block_publisher'))})
+    item.refresh_from_db()
+    return JsonResponse({'item': record_payload(item, detail=True)})
+
+
+@require_http_methods(['DELETE'])
+@require_platform_superuser
+def index_unblock_publisher(request, block_id):
+    block = BlockedPublisher.objects.filter(id=block_id).first()
+    if not block:
+        return JsonResponse({'detail': 'Not found'}, status=404)
+    name = block.normalized_name
+    block.delete()
+    record_audit_event(request, 'venue_index.publisher_unblocked', resource_type='blocked_publisher',
+                       resource_id=block_id, detail={'name': name})
+    # Its titles are re-screened, so the blocklist concern disappears from the queue.
+    names = blocked_publisher_names()
+    for record in IndexedVenue.objects.exclude(publisher=''):
+        if normalize_name(record.publisher) == name:
+            screen_record(record, names)
+    return JsonResponse({'removed': True})

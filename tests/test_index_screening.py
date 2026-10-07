@@ -426,9 +426,9 @@ def test_time_limit_stops_taking_new_sites(monkeypatch):
 
 @pytest.mark.django_db
 def test_magazine_like_titles_go_to_review_as_not_peer_reviewed():
-    item = scr.screen_record(record('Physics World', metrics={'works_count': 20000, 'cited_by_count': 3000}), set())
+    item = scr.screen_record(record('Physics World', metrics={'works_count': 20000, 'cited_by_count': 1000}), set())
     flag = next(f for f in item.screening_flags if f['code'] == 'magazine_like')
-    assert item.screening_status == 'flagged' and flag['weight'] == 3 and '0.15 per item' in flag['detail']
+    assert item.screening_status == 'flagged' and flag['weight'] == 3 and '0.05 per item' in flag['detail']
     assert scr.FLAG_TO_CRITERION['magazine_like'] == 'not_peer_reviewed'
 
 
@@ -436,6 +436,7 @@ def test_magazine_like_titles_go_to_review_as_not_peer_reviewed():
 @pytest.mark.parametrize('metrics', [
     {'works_count': 20000, 'cited_by_count': 400000},  # an ordinary, well-cited journal
     {'works_count': 300, 'cited_by_count': 10},        # too small to judge
+    {'works_count': 2000, 'cited_by_count': 600},      # low-cited, but a journal, not a newsletter
     {'works_count': 20000},                            # no citation count recorded
 ])
 def test_magazine_signal_needs_size_and_low_citations(metrics):

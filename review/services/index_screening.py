@@ -57,7 +57,7 @@ EVIDENCE_CODES = {'guaranteed_acceptance', 'rapid_review_promise', 'invented_met
 PAGE_RECHECK_DAYS = 30
 # Magazines and news titles publish many short items that are rarely cited.
 MAGAZINE_MIN_WORKS = 500
-MAGAZINE_MAX_CITES_PER_WORK = 0.5
+MAGAZINE_MAX_CITES_PER_WORK = 0.1   # 0.5 flagged 600+ low-cited regional journals; trade newsletters sit far below 0.1
 
 
 def _flag(code, label, weight, detail='', *, kind='negative', evidence_url='', quote='', source='catalogue'):

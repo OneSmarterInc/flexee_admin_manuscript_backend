@@ -82,7 +82,7 @@ Catalogue signals (no AI, takes seconds): no Crossref DOIs (2 points), no ISSN (
 that fails its check digit (3), publisher not stated (1), under two years of publishing (1),
 DOAJ submission-to-publication of 3 weeks or less (2), output spread across four or more
 unrelated fields (2), charging authors while not in DOAJ (1), publisher on the internal
-blocklist (3), and at least 500 items with fewer than 0.5 citations per item (3; typical of
+blocklist (3), and at least 500 items with fewer than 0.1 citations per item (3; typical of
 magazines and news titles, pre-fills "Not a peer-reviewed journal"). Three points put a journal in the **Needs review** queue. Positive signals
 (DOAJ, long Crossref history, CWTS core source, ISSN confirmed by Crossref) are shown to the
 reviewer and never used to exclude.

@@ -30,6 +30,7 @@ from .models import (
     EditorFeedback,
     EvidenceFinding,
     Manuscript,
+    Membership,
     Organization,
     ReadinessAssessment,
     SubmissionTransfer,
@@ -542,9 +543,22 @@ def _active_config(venue):
     return venue.agent_configs.filter(active=True).order_by('-version', '-created_at').first()
 
 
-def mark_editor_confirmed(venue):
-    """An editor saved or activated rules for a venue they configure: their rules are current as of now."""
-    if venue.trust_tier == Venue.TIER_CLAIMED:
+def mark_editor_confirmed(venue, user=None):
+    """An editor saved or activated rules for a venue they configure: their rules are current as of now.
+
+    Build plan step 9: a journal claimed by its own editor becomes editor-confirmed when that editor
+    (an owner who is not a Flexee platform admin) saves its rules, and only their saves renew the date;
+    a Flexee admin's edit is never presented as the editor's confirmation. Venues Flexee runs itself
+    (no outside owner) keep the earlier behaviour: saving a claimed venue renews its date."""
+    outside_owners = Membership.objects.filter(organization_id=venue.organization_id, role='owner',
+                                               user__platform_superuser=False) if venue.organization_id else None
+    is_outside_owner = bool(user is not None and outside_owners is not None
+                            and outside_owners.filter(user=user).exists())
+    if is_outside_owner:
+        venue.trust_tier = Venue.TIER_CLAIMED
+        venue.last_verified_at = timezone.now()
+        venue.save(update_fields=['trust_tier', 'last_verified_at', 'updated_at'])
+    elif venue.trust_tier == Venue.TIER_CLAIMED and not (outside_owners is not None and outside_owners.exists()):
         venue.last_verified_at = timezone.now()
         venue.save(update_fields=['last_verified_at', 'updated_at'])
 
@@ -2328,7 +2342,7 @@ def admin_venue_config(request, venue_id):
             **config_fields,
         )
         venue.agent_configs.filter(active=True).exclude(id=config.id).update(active=False)
-        mark_editor_confirmed(venue)
+        mark_editor_confirmed(venue, request.editor_user)
         record_audit_event(
             request,
             'venue_config.created',

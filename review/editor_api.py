@@ -178,7 +178,7 @@ def admin_activate_venue_config(request, venue_id, config_id):
     if not config.active:
         config.active = True
         config.save(update_fields=['active'])
-    mark_editor_confirmed(venue)
+    mark_editor_confirmed(venue, request.editor_user)
     record_audit_event(
         request,
         'venue_config.activated',
@@ -542,4 +542,3 @@ def admin_audit_events(request):
         'total': total,
         'events': [audit_event_payload(event) for event in events],
     })
-

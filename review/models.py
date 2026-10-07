@@ -997,3 +997,43 @@ class RulesAttempt(models.Model):
 
     class Meta:
         ordering = ['created_at', 'attempt']
+
+
+class VenueClaim(models.Model):
+    """An editor claims a journal in the index (build plan step 9).
+
+    The claimant confirms their email; a platform admin approves. Approval gives them an editor
+    account that owns the journal. The journal shows as editor-confirmed only once the editor
+    saves their own rules: Flexee's reading is never presented as the editor's word."""
+    STATUS_CHOICES = [
+        ('pending_email', 'Waiting for email confirmation'),
+        ('pending_review', 'Waiting for review'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+    ]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    venue = models.ForeignKey(Venue, null=True, blank=True, on_delete=models.CASCADE, related_name='claims')
+    indexed = models.ForeignKey('IndexedVenue', null=True, blank=True, on_delete=models.CASCADE, related_name='claims')
+    journal_name = models.CharField(max_length=300)
+    journal_url = models.URLField(max_length=500, blank=True)
+    name = models.CharField(max_length=200)
+    email = models.EmailField(db_index=True)
+    role_title = models.CharField(max_length=200)
+    evidence_url = models.URLField(max_length=500, blank=True)
+    message = models.TextField(blank=True)
+    email_domain = models.CharField(max_length=253, blank=True)
+    domain_matches = models.BooleanField(default=False)  # the email is on the journal's own site domain
+    email_verified_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending_email', db_index=True)
+    decided_by = models.CharField(max_length=254, blank=True)
+    decided_at = models.DateTimeField(null=True, blank=True)
+    decision_note = models.TextField(blank=True)
+    remote_hash = models.CharField(max_length=64, blank=True, db_index=True)
+    last_sent_at = models.DateTimeField(null=True, blank=True)  # confirmation email; re-sends are capped
+    send_count = models.PositiveSmallIntegerField(default=0)
+    editor_user = models.ForeignKey(EditorUser, null=True, blank=True, on_delete=models.SET_NULL, related_name='venue_claims')
+
+    class Meta:
+        ordering = ['-created_at']

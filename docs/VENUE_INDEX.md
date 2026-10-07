@@ -223,3 +223,22 @@ an author's matches only if it makes that manuscript's shortlist.
 python manage.py embed_venues --check   # does the embedding model answer?
 python manage.py embed_venues           # pre-compute vectors for all matchable venues (optional)
 ```
+
+## Claim this venue (build plan step 9)
+
+Every journal page in the author index that is not editor-confirmed has "Claim this venue". The
+editor gives their name, role, work email and (optionally) a page that lists them, then confirms
+the email from a signed link (3 days). The claim then waits in Admin -> Venue Claims, which shows
+whether the email is on the journal's own domain and whether others claim the same journal.
+
+Approving it (platform admins only):
+- a listed journal becomes a venue (still "Listed only") linked to its index record;
+- the journal moves into its own organization ("<journal> editorial office") unless it already
+  has one to itself, so the claim never reaches the publisher's other journals;
+- the claimant gets an owner membership, with a new editor account if needed and an emailed link to
+  set a password (7 days, works once); two-step sign-in is set up at the first sign-in.
+
+The journal becomes "Editor-confirmed" only when its own editor (an owner, not a Flexee admin) saves
+or activates its rules for the first time; until then it keeps its earlier tier. Rejections are
+emailed to the claimant with the admin's note. Public claims are rate-limited
+(`VENUE_CLAIMS_PER_HOUR`, `VENUE_CLAIMS_PER_EMAIL_DAY`).

@@ -110,3 +110,21 @@ def test_empty_trusted_proxies_warns():
     assert '[WARN] TRUSTED_PROXIES is empty' in run_checker({**production, 'TRUSTED_PROXIES': ''})
     assert 'TRUSTED_PROXIES is empty' not in run_checker({**production, 'TRUSTED_PROXIES': '127.0.0.1'})
     assert 'TRUSTED_PROXIES is empty' not in run_checker({'DJANGO_ENV': 'development', 'TRUSTED_PROXIES': ''})
+
+
+# SMTP configured in the Admin UI satisfies the readiness check.
+
+SMTP_RULE = 'SMTP must be configured for real production email'
+
+
+@pytest.mark.django_db
+def test_smtp_saved_in_admin_passes_readiness():
+    from review.models import SMTPSettings
+    assert line_for(run_checker({'SMTP_HOST': ''}), SMTP_RULE).startswith('[FAIL]')
+    SMTPSettings.objects.create(host='smtp.example.org', port=587)
+    assert line_for(run_checker({'SMTP_HOST': ''}), SMTP_RULE).startswith('[PASS]')
+
+
+@pytest.mark.django_db
+def test_smtp_host_in_env_still_passes_readiness():
+    assert line_for(run_checker({'SMTP_HOST': 'smtp.example.org'}), SMTP_RULE).startswith('[PASS]')

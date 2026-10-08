@@ -470,6 +470,10 @@ def sweep_retention_task():
             )
             purged_manuscripts += 1
 
+    # Public rate-limit counters are only useful for the current window; drop old ones here.
+    from .public_rate import purge_old_windows
+    purge_old_windows()
+
     return (
         f'Purged {purged_submissions} expired venue submission(s) and '
         f'{purged_manuscripts} fully expired manuscript payload(s).'

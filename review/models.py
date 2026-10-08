@@ -1037,3 +1037,20 @@ class VenueClaim(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+
+
+class PublicRequestWindow(models.Model):
+    """Request counter for a public, unauthenticated endpoint: one row per network per time window.
+
+    Used where logging every request as an event would be too heavy (the journal index is read-only
+    and authors page through it freely). Rows older than a day are removed by the retention sweep.
+    """
+    scope = models.CharField(max_length=32)
+    remote_hash = models.CharField(max_length=64)
+    window_start = models.DateTimeField(db_index=True)
+    count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['scope', 'remote_hash', 'window_start'], name='uniq_public_request_window'),
+        ]

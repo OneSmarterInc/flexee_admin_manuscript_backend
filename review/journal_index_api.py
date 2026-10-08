@@ -7,16 +7,33 @@ excluded journals (and journals still waiting for an exclusion decision) never a
     GET /api/journals/?q=&tier=&open_access=1&page=   search
     GET /api/journals/v/<slug>/                        a live venue's page
     GET /api/journals/i/<uuid>/                        a listed journal's page (catalogue facts only)
+
+All three share one per-network rate limit (JOURNAL_INDEX_REQUESTS_PER_WINDOW, default 600 an hour).
 """
+from functools import wraps
+
 from django.db.models import Q
 from django.http import JsonResponse
 from django.views.decorators.http import require_GET
 
 from .models import IndexedVenue, Venue
+from .public_rate import hit, journal_index_limits, limited_response
 
 PAGE_SIZE = 20
 TIER_ORDER = {Venue.TIER_CLAIMED: 0, Venue.TIER_VERIFIED_INDEX: 1, Venue.TIER_LISTED: 2}
 LISTED_TRUST = {'tier': 'listed', 'label': 'Listed only', 'last_verified_at': None, 'source_urls': []}
+
+
+def rate_limited(view):
+    """Public and read-only, but still limited per network so the catalogue cannot be scraped freely."""
+    @wraps(view)
+    def wrapper(request, *args, **kwargs):
+        limit, window = journal_index_limits()
+        allowed, retry_after = hit(request, 'journal_index', limit, window)
+        if not allowed:
+            return limited_response(retry_after)
+        return view(request, *args, **kwargs)
+    return wrapper
 
 
 def _iso(value):
@@ -81,6 +98,7 @@ def _listed_item(record):
 
 
 @require_GET
+@rate_limited
 def journal_search(request):
     q = (request.GET.get('q') or '').strip()[:200]
     tier = request.GET.get('tier', '')
@@ -146,6 +164,7 @@ def _required_items(config):
 
 
 @require_GET
+@rate_limited
 def journal_venue_page(request, slug):
     from .author_api import _active_config, _venue_payload
     venue = Venue.objects.author_visible().select_related('organization').filter(slug=slug).first()
@@ -176,6 +195,7 @@ def journal_venue_page(request, slug):
 
 
 @require_GET
+@rate_limited
 def journal_listed_page(request, record_id):
     record = IndexedVenue.objects.filter(id=record_id, excluded=False, missing_since__isnull=True,
                                          screening_status__in=['clear', 'kept']).select_related('venue').first()

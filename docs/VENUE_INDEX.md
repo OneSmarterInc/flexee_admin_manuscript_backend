@@ -200,6 +200,13 @@ Match results link to each journal's page, and the match score's scope part now 
 embedding similarity (cosine 0.40 to 0.70 mapped to 0 to 100 percent; it never lowers the
 word-based score). `import_venue_index --force` closes a run left "processing" by a restart.
 
+The search and both journal pages share one rate limit per network: `JOURNAL_INDEX_REQUESTS_PER_WINDOW`
+(600) per `JOURNAL_INDEX_WINDOW_SECONDS` (3600), counted with the same keyed network hash as claims
+and sign-in, answering 429 with `Retry-After` when exceeded. Counters live in the database
+(`PublicRequestWindow`, one row per network per window), so all gunicorn workers share them; rows
+older than a day are removed by the hourly retention sweep. Behind nginx, `TRUSTED_PROXIES=127.0.0.1`
+is needed or every visitor counts as one network; `verify_production_readiness` warns when it is empty.
+
 ## Topical shortlist for matching (build plan step 5)
 
 Before any AI looks at a manuscript-venue pair, a local embedding model narrows the matchable

@@ -1688,7 +1688,8 @@ def refresh_matches_for_new_venues(manuscript):
     matched = set(manuscript.venue_matches.values_list('venue_id', flat=True))
     changed = Venue.objects.matchable().exclude(id__in=matched)
     if manuscript.shortlisted_at:
-        changed = changed.filter(updated_at__gt=manuscript.shortlisted_at)  # only venues added or changed since
+        # >= not >: on a coarse clock (Windows, ~15 ms) a venue saved right after matching gets the same time.
+        changed = changed.filter(updated_at__gte=manuscript.shortlisted_at)  # only venues added or changed since
     if not changed.exists():
         return 0
     venues = list(Venue.objects.matchable().select_related('organization'))

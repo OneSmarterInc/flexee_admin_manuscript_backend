@@ -1,13 +1,27 @@
 import os
 import importlib.util
+import re
 from pathlib import Path
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
 from review.ai_usage import budget_limits, pricing_for
+from review.auth import allowed_frontend_origins
 from review.services.ai_provider import anthropic_model
 from review.storage_quota import storage_limits
+
+
+EXACT_ORIGIN = re.compile(r'https://[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:\d{1,5})?')
+LOCAL_HOSTS = ('localhost', '127.', '0.0.0.0', '[::1]')
+
+
+def _exact_public_origin(origin):
+    value = origin.strip().lower()
+    if not EXACT_ORIGIN.fullmatch(value):
+        return False
+    host = value[len('https://'):]
+    return not host.startswith(LOCAL_HOSTS)
 
 
 class Command(BaseCommand):
@@ -47,6 +61,30 @@ class Command(BaseCommand):
 
         origins = [x.strip() for x in os.getenv('FRONTEND_ORIGINS', '').split(',') if x.strip()]
         require(bool(origins) and all(x.startswith('https://') for x in origins), 'FRONTEND_ORIGINS must contain only explicit https:// origins.')
+
+        # SameSite=None sends the session cookies on cross-site requests, so the Origin check is then the
+        # only thing standing between another site and an unsafe request. That is fine only while every
+        # allowed origin is exact.
+        samesite = os.getenv('COOKIE_SAMESITE', 'Strict').strip()
+        require(
+            samesite.capitalize() in {'Strict', 'Lax', 'None'},
+            'COOKIE_SAMESITE must be Strict, Lax or None (anything else silently falls back to Strict).',
+        )
+        if samesite.capitalize() == 'None':
+            loose = sorted(origin for origin in allowed_frontend_origins() if not _exact_public_origin(origin))
+            require(
+                not loose,
+                'COOKIE_SAMESITE=None requires every allowed origin (FRONTEND_ORIGINS and ADMIN_ALLOWED_ORIGINS) '
+                'to be an exact public https:// origin with no wildcard, path or localhost'
+                + (f'; loose: {", ".join(loose)}.' if loose else '.'),
+            )
+
+        production = os.getenv('DJANGO_ENV', '').strip().lower() == 'production'
+        if production and not [p for p in os.getenv('TRUSTED_PROXIES', '').split(',') if p.strip()]:
+            warn(
+                'TRUSTED_PROXIES is empty. Behind nginx every visitor then shares one address, so the public '
+                'rate limits (journal search, claims, sign-in) count all traffic together. Set it to 127.0.0.1.'
+            )
 
         private_media = os.getenv('PRIVATE_MEDIA_ROOT', '').strip()
         require(bool(private_media), 'PRIVATE_MEDIA_ROOT must be configured.')

@@ -24,6 +24,15 @@ def _exact_public_origin(origin):
     return not host.startswith(LOCAL_HOSTS)
 
 
+def _smtp_saved_in_admin():
+    """SMTP saved in the Admin UI is what the email service uses first."""
+    try:
+        from review.models import SMTPSettings
+        return SMTPSettings.objects.filter(host__gt='').exists()
+    except Exception:  # database not reachable: the env check alone decides
+        return False
+
+
 class Command(BaseCommand):
     help = 'Validate production-only settings required for an external scholarly-network deployment.'
 
@@ -96,7 +105,10 @@ class Command(BaseCommand):
                 outside_source = True
             require(outside_source, 'PRIVATE_MEDIA_ROOT must be outside the application source tree.')
 
-        require(configured('SMTP_HOST'), 'SMTP_HOST must be configured for real production email.')
+        require(
+            configured('SMTP_HOST') or _smtp_saved_in_admin(),
+            'SMTP must be configured for real production email (Admin -> SMTP settings, or SMTP_HOST in .env).',
+        )
         require(bool(os.getenv('NOTIFY_FROM_EMAIL', '').strip()), 'NOTIFY_FROM_EMAIL must be configured.')
         require(configured('SENTRY_DSN'), 'SENTRY_DSN must be configured for production error reporting.')
         require(bool(os.getenv('BACKUP_ROOT', '').strip()), 'BACKUP_ROOT must be configured for durable backups.')

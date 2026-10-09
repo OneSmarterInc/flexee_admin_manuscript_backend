@@ -1,5 +1,5 @@
 from django.urls import path
-from . import views, discovery_api, index_api, claims_api, journal_index_api
+from . import views, discovery_api, index_api, claims_api, journal_index_api, plan_api
 from . import author_api
 from . import editor_api
 from .api_summary import admin_submission_api_summary
@@ -34,6 +34,12 @@ urlpatterns = [
     path('author/manuscripts/<uuid:manuscript_id>/matches/run/', author_api.author_generate_matches),
     path('author/manuscripts/<uuid:manuscript_id>/matches/seen/', author_api.author_matches_seen),
     path('author/manuscripts/<uuid:manuscript_id>/file/', author_api.author_manuscript_file),
+    path('author/manuscripts/<uuid:manuscript_id>/versions/', author_api.author_manuscript_versions),
+    path('author/manuscripts/<uuid:manuscript_id>/versions/<int:number>/file/', author_api.author_manuscript_version_file),
+    path('author/manuscripts/<uuid:manuscript_id>/plan/', plan_api.manuscript_plan),
+    path('author/plans/<uuid:plan_id>/positions/<uuid:position_id>/<str:action>/', plan_api.position_action),
+    path('author/plans/<uuid:plan_id>/stop/', plan_api.stop_plan),
+    path('admin/plans/', plan_api.admin_plans),
     path('author/manuscripts/<uuid:manuscript_id>/matches/semantic/', author_api.author_run_semantic_matches),
     path('author/manuscripts/<uuid:manuscript_id>/submissions/', author_api.author_create_submission),
     path('author/venues/', author_api.public_venues),

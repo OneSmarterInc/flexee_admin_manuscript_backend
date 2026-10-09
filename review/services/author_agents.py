@@ -468,7 +468,7 @@ def _persist_readiness_evidence(manuscript, assessment, findings, model):
 
 
 def run_semantic_readiness(manuscript):
-    mechanical = manuscript.readiness_assessments.filter(
+    mechanical = manuscript.current_readiness().filter(
         status='completed',
         engine_version__startswith='mechanical-',
     ).first()
@@ -851,7 +851,7 @@ def run_semantic_matching(manuscript, *, venue_ids=None):
         raise AgentInputError('Run semantic readiness before semantic venue matching.')
 
     # Excluded venues are hidden from authors, so they are never reasoned over either.
-    queryset = (manuscript.venue_matches.filter(venue__excluded=False)
+    queryset = (manuscript.current_matches().filter(venue__excluded=False)
                 .select_related('venue', 'venue__organization', 'venue_config'))
     if venue_ids:
         queryset = queryset.filter(venue_id__in=venue_ids)
@@ -939,7 +939,7 @@ def _citation_checks(text, manuscript_sha):
 def _assessment_prompt(submission, config, citation_checks):
     manuscript = submission.manuscript
     profile = _profile_context(manuscript)
-    match = manuscript.venue_matches.filter(venue=submission.venue).first()
+    match = manuscript.venue_matches.filter(venue=submission.venue, version_id=submission.version_id).first()
     match_context = {
         'eligibility': match.eligibility if match else None,
         'fit_summary': match.fit_summary if match else '',
@@ -1115,7 +1115,7 @@ def _ensure_required_brief_sections(submission, config, brief, citations):
     if not isinstance(profile, dict):
         profile = {}
 
-    match = manuscript.venue_matches.filter(venue=submission.venue).first()
+    match = manuscript.venue_matches.filter(venue=submission.venue, version_id=submission.version_id).first()
 
     if not brief.get('outlet_fit', {}).get('summary'):
         summary = ''
@@ -1347,7 +1347,7 @@ def run_venue_assessment(submission):
     if not isinstance(profile, dict) or not profile:
         raise AgentInputError('Run semantic readiness before the venue-specific assessment.')
 
-    text = load_manuscript_text(submission.manuscript)
+    text = load_manuscript_text(submission.file_source)
 
     policies = config.policies or {}
     if policies.get('blind_review', False) and not (submission.packet or {}).get('anonymization_override', False):
@@ -1376,6 +1376,7 @@ def run_venue_assessment(submission):
     # repeating external Crossref calls after the author chooses a venue. Older
     # manuscripts without stored citation data keep the previous fallback.
     semantic_assessment = submission.manuscript.readiness_assessments.filter(
+        version_id=submission.version_id,
         status='completed',
         engine_version__contains='semantic-readiness',
     ).first()
@@ -1385,7 +1386,7 @@ def run_venue_assessment(submission):
     )
     if not isinstance(citations, dict):
         try:
-            citations = _citation_checks(text, submission.manuscript.manuscript_sha256)
+            citations = _citation_checks(text, submission.file_source.manuscript_sha256)
         except Exception:
             citations = {
                 'total_references': 0,

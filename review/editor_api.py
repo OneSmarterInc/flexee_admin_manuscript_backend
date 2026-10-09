@@ -40,23 +40,34 @@ def _feedback_payload(item):
     }
 
 
+def _submitted_text(item):
+    """What the venue received: the submission's own version once the author has moved on to a newer
+    one (instruction 2.4), otherwise the live manuscript."""
+    manuscript = item.manuscript
+    if item.version_id and item.version_id != manuscript.current_version_id:
+        return item.version
+    return manuscript
+
+
 def _editor_submission_payload(item, *, detail=False):
     manuscript = item.manuscript
+    text = _submitted_text(item)
     manuscript_purged = bool(item.retention_purged_at)
     manuscript_payload = {
         'id': str(manuscript.id),
-        'title': manuscript.title,
+        'title': text.title,
         'author_name': manuscript.author_name,
         'author_email': manuscript.author_email,
         'coauthors': manuscript.coauthors,
-        'manuscript_type': manuscript.manuscript_type,
-        'manuscript_filename': '' if manuscript_purged else manuscript.manuscript_filename,
-        'manuscript_bytes': 0 if manuscript_purged else manuscript.manuscript_bytes,
-        'keywords': [] if manuscript_purged else manuscript.keywords,
-        'abstract': '' if manuscript_purged else manuscript.abstract,
+        'manuscript_type': text.manuscript_type,
+        'manuscript_version': item.version.number if item.version_id else None,
+        'manuscript_filename': '' if manuscript_purged else text.manuscript_filename,
+        'manuscript_bytes': 0 if manuscript_purged else text.manuscript_bytes,
+        'keywords': [] if manuscript_purged else text.keywords,
+        'abstract': '' if manuscript_purged else text.abstract,
         'disclosure': '' if manuscript_purged else manuscript.disclosure,
         'notes': '' if manuscript_purged else manuscript.notes,
-        'parsed_profile': {} if manuscript_purged else manuscript.parsed_profile,
+        'parsed_profile': {} if manuscript_purged else text.parsed_profile,
         'content_retained': not manuscript_purged,
     }
     payload = {
@@ -291,6 +302,8 @@ def admin_start_venue_review(request, submission_id):
     if item.status != 'under_review':
         item.status = 'under_review'
         item.save(update_fields=['status', 'updated_at'])
+        from .submission_plan import sync_from_submission
+        sync_from_submission(item)
     record_audit_event(
         request,
         'venue_submission.review_started',
@@ -342,6 +355,8 @@ def admin_venue_submission_decision(request, submission_id):
         'human_decision': True,
     }
     item.save(update_fields=['status', 'decision', 'updated_at'])
+    from .submission_plan import sync_from_submission
+    sync_from_submission(item)  # declined stops the author's plan; it never advances by itself
     record_audit_event(
         request,
         'venue_submission.decision_recorded',
@@ -452,10 +467,11 @@ def _venue_submission_manuscript_response(request, submission_id, audit_action):
         return JsonResponse({'detail': 'Manuscript content has expired under the venue retention policy'}, status=410)
 
     manuscript = item.manuscript
-    if manuscript.content_purged_at or not manuscript.manuscript_file:
+    source = item.file_source  # the version this venue received
+    if manuscript.content_purged_at or getattr(source, 'content_purged_at', None) or not source.manuscript_file:
         return JsonResponse({'detail': 'Manuscript content has been purged'}, status=410)
     try:
-        manuscript.manuscript_file.open('rb')
+        source.manuscript_file.open('rb')
         record_audit_event(
             request,
             audit_action,
@@ -465,13 +481,14 @@ def _venue_submission_manuscript_response(request, submission_id, audit_action):
             venue_id=item.venue_id,
             venue_submission_id=item.id,
             manuscript_id=manuscript.id,
-            detail={'filename': manuscript.manuscript_filename},
+            detail={'filename': source.manuscript_filename,
+                    'version': item.version.number if item.version_id else None},
         )
         # Always served as an opaque, sandboxed attachment. The admin portal
         # renders the bytes itself, so the file never opens as a page here.
         return secure_download_response(
-            manuscript.manuscript_file,
-            filename=manuscript.manuscript_filename,
+            source.manuscript_file,
+            filename=source.manuscript_filename,
         )
     except (FileNotFoundError, OSError):
         return JsonResponse({'detail': 'Manuscript file is unavailable'}, status=404)

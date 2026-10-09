@@ -432,12 +432,28 @@ def sweep_retention_task():
             purged_submissions += 1
 
             manuscript = Manuscript.objects.select_for_update().get(id=submission.manuscript_id)
+            # Instruction 2.4: an earlier version's file goes once none of its submissions is retained.
+            if (submission.version_id and submission.version_id != manuscript.current_version_id
+                    and not VenueSubmission.objects.filter(version_id=submission.version_id,
+                                                           retention_purged_at__isnull=True).exists()):
+                from .manuscript_versions import purge_version_file
+                purge_version_file(submission.version, now)
             has_retained_copy = manuscript.venue_submissions.filter(
                 retention_purged_at__isnull=True
             ).exists()
             if has_retained_copy or manuscript.content_purged_at:
                 continue
+            if (manuscript.current_version_id
+                    and not VenueSubmission.objects.filter(version_id=manuscript.current_version_id).exists()):
+                continue  # the author's newer version has not been sent anywhere yet: it is theirs to keep
 
+            from .manuscript_versions import purge_version_file
+            for version in manuscript.versions.filter(content_purged_at__isnull=True):
+                if version.file and version.file.name != (manuscript.manuscript_file.name if manuscript.manuscript_file else ''):
+                    purge_version_file(version, now)
+                else:  # shares the working copy's file, which is deleted just below
+                    type(version).objects.filter(id=version.id).update(file='', bytes=0, abstract='',
+                                                                       parsed_profile={}, content_purged_at=now)
             if manuscript.manuscript_file:
                 manuscript.manuscript_file.delete(save=False)
             manuscript.manuscript_file = ''

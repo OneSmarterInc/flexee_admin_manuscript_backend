@@ -30,6 +30,7 @@ from .models import (
     EditorFeedback,
     EvidenceFinding,
     Manuscript,
+    ManuscriptVersion,
     Membership,
     Organization,
     ReadinessAssessment,
@@ -58,6 +59,8 @@ from .storage_security import (
     validate_manuscript_zip,
 )
 from .storage_quota import StorageQuotaExceeded, storage_quota_guard
+from . import manuscript_versions as versions
+from .gap_classes import classify_violation, item as gap_item
 
 
 ALLOWED_MANUSCRIPT_TYPES = {value for value, _ in Manuscript.TYPE_CHOICES}
@@ -480,12 +483,21 @@ def _submission_requirements_payload(item):
     }
 
 
+def _is_uuid(value):
+    import uuid as _uuid
+    try:
+        _uuid.UUID(str(value))
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def _clean_keywords(value):
     return [str(item).strip() for item in _json_list(value) if str(item).strip()][:50]
 
 
 def _manuscript_payload(item):
-    latest_readiness = item.readiness_assessments.first()
+    latest_readiness = item.current_readiness().first()
     return {
         'id': str(item.id),
         'created_at': item.created_at.isoformat(),
@@ -505,9 +517,10 @@ def _manuscript_payload(item):
         'parsed_profile': item.parsed_profile,
         'content_purged_at': item.content_purged_at.isoformat() if item.content_purged_at else None,
         'latest_readiness': _readiness_payload(latest_readiness) if latest_readiness else None,
-        'editable': not item.content_purged_at and not item.venue_submissions.exclude(
-            status__in=EDITABLE_SUBMISSION_STATUSES
-        ).exists(),
+        'editable': not item.content_purged_at and not versions.version_locked(item),
+        'current_version': item.current_version.number if item.current_version_id else None,
+        'version_count': item.versions.count(),
+        'can_add_version': not item.content_purged_at and item.versions.count() < versions.max_versions(),
     }
 
 
@@ -645,6 +658,7 @@ def _submission_payload(item):
         'manuscript_id': str(item.manuscript_id),
         'venue': _venue_payload(item.venue, include_config=False),
         'venue_config_version': item.venue_config.version if item.venue_config_id else None,
+        'manuscript_version': item.version.number if item.version_id else None,
         'created_at': item.created_at.isoformat(),
         'updated_at': item.updated_at.isoformat(),
         'submitted_at': item.submitted_at.isoformat() if item.submitted_at else None,
@@ -768,11 +782,10 @@ def _manuscript_edit_block(manuscript):
              'code': 'manuscript_purged'},
             status=409,
         )
-    locked = manuscript.venue_submissions.exclude(status__in=EDITABLE_SUBMISSION_STATUSES)
-    if locked.exists():
+    if versions.version_locked(manuscript):
         return JsonResponse(
-            {'detail': 'This manuscript has been submitted to a venue and can no longer be edited. '
-                       'Start a new manuscript to prepare a revised version.',
+            {'detail': 'This version has been submitted to a venue and can no longer be edited. '
+                       'Upload a revised version instead; the submitted version stays as it was.',
              'code': 'manuscript_locked'},
             status=409,
         )
@@ -885,8 +898,9 @@ def author_update_manuscript(request, manuscript_id):
                 manuscript.manuscript_bytes = len(content)
                 manuscript.manuscript_sha256 = hashlib.sha256(content).hexdigest()
             manuscript.save()
+            versions.sync_current_version(manuscript)
 
-            removed_matches, _ = VenueMatch.objects.filter(manuscript=manuscript).delete()
+            removed_matches, _ = manuscript.current_matches().delete()
             reset_submissions = 0
             for submission in manuscript.venue_submissions.filter(status__in=EDITABLE_SUBMISSION_STATUSES):
                 EvidenceFinding.objects.filter(venue_submission=submission).delete()
@@ -898,7 +912,7 @@ def author_update_manuscript(request, manuscript_id):
     except StorageQuotaExceeded as exc:
         return JsonResponse(exc.payload(), status=413)
 
-    if old_file_name and old_file_name != manuscript.manuscript_file.name:
+    if old_file_name and old_file_name != manuscript.manuscript_file.name and not versions.file_in_use(old_file_name):
         storage = manuscript.manuscript_file.storage
         transaction.on_commit(lambda: storage.delete(old_file_name) if storage.exists(old_file_name) else None)
 
@@ -1391,7 +1405,7 @@ def author_manuscripts_list(request):
             refresh_matches_for_new_venues(m)
         except Exception:
             pass  # matching problems must never break the dashboard
-        matches = m.venue_matches.filter(venue__excluded=False)
+        matches = m.current_matches().filter(venue__excluded=False)
         payload['match_count'] = matches.count()
         payload['new_match_count'] = (matches.filter(created_at__gt=m.matches_seen_at).count()
                                       if m.matches_seen_at else 0)
@@ -1535,13 +1549,13 @@ def author_readiness(request, manuscript_id):
     access_error = _author_access_error(request, manuscript)
     if access_error:
         return access_error
-    item = manuscript.readiness_assessments.first()
+    item = manuscript.current_readiness().first()
     if not item:
         return JsonResponse({'detail': 'No readiness assessment exists for this manuscript'}, status=404)
-    mechanical = manuscript.readiness_assessments.filter(
+    mechanical = manuscript.current_readiness().filter(
         engine_version__startswith='mechanical-'
     ).first()
-    semantic = manuscript.readiness_assessments.filter(
+    semantic = manuscript.current_readiness().filter(
         engine_version__startswith='author-agents-v1:semantic-readiness'
     ).first()
     if semantic and mechanical and semantic.created_at < mechanical.created_at:
@@ -1582,11 +1596,13 @@ def _generate_deterministic_matches(manuscript, latest_readiness, venues):
         config = venue_configs.get(venue.id)
         reasons = []
         gaps = []
+        gap_items = []
         evidence = []
         eligibility = 'needs_changes'
 
         if not config:
             gaps.append('This venue does not yet have an active venue-agent configuration.')
+            gap_items.append(gap_item('venue_not_configured', gaps[-1], 'out'))
         else:
             accepted = {_normalise_label(item) for item in config.article_types}
             manuscript_type = _normalise_label(manuscript.manuscript_type)
@@ -1604,6 +1620,8 @@ def _generate_deterministic_matches(manuscript, latest_readiness, venues):
                     eligibility = 'eligible'
                 else:
                     gaps.append('The manuscript type is not listed among this venue’s accepted article types.')
+                    gap_items.append(gap_item('type_not_accepted', gaps[-1], 'out',
+                                              source=f'venue config v{config.version} · article_types'))
                     evidence.append({
                         'source_type': 'venue_policy',
                         'source_locator': f'venue config v{config.version} · article_types',
@@ -1612,11 +1630,13 @@ def _generate_deterministic_matches(manuscript, latest_readiness, venues):
                     eligibility = 'needs_changes'
             else:
                 gaps.append('Accepted article types are not configured for this venue.')
+                gap_items.append(gap_item('venue_rules_incomplete', gaps[-1], 'out'))
 
             if config.aims_scope:
                 reasons.append('Aims and scope are configured and ready for semantic fit analysis.')
             else:
                 gaps.append('Aims and scope are not yet configured.')
+                gap_items.append(gap_item('venue_rules_incomplete', gaps[-1], 'out'))
 
             desk_violations = _structured_desk_rule_violations(
                 manuscript,
@@ -1627,7 +1647,10 @@ def _generate_deterministic_matches(manuscript, latest_readiness, venues):
             if desk_violations:
                 eligibility = 'ineligible'
                 for violation in desk_violations:
-                    gaps.append(violation['message'])
+                    structured = classify_violation(
+                        violation, source=f'venue config v{config.version} · structured_desk_rejection_rules')
+                    gaps.append(violation['message'] or structured['message'])
+                    gap_items.append({**structured, 'message': gaps[-1]})
                     evidence.append({
                         'source_type': 'venue_policy',
                         'source_locator': f'venue config v{config.version} · structured_desk_rejection_rules',
@@ -1644,12 +1667,14 @@ def _generate_deterministic_matches(manuscript, latest_readiness, venues):
         match, _ = VenueMatch.objects.update_or_create(
             manuscript=manuscript,
             venue=venue,
+            version_id=manuscript.current_version_id,
             defaults={
                 'venue_config': config,
                 'eligibility': eligibility,
                 'fit_summary': fit_summary,
                 'reasons': reasons,
                 'gaps': gaps,
+                'gap_items': gap_items,
                 'evidence': evidence,
             },
         )
@@ -1680,12 +1705,12 @@ def refresh_matches_for_new_venues(manuscript):
     Returns the number of new matches created.
     """
     from .services.venue_shortlist import build_shortlist
-    if not manuscript.venue_matches.exists():
+    if not manuscript.current_matches().exists():
         return 0
-    latest_readiness = manuscript.readiness_assessments.filter(status='completed').first()
+    latest_readiness = manuscript.current_readiness().filter(status='completed').first()
     if not latest_readiness or not latest_readiness.summary.get('ready_for_matching', False):
         return 0
-    matched = set(manuscript.venue_matches.values_list('venue_id', flat=True))
+    matched = set(manuscript.current_matches().values_list('venue_id', flat=True))
     changed = Venue.objects.matchable().exclude(id__in=matched)
     if manuscript.shortlisted_at:
         # >= not >: on a coarse clock (Windows, ~15 ms) a venue saved right after matching gets the same time.
@@ -1714,7 +1739,7 @@ def author_generate_matches(request, manuscript_id):
     if access_error:
         return access_error
 
-    latest_readiness = manuscript.readiness_assessments.filter(status='completed').first()
+    latest_readiness = manuscript.current_readiness().filter(status='completed').first()
     if not latest_readiness or latest_readiness.status != 'completed':
         return JsonResponse({'detail': 'Complete a readiness assessment before generating venue matches'}, status=409)
     if not latest_readiness.summary.get('ready_for_matching', False):
@@ -1729,7 +1754,7 @@ def author_generate_matches(request, manuscript_id):
     Manuscript.objects.filter(id=manuscript.id).update(shortlisted_at=timezone.now())
     if info['considered'] > info['kept']:
         # Re-running matching replaces matches that are no longer on the shortlist.
-        manuscript.venue_matches.exclude(venue_id__in=[v.id for v in kept]).delete()
+        manuscript.current_matches().exclude(venue_id__in=[v.id for v in kept]).delete()
     matches.sort(key=lambda m: (m.shortlist_rank or 10**6))
     generated = [_match_payload(match) for match in matches]
 
@@ -1781,7 +1806,7 @@ def author_matches(request, manuscript_id):
         refresh_matches_for_new_venues(manuscript)
     except Exception:
         pass  # keep showing the existing matches
-    items = (manuscript.venue_matches.filter(venue__excluded=False)
+    items = (manuscript.current_matches().filter(venue__excluded=False)
              .select_related('venue', 'venue__organization', 'venue_config'))
     seen_at = manuscript.matches_seen_at
     payloads = []
@@ -1830,6 +1855,133 @@ def author_manuscript_file(request, manuscript_id):
         return JsonResponse({'detail': 'Manuscript file is unavailable'}, status=404)
 
 
+def _author_manuscript_or_error(request, manuscript_id):
+    try:
+        manuscript = Manuscript.objects.select_related('current_version').get(id=manuscript_id)
+    except Manuscript.DoesNotExist:
+        return None, JsonResponse({'detail': 'Manuscript not found'}, status=404)
+    access_error = _author_access_error(request, manuscript)
+    if access_error:
+        return None, access_error
+    return manuscript, None
+
+
+@require_http_methods(['GET', 'POST'])
+def author_manuscript_versions(request, manuscript_id):
+    """GET: every version of the manuscript. POST: upload a revised version (instruction 2.4).
+
+    A new version never changes an earlier one: submitted versions, their briefs, readiness checks
+    and matches stay attached to the text they were made for. Readiness and matching then run again
+    for the new version.
+    """
+    manuscript, error = _author_manuscript_or_error(request, manuscript_id)
+    if error:
+        return error
+    if request.method == 'GET':
+        items = manuscript.versions.select_related('revised_after').order_by('-number')
+        return JsonResponse({'versions': [versions.version_payload(v, current_id=manuscript.current_version_id)
+                                          for v in items],
+                             'current_version': manuscript.current_version.number if manuscript.current_version_id else None,
+                             'max_versions': versions.max_versions()})
+
+    if manuscript.content_purged_at:
+        return JsonResponse({'detail': 'This manuscript content was removed under the retention policy.',
+                             'code': 'manuscript_purged'}, status=409)
+    if manuscript.versions.count() >= versions.max_versions():
+        return JsonResponse({'detail': f'A manuscript can have at most {versions.max_versions()} versions.',
+                             'code': 'too_many_versions'}, status=409)
+
+    max_bytes = int(os.getenv('MAX_MANUSCRIPT_BYTES', str(20 * 1024 * 1024)))
+    upload = request.FILES.get('manuscript')
+    change_note = request.POST.get('change_note', '').strip()
+    errors = []
+    if not upload:
+        errors.append('manuscript is required')
+    elif upload.size <= 0:
+        errors.append('manuscript is empty')
+    elif upload.size > max_bytes:
+        errors.append(f'manuscript exceeds the {max_bytes // 1024 // 1024} MB upload limit')
+    else:
+        try:
+            validate_manuscript_filename(upload.name)
+        except UploadSecurityError as exc:
+            errors.append(str(exc))
+    if len(change_note) < 3:
+        errors.append('change_note is required: say briefly what changed in this version')
+    manuscript_type = request.POST.get('manuscript_type', '').strip()
+    if manuscript_type and manuscript_type not in ALLOWED_MANUSCRIPT_TYPES:
+        errors.append('unsupported manuscript_type')
+    revised_after = None
+    if request.POST.get('revised_after'):
+        revised_after = manuscript.venue_submissions.filter(id=request.POST['revised_after']).first() \
+            if _is_uuid(request.POST['revised_after']) else None
+        if revised_after is None:
+            errors.append('revised_after must be one of this manuscript\'s submissions')
+    if errors:
+        return JsonResponse({'detail': errors[0], 'errors': errors}, status=400)
+
+    content = upload.read()
+    upload.seek(0)
+    upload.name = sanitize_original_filename(upload.name, default='manuscript')
+    if upload.name.lower().endswith('.zip'):
+        try:
+            validate_manuscript_zip(content)
+        except UploadSecurityError as exc:
+            return JsonResponse({'detail': str(exc), 'errors': [str(exc)]}, status=400)
+    digest = hashlib.sha256(content).hexdigest()
+    if digest == manuscript.manuscript_sha256:
+        return JsonResponse({'detail': 'This file is identical to the current version.',
+                             'code': 'unchanged_file'}, status=409)
+
+    fields = {'manuscript_type': manuscript_type or None}
+    if 'title' in request.POST and request.POST['title'].strip():
+        fields['title'] = request.POST['title'].strip()[:500]
+    if 'abstract' in request.POST:
+        fields['abstract'] = request.POST['abstract'].strip()
+    if 'keywords' in request.POST:
+        fields['keywords'] = _clean_keywords(request.POST['keywords'])
+
+    try:
+        with storage_quota_guard(author=manuscript.author_account, incoming_bytes=len(content)):
+            manuscript = Manuscript.objects.select_for_update().get(id=manuscript.id)
+            submission_ids = [str(pk) for pk in manuscript.venue_submissions.values_list('id', flat=True)]
+            if ReviewJob.objects.filter(status__in=['queued', 'processing'],
+                                        reference_id__in=[str(manuscript.id), *submission_ids]).exists():
+                return JsonResponse({'detail': 'An analysis for this manuscript is still running. '
+                                               'Try again when it finishes.', 'code': 'manuscript_busy'}, status=409)
+            version, reset = versions.create_new_version(
+                manuscript, upload=upload, content_bytes=len(content), sha256=digest,
+                change_note=change_note, revised_after=revised_after, fields=fields)
+    except StorageQuotaExceeded as exc:
+        return JsonResponse(exc.payload(), status=413)
+
+    manuscript.refresh_from_db()
+    return JsonResponse({
+        'version': versions.version_payload(version, current_id=manuscript.current_version_id),
+        'manuscript': _manuscript_payload(manuscript),
+        'reset_submissions': reset,
+        'next_step': 'Run the readiness check and venue matching again for this version.',
+    }, status=201)
+
+
+@require_GET
+def author_manuscript_version_file(request, manuscript_id, number):
+    """An earlier (or the current) version's file, served like the main manuscript file."""
+    manuscript, error = _author_manuscript_or_error(request, manuscript_id)
+    if error:
+        return error
+    version = manuscript.versions.filter(number=number).first()
+    if version is None:
+        return JsonResponse({'detail': 'Version not found'}, status=404)
+    if version.content_purged_at or not version.file:
+        return JsonResponse({'detail': 'This version\'s content is no longer available'}, status=410)
+    try:
+        version.file.open('rb')
+        return secure_download_response(version.file, filename=version.filename)
+    except (FileNotFoundError, OSError):
+        return JsonResponse({'detail': 'Version file is unavailable'}, status=404)
+
+
 @require_POST
 def author_create_submission(request, manuscript_id):
     try:
@@ -1849,7 +2001,7 @@ def author_create_submission(request, manuscript_id):
     except (Venue.DoesNotExist, ValueError):
         return JsonResponse({'detail': 'Active venue not found'}, status=404)
 
-    match = manuscript.venue_matches.filter(venue=venue).first()
+    match = manuscript.current_matches().filter(venue=venue).first()
     if match and match.eligibility == 'ineligible':
         return JsonResponse(
             {
@@ -1860,7 +2012,7 @@ def author_create_submission(request, manuscript_id):
         )
 
     config = _active_config(venue)
-    latest_readiness = manuscript.readiness_assessments.filter(status='completed').first()
+    latest_readiness = manuscript.current_readiness().filter(status='completed').first()
     if config:
         violations = _structured_desk_rule_violations(
             manuscript,
@@ -2142,6 +2294,8 @@ def author_submit_packet(request, submission_id):
         else None
     )
     item.save(update_fields=['status', 'submitted_at', 'retention_expires_at', 'updated_at'])
+    from .submission_plan import sync_from_submission
+    sync_from_submission(item)  # a planned venue moves to 'submitted' (never raises)
 
     # ── Confirmation email to author ────────────────────────────────────────────
     manuscript = item.manuscript
@@ -2201,7 +2355,7 @@ def author_transfer_submission(request, submission_id):
         )
 
     target_config = _active_config(target_venue)
-    latest_readiness = source.manuscript.readiness_assessments.filter(status='completed').first()
+    latest_readiness = source.manuscript.current_readiness().filter(status='completed').first()
     if target_config:
         violations = _structured_desk_rule_violations(
             source.manuscript,

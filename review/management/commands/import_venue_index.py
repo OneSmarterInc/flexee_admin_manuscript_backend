@@ -1,10 +1,11 @@
 import time
+from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from review.models import VenueIndexRun
-from review.services.venue_index import IndexConfig, coverage_counts, run_index, start_index_run
+from review.services.venue_index import IndexConfig, coverage_counts, read_issn_worklist, run_index, start_index_run
 
 
 class Command(BaseCommand):
@@ -13,6 +14,12 @@ class Command(BaseCommand):
             'Crossref/DOAJ checks already done in the last 30 days are skipped.')
 
     def add_arguments(self, parser):
+        parser.add_argument('--issn-file', default='',
+                            help='Import exactly the journals in this file instead of discovering them by subject: '
+                                 'one ISSN per line (.txt) or a .csv/.tsv with an ISSN column. Only ISSNs are read; '
+                                 'every other column (ratings included) is ignored. Then Crossref/DOAJ checks and '
+                                 'screening run as usual. Journals added this way are never removed by the monthly '
+                                 'subject refresh.')
         parser.add_argument('--enrich-only', action='store_true',
                             help='Skip the OpenAlex refresh; only finish Crossref/DOAJ checks that are due.')
         parser.add_argument('--screen-only', action='store_true',
@@ -36,6 +43,24 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         mode = ('calls' if options['calls_only'] else 'rules' if options['rules_only'] else 'screen' if options['screen_only']
                 else 'enrich' if options['enrich_only'] else 'full')
+        worklist, worklist_stats, issn_path = None, None, None
+        if options['issn_file']:
+            if mode != 'full':
+                raise CommandError('--issn-file cannot be combined with --enrich-only, --screen-only, --rules-only '
+                                   'or --calls-only.')
+            issn_path = Path(options['issn_file']).expanduser()
+            if not issn_path.is_file():
+                raise CommandError(f'ISSN file not found: {issn_path}')
+            worklist, worklist_stats = read_issn_worklist(issn_path)
+            self.stdout.write(
+                f"Worklist {issn_path.name}: {worklist_stats['rows']} rows -> {worklist_stats['entries']} journals "
+                f"({worklist_stats['duplicates']} duplicate rows merged, {worklist_stats['invalid']} with an invalid ISSN, "
+                f"{worklist_stats['no_issn']} without an ISSN).")
+            if worklist_stats['truncated']:
+                self.stdout.write(self.style.WARNING('The file has more than 20,000 journals; only the first 20,000 are used.'))
+            if not worklist:
+                raise CommandError('No valid ISSNs found in the file. Use one ISSN per line, or a CSV with an ISSN column.')
+            mode = 'worklist'
         if options['force']:
             closed = VenueIndexRun.objects.filter(status__in=['queued', 'processing']).update(
                 status='failed', completed_at=timezone.now(), summary='Closed with --force (left over from a restart).')
@@ -45,10 +70,17 @@ class Command(BaseCommand):
         if not created:
             raise CommandError(f'An index run is already {run.status} (started {run.created_at:%Y-%m-%d %H:%M}). '
                                'Wait for it to finish, or it is closed automatically after an hour.')
+        if worklist is not None:
+            run.worklist = {'file': issn_path.name, **worklist_stats}
+            run.save(update_fields=['worklist'])
         config = IndexConfig()
         started = time.monotonic()
-        self.stdout.write(f'Importing field profile "{config.profile}" ({len(config.subfields)} subfields). '
-                          'Press Ctrl+C to stop; everything saved so far is kept.')
+        if worklist is not None:
+            self.stdout.write(f'Importing {len(worklist):,} journals from the worklist into field profile '
+                              f'"{config.profile}". Press Ctrl+C to stop; everything saved so far is kept.')
+        else:
+            self.stdout.write(f'Importing field profile "{config.profile}" ({len(config.subfields)} subfields). '
+                              'Press Ctrl+C to stop; everything saved so far is kept.')
         if not config.polite:
             self.stdout.write(self.style.WARNING(
                 'Tip: set VENUE_INDEX_CONTACT_EMAIL in .env. Crossref then allows 3 checks in parallel (about 3x faster).'))
@@ -61,7 +93,8 @@ class Command(BaseCommand):
         minutes = options['minutes']
         try:
             run = run_index(run, progress=progress, time_limit_seconds=minutes * 60 if minutes > 0 else None,
-                            read_pages=not options['no_pages'], rules_limit=options['limit'] or None)
+                            read_pages=not options['no_pages'], rules_limit=options['limit'] or None,
+                            worklist=worklist)
         except KeyboardInterrupt:
             VenueIndexRun.objects.filter(id=run.id).update(
                 status='failed', completed_at=timezone.now(),
@@ -70,6 +103,15 @@ class Command(BaseCommand):
                                                  'to continue (checks already done are skipped).'))
             return
 
+        not_found = getattr(run, 'not_found_issns', None) or []
+        if not_found and issn_path is not None:
+            report = issn_path.with_name(issn_path.stem + '.not-found.txt')
+            try:
+                report.write_text('\n'.join(not_found) + '\n', encoding='utf-8')
+                self.stdout.write(self.style.WARNING(f'{len(not_found)} ISSNs not found in OpenAlex; list saved to {report}'))
+            except OSError:
+                self.stdout.write(self.style.WARNING(f'{len(not_found)} ISSNs not found in OpenAlex, e.g. '
+                                                     + ', '.join(not_found[:10])))
         for error in run.errors[-5:]:
             self.stdout.write(self.style.WARNING(f"  {error['source']}: {error['detail']}"))
         counts = coverage_counts(config.profile)

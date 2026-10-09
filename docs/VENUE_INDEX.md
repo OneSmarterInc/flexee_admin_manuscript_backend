@@ -71,6 +71,31 @@ continue in the next run. A journal that drops out of the catalogue is kept and 
 Cost: a full pass of ~2,500 journals is about 25 OpenAlex list calls plus one Crossref call per
 journal, well within OpenAlex's free daily allowance even without a key.
 
+## Importing from an ISSN worklist (`--issn-file`)
+
+Instead of discovering journals by subject, a run can import exactly the journals on a list:
+
+```
+python manage.py import_venue_index --issn-file worklist.csv
+```
+
+The file is either one ISSN per line (`.txt`) or a `.csv`/`.tsv`. In a file with a header row, only
+columns whose header mentions "issn" (ISSN, ISSN Online, eISSN) are read; every other column,
+including any rating, is never read or stored. A row's print and online ISSNs are one journal; rows
+sharing an ISSN are merged; ISSNs with a bad checksum are skipped. Each journal is looked up in
+OpenAlex (50 ISSNs per request), added or refreshed, and then checked against Crossref and DOAJ and
+screened like any other record.
+
+Journal lists (ABDC and others) are coverage input only. Combine them with our own venues, dedupe
+on ISSN, and drop every rating before the file reaches this command: what is kept is the title, the
+ISSN and the homepage from the open catalogues. No list's name, rating or logo is stored or shown.
+
+The list decides coverage, so the subject filter, the size cutoff and `VENUE_INDEX_MAX_RECORDS` do
+not apply. Records added this way are marked `in_worklist` and the monthly subject refresh never
+removes them or flags them missing; run the worklist again to refresh them (re-runs update, never
+duplicate). ISSNs OpenAlex does not know are listed in `<file>.not-found.txt` next to the input.
+`--issn-file` cannot be combined with the other mode flags; `--no-pages` and `--minutes` still apply.
+
 ## Exclusion screening (build plan step 3)
 
 Automated screening only **flags** journals for a person to review. Nothing is excluded without

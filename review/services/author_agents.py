@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import random
 import re
@@ -13,6 +14,10 @@ from ..storage_security import validate_manuscript_zip
 from .field_agent import _extract_citations, _verify_citation_crossref
 from .ai_provider import ai_chat_json, ai_available
 from .review_engine import extract_text, word_count
+
+logger = logging.getLogger(__name__)
+
+SEMANTIC_CHUNK_ATTEMPTS = 2
 
 
 AGENT_VERSION = 'author-agents-v1'
@@ -493,19 +498,38 @@ def run_semantic_readiness(manuscript):
         ai_failed = False
         models = []
         results = []
+        failed_chunks = []
         if not ai_available():
             ai_failed = True
         else:
-            try:
-                for chunk in selected:
-                    model, raw = _agent_json(
-                        _chunk_prompt(manuscript, chunk),
-                        max_tokens=650,
-                        operation='semantic_readiness',
-                    )
+            # A small local model sometimes returns one malformed answer. Retry
+            # that chunk once, keep every chunk that succeeds, and fall back only
+            # when no chunk could be read. Coverage reports what was analysed.
+            for index, chunk in enumerate(selected):
+                last_error = None
+                for _attempt in range(SEMANTIC_CHUNK_ATTEMPTS):
+                    try:
+                        model, raw = _agent_json(
+                            _chunk_prompt(manuscript, chunk),
+                            max_tokens=650,
+                            operation='semantic_readiness',
+                        )
+                        result = _sanitize_chunk_result(raw, chunk, text)
+                    except Exception as exc:
+                        last_error = exc
+                        continue
                     models.append(model)
-                    results.append(_sanitize_chunk_result(raw, chunk, text))
-            except Exception:
+                    results.append(result)
+                    last_error = None
+                    break
+                if last_error is not None:
+                    failed_chunks.append(index)
+                    logger.warning(
+                        'Semantic readiness chunk %s of %s failed for manuscript %s: %s: %s',
+                        index + 1, len(selected), manuscript.pk,
+                        last_error.__class__.__name__, last_error,
+                    )
+            if not results:
                 ai_failed = True
 
         if ai_failed:
@@ -533,7 +557,7 @@ def run_semantic_readiness(manuscript):
             profile = _aggregate_profile(
                 results,
                 total_chunks=len(all_chunks),
-                analyzed_chunks=len(selected),
+                analyzed_chunks=len(results),
             )
             semantic_findings = [item for result in results for item in result['findings']]
             combined_findings = list(mechanical.findings or []) + semantic_findings
@@ -588,6 +612,7 @@ def run_semantic_readiness(manuscript):
             'chunks_total': profile['coverage'].get('chunks_total', 0),
             'coverage_percent': profile['coverage'].get('coverage_percent', 0),
             'mechanical_assessment_id': str(mechanical.id),
+            'chunks_failed': len(failed_chunks),
             'model': model,
             'note': (
                 'Deterministic checks remain the blocking readiness gate. Semantic findings are advisory '
@@ -1398,13 +1423,22 @@ def run_venue_assessment(submission):
     try:
         if not ai_available() or profile.get('summary') == 'Semantic analysis unavailable':
             raise RuntimeError('AI unavailable')
-        model, data = _agent_json(
-            _assessment_prompt(submission, config, citations),
-            max_tokens=1100,
-            timeout=240,
-            operation='venue_assessment',
-        )
-    except Exception:
+        # One retry: a small local model sometimes returns one malformed answer.
+        for attempt in range(SEMANTIC_CHUNK_ATTEMPTS):
+            try:
+                model, data = _agent_json(
+                    _assessment_prompt(submission, config, citations),
+                    max_tokens=1100,
+                    timeout=240,
+                    operation='venue_assessment',
+                )
+                break
+            except AgentExecutionError:
+                if attempt + 1 >= SEMANTIC_CHUNK_ATTEMPTS:
+                    raise
+    except Exception as exc:
+        logger.warning('Venue assessment for submission %s fell back: %s: %s',
+                       submission.pk, exc.__class__.__name__, exc)
         model = 'deterministic-fallback'
         data = {
             'editor_summary': 'Semantic analysis unavailable. The manuscript was processed with deterministic checks only.',

@@ -28,6 +28,36 @@ def _strip_thinking(text):
     return value.strip()
 
 
+_CODE_FENCE = re.compile(r"^```[a-zA-Z0-9_-]*\s*\n?(.*?)\n?\s*```$", re.S)
+
+
+def _json_payload(text):
+    """Return the JSON text inside a reply that wraps it in Markdown fences or prose.
+
+    The shared worker has no JSON mode (Ollama's format=json), so the model often
+    answers with a ```json block. Callers parse with json.loads, so unwrap it here.
+    Text that holds no JSON object comes back unchanged and still fails at the caller.
+    """
+    value = str(text or "").strip()
+    fenced = _CODE_FENCE.match(value)
+    if fenced:
+        value = fenced.group(1).strip()
+    try:
+        json.loads(value)
+        return value
+    except ValueError:
+        pass
+    start, end = value.find("{"), value.rfind("}")
+    if start != -1 and end > start:
+        candidate = value[start:end + 1]
+        try:
+            json.loads(candidate)
+            return candidate
+        except ValueError:
+            pass
+    return value
+
+
 def estimate_prompt_tokens(prompt):
     return max(1, (len(str(prompt or "")) + 3) // 4)
 
@@ -124,7 +154,7 @@ def shared_qwen_chat_json(
     client.delete(f"{SHARED_QWEN_RESULT_PREFIX}{job_id}")
 
     model = str(result.get("model") or "qwen2.5-shared")
-    content = _strip_thinking(result.get("content", ""))
+    content = _json_payload(_strip_thinking(result.get("content", "")))
     if not content:
         raise RuntimeError("Shared Qwen worker returned an empty response.")
 

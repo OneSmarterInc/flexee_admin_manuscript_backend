@@ -813,6 +813,9 @@ class IndexedVenue(models.Model):
     enriched_at = models.DateTimeField(null=True, blank=True, db_index=True)       # Crossref/DOAJ last checked
     missing_since = models.DateTimeField(null=True, blank=True)  # no longer returned by the catalogue: kept, flagged
     last_error = models.TextField(blank=True)
+    # Added from an ISSN worklist (import_venue_index --issn-file). The list decided coverage, so the
+    # subject-based monthly refresh never removes or flags these; re-run the worklist to refresh them.
+    in_worklist = models.BooleanField(default=False, db_index=True)
 
     # Exclusion screening (build plan step 3). Automated screening only ever flags; a person decides.
     SCREENING_CHOICES = [
@@ -873,7 +876,8 @@ class VenueIndexRun(models.Model):
     ]
     MODE_CHOICES = [('full', 'Catalogue refresh and enrichment'), ('enrich', 'Enrichment only'),
                     ('screen', 'Screening only'), ('rules', 'Read rules from official pages'),
-                    ('calls', 'Re-confirm open calls for papers')]
+                    ('calls', 'Re-confirm open calls for papers'),
+                    ('worklist', 'Import journals from an ISSN worklist')]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -886,6 +890,8 @@ class VenueIndexRun(models.Model):
     field_profile = models.CharField(max_length=40, blank=True)
     catalogue_method = models.CharField(max_length=20, blank=True)  # subfield_filter | keyword_search
     pages_fetched = models.PositiveIntegerField(default=0)
+    # mode 'worklist': counts from the ISSN file (entries, invalid, duplicates, not_found, not_journal, sample).
+    worklist = models.JSONField(default=dict, blank=True)
     records_seen = models.PositiveIntegerField(default=0)
     out_of_scope = models.PositiveIntegerField(default=0)
     created_count = models.PositiveIntegerField(default=0)

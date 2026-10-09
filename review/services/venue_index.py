@@ -425,6 +425,161 @@ def spine_fields(source, details):
 
 
 # ---------------------------------------------------------------------------
+# ISSN worklist (import_venue_index --issn-file)
+# ---------------------------------------------------------------------------
+
+WORKLIST_MAX_ENTRIES = 20000
+WORKLIST_BATCH = 50  # ISSNs per OpenAlex request (filter=issn:a|b|...)
+_ISSN_FIND_RE = re.compile(r'(?<![\dXx])(\d{4}-?\d{3}[\dXx])(?![\dXx])')
+
+
+def _issns_in(text):
+    return [normalize_issn(m) for m in _ISSN_FIND_RE.findall(str(text or '')) if normalize_issn(m)]
+
+
+def read_issn_worklist(path):
+    """Read a worklist of journals: one per line (.txt) or one per row (.csv/.tsv).
+
+    Only ISSNs are read. In a file with a header row, only columns whose header mentions "issn"
+    (ISSN, ISSN Online, eISSN, ...) are looked at; every other column, ratings included, is never
+    read. A row's ISSNs (print and online) are one journal. Rows sharing an ISSN are merged.
+
+    Returns (entries, stats): entries is a list of ISSN tuples, one per journal, in file order.
+    """
+    import csv
+    from pathlib import Path
+
+    text = Path(path).read_text(encoding='utf-8-sig', errors='replace')
+    lines = [line for line in text.splitlines() if line.strip()]
+    stats = {'rows': 0, 'invalid': 0, 'no_issn': 0, 'duplicates': 0, 'entries': 0, 'truncated': False}
+    if not lines:
+        return [], stats
+
+    tabular = Path(path).suffix.lower() in {'.csv', '.tsv'} or any(d in lines[0] for d in (',', ';', '\t'))
+    if tabular:
+        try:
+            dialect = csv.Sniffer().sniff('\n'.join(lines[:20]), delimiters=',;\t')
+        except csv.Error:
+            dialect = csv.excel
+        rows = list(csv.reader(lines, dialect))
+        header = [cell.strip().lower() for cell in rows[0]] if rows else []
+        issn_cols = [i for i, name in enumerate(header) if 'issn' in name]
+        if issn_cols:
+            rows = rows[1:]
+            cells_of = lambda row: [row[i] for i in issn_cols if i < len(row)]  # noqa: E731
+        else:
+            cells_of = lambda row: row  # noqa: E731  (no header: any cell may hold the ISSN)
+    else:
+        rows = [[line] for line in lines]
+        cells_of = lambda row: row  # noqa: E731
+
+    entries, owner = [], {}  # owner: ISSN -> index in entries
+    for row in rows:
+        stats['rows'] += 1
+        found = [issn for cell in cells_of(row) for issn in _issns_in(cell)]
+        if not found:
+            stats['no_issn'] += 1
+            continue
+        valid = list(dict.fromkeys(issn for issn in found if issn_checksum_ok(issn)))
+        if not valid:
+            stats['invalid'] += 1
+            continue
+        existing = next((owner[issn] for issn in valid if issn in owner), None)
+        if existing is not None:
+            stats['duplicates'] += 1
+            merged = list(entries[existing]) + [i for i in valid if i not in entries[existing]]
+            entries[existing] = tuple(merged)
+            for issn in valid:
+                owner.setdefault(issn, existing)
+            continue
+        if len(entries) >= WORKLIST_MAX_ENTRIES:
+            stats['truncated'] = True
+            break
+        for issn in valid:
+            owner[issn] = len(entries)
+        entries.append(tuple(valid))
+    stats['entries'] = len(entries)
+    return entries, stats
+
+
+def _worklist_lookup(http, config, issns):
+    """OpenAlex sources for a batch of ISSNs, as {issn: source}."""
+    catalogue = OpenAlexCatalogue(http, config)
+    base = {'filter': 'issn:' + '|'.join(issns), 'per_page': 100}
+    for extra in ({'select': OpenAlexCatalogue.SELECT}, {}):
+        params = catalogue._params({**base, **extra})
+        params.pop('sort', None)
+        status, payload = http.get_json('openalex', OPENALEX_SOURCES, params)
+        if status in (400, 403) and extra:
+            continue  # OpenAlex rejected the field list: ask again without it
+        if status != 200 or payload is None:
+            raise IndexSourceError(f'OpenAlex returned HTTP {status}')
+        found = {}
+        for item in payload.get('results') or []:
+            for issn in {normalize_issn(x) for x in (item.get('issn') or [])} | {normalize_issn(item.get('issn_l'))}:
+                if issn:
+                    found.setdefault(issn, item)
+        return found
+    return {}
+
+
+def _worklist_pass(run, config, http, now, budget, entries, say=lambda m: None):
+    """Add or refresh every journal on the worklist. The list decides coverage, so the subject filter,
+    the size cutoff and VENUE_INDEX_MAX_RECORDS do not apply; nothing is removed or flagged missing."""
+    info = dict(run.worklist or {})
+    not_found, not_journal, done_ids = [], 0, set()
+    processed = 0
+    say(f'Looking up {len(entries):,} journals from the worklist in OpenAlex ({WORKLIST_BATCH} per request)…')
+    for start in range(0, len(entries), WORKLIST_BATCH):
+        if not budget():
+            info['stopped_early'] = True
+            say('Time limit reached; run the same command again to continue (journals already added are kept).')
+            break
+        batch = entries[start:start + WORKLIST_BATCH]
+        wanted = list(dict.fromkeys(issn for entry in batch for issn in entry))
+        try:
+            found = {}
+            for i in range(0, len(wanted), WORKLIST_BATCH):
+                found.update(_worklist_lookup(http, config, wanted[i:i + WORKLIST_BATCH]))
+        except IndexSourceError as exc:
+            _record_error(run, 'openalex', exc)
+            say(f'OpenAlex problem: {exc}')
+            info['stopped_early'] = True
+            break
+        run.pages_fetched += 1
+        for entry in batch:
+            processed += 1
+            run.records_seen += 1
+            source = next((found[issn] for issn in entry if issn in found), None)
+            if source is None:
+                not_found.append(entry[0])
+                continue
+            openalex_id = _short_id(source.get('id'))
+            if not openalex_id or openalex_id in done_ids:
+                continue  # two rows for the same journal (print and online ISSN on separate rows)
+            if str(source.get('type') or 'journal') != 'journal':
+                not_journal += 1
+                continue
+            _keep, details = assess_scope(source, config, this_year=now.year)  # for the subject facts only
+            fields = spine_fields(source, details)
+            if not fields['title']:
+                continue
+            _upsert(run, config, openalex_id, fields, now)
+            IndexedVenue.objects.filter(openalex_id=openalex_id).update(in_worklist=True)
+            done_ids.add(openalex_id)
+        run.save()
+        say(f'Worklist: {processed:,} of {len(entries):,} looked up, {run.created_count:,} new, '
+            f'{run.updated_count:,} already in the index, {len(not_found):,} not found')
+    info.update({'processed': processed, 'not_found': len(not_found), 'not_found_sample': not_found[:50],
+                 'not_journal': not_journal})
+    run.worklist = info
+    run.catalogue_method = 'issn_worklist'
+    run.catalogue_complete = False  # a worklist never proves a journal left the catalogue
+    run.save()
+    return not_found
+
+
+# ---------------------------------------------------------------------------
 # Crossref and DOAJ enrichment
 # ---------------------------------------------------------------------------
 
@@ -536,7 +691,7 @@ def start_index_run(*, mode='full', trigger='schedule', requested_by=''):
     if active:
         return active, False
     config = IndexConfig()
-    return VenueIndexRun.objects.create(mode=mode if mode in {'full', 'enrich', 'screen', 'rules', 'calls'} else 'full', trigger=trigger,
+    return VenueIndexRun.objects.create(mode=mode if mode in {'full', 'enrich', 'screen', 'rules', 'calls', 'worklist'} else 'full', trigger=trigger,
                                         requested_by=requested_by[:254], field_profile=config.profile), True
 
 
@@ -567,7 +722,7 @@ def link_to_venues(config):
 
 
 def run_index(run, *, http=None, now=None, clock=None, progress=None, time_limit_seconds=None, page_fetcher=None,
-              read_pages=True, rules_fetcher=None, rules_extractor=None, rules_limit=None):
+              read_pages=True, rules_fetcher=None, rules_extractor=None, rules_limit=None, worklist=None):
     """Run one import. Saves as it goes, so a stopped run keeps what it found.
 
     progress, if given, is called with short status lines (the management command prints them).
@@ -586,6 +741,9 @@ def run_index(run, *, http=None, now=None, clock=None, progress=None, time_limit
     try:
         if run.mode == 'full':
             _catalogue_pass(run, config, http, now, budget, say)
+            run.linked_count = link_to_venues(config)
+        elif run.mode == 'worklist':
+            run.not_found_issns = _worklist_pass(run, config, http, now, budget, list(worklist or []), say)
             run.linked_count = link_to_venues(config)
         if run.mode == 'rules':
             from .index_rules import run_rules
@@ -634,7 +792,8 @@ def _catalogue_pass(run, config, http, now, budget, say=lambda m: None):
                 # A journal already in the index that no longer qualifies (e.g. the scope was narrowed)
                 # is taken out, unless an admin linked it to a live venue.
                 run.removed_count += IndexedVenue.objects.filter(
-                    openalex_id=_short_id(source.get('id')), venue__isnull=True, excluded=False).delete()[0]
+                    openalex_id=_short_id(source.get('id')), venue__isnull=True, excluded=False,
+                    in_worklist=False).delete()[0]
                 continue
             openalex_id = _short_id(source.get('id'))
             fields = spine_fields(source, details)
@@ -661,7 +820,9 @@ def _catalogue_pass(run, config, http, now, budget, say=lambda m: None):
     run.catalogue_complete = (catalogue.complete or reached_cutoff) and budget()
     run.size_cutoff = cutoff if reached_cutoff else None
     if run.catalogue_complete:
-        unseen = IndexedVenue.objects.filter(field_profile=config.profile).exclude(openalex_id__in=seen_ids)
+        # Journals from an ISSN worklist are outside the subject walk by design: never removed or flagged here.
+        unseen = (IndexedVenue.objects.filter(field_profile=config.profile, in_worklist=False)
+                  .exclude(openalex_id__in=seen_ids))
         if reached_cutoff:
             # Smaller than the cutoff: no longer among the N largest, so out of the index (unless linked).
             small = [r.id for r in unseen.only('id', 'metrics')
@@ -767,6 +928,18 @@ def _summary(run):
         return (f'Rules read for {run.rules_attempted} journals: {run.rules_ready} ready for approval, '
                 f'{run.rules_failed} not found or unreadable.{extra}')
     parts = []
+    if run.mode == 'worklist':
+        info = run.worklist or {}
+        parts.append(f"worklist of {info.get('entries', 0)} journals: {run.created_count} new, "
+                     f"{run.updated_count} already in the index refreshed, {info.get('not_found', 0)} not found in OpenAlex")
+        if info.get('not_journal'):
+            parts.append(f"{info['not_journal']} not journals (skipped)")
+        if info.get('invalid') or info.get('duplicates'):
+            parts.append(f"{info.get('invalid', 0)} rows with no valid ISSN, {info.get('duplicates', 0)} duplicate rows merged")
+        if info.get('stopped_early'):
+            parts.append('stopped early, run it again to finish')
+        if run.linked_count:
+            parts.append(f'{run.linked_count} linked to live venues')
     if run.mode == 'full':
         parts.append(f'{run.created_count} new and {run.updated_count} refreshed journals '
                      f'({run.out_of_scope} outside the target fields skipped)')

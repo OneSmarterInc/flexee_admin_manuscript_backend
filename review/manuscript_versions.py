@@ -60,7 +60,11 @@ def locked_submissions(version_id):
 def version_locked(manuscript):
     if not manuscript.current_version_id:
         return manuscript.venue_submissions.exclude(status__in=EDITABLE_SUBMISSION_STATUSES).exists()
-    return locked_submissions(manuscript.current_version_id).exists()
+    if locked_submissions(manuscript.current_version_id).exists():
+        return True
+    # An active plan was built against this text: a change is a new version, not an overwrite.
+    from .models import SubmissionPlan
+    return SubmissionPlan.objects.filter(built_on_version_id=manuscript.current_version_id, status='active').exists()
 
 
 def file_in_use(name, *, exclude_version_id=None):

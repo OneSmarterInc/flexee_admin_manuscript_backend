@@ -60,6 +60,7 @@ from .storage_security import (
 )
 from .storage_quota import StorageQuotaExceeded, storage_quota_guard
 from . import manuscript_versions as versions
+from .gap_classes import classify_violation, item as gap_item
 
 
 ALLOWED_MANUSCRIPT_TYPES = {value for value, _ in Manuscript.TYPE_CHOICES}
@@ -1595,11 +1596,13 @@ def _generate_deterministic_matches(manuscript, latest_readiness, venues):
         config = venue_configs.get(venue.id)
         reasons = []
         gaps = []
+        gap_items = []
         evidence = []
         eligibility = 'needs_changes'
 
         if not config:
             gaps.append('This venue does not yet have an active venue-agent configuration.')
+            gap_items.append(gap_item('venue_not_configured', gaps[-1], 'out'))
         else:
             accepted = {_normalise_label(item) for item in config.article_types}
             manuscript_type = _normalise_label(manuscript.manuscript_type)
@@ -1617,6 +1620,8 @@ def _generate_deterministic_matches(manuscript, latest_readiness, venues):
                     eligibility = 'eligible'
                 else:
                     gaps.append('The manuscript type is not listed among this venue’s accepted article types.')
+                    gap_items.append(gap_item('type_not_accepted', gaps[-1], 'out',
+                                              source=f'venue config v{config.version} · article_types'))
                     evidence.append({
                         'source_type': 'venue_policy',
                         'source_locator': f'venue config v{config.version} · article_types',
@@ -1625,11 +1630,13 @@ def _generate_deterministic_matches(manuscript, latest_readiness, venues):
                     eligibility = 'needs_changes'
             else:
                 gaps.append('Accepted article types are not configured for this venue.')
+                gap_items.append(gap_item('venue_rules_incomplete', gaps[-1], 'out'))
 
             if config.aims_scope:
                 reasons.append('Aims and scope are configured and ready for semantic fit analysis.')
             else:
                 gaps.append('Aims and scope are not yet configured.')
+                gap_items.append(gap_item('venue_rules_incomplete', gaps[-1], 'out'))
 
             desk_violations = _structured_desk_rule_violations(
                 manuscript,
@@ -1640,7 +1647,10 @@ def _generate_deterministic_matches(manuscript, latest_readiness, venues):
             if desk_violations:
                 eligibility = 'ineligible'
                 for violation in desk_violations:
-                    gaps.append(violation['message'])
+                    structured = classify_violation(
+                        violation, source=f'venue config v{config.version} · structured_desk_rejection_rules')
+                    gaps.append(violation['message'] or structured['message'])
+                    gap_items.append({**structured, 'message': gaps[-1]})
                     evidence.append({
                         'source_type': 'venue_policy',
                         'source_locator': f'venue config v{config.version} · structured_desk_rejection_rules',
@@ -1664,6 +1674,7 @@ def _generate_deterministic_matches(manuscript, latest_readiness, venues):
                 'fit_summary': fit_summary,
                 'reasons': reasons,
                 'gaps': gaps,
+                'gap_items': gap_items,
                 'evidence': evidence,
             },
         )
@@ -2283,6 +2294,8 @@ def author_submit_packet(request, submission_id):
         else None
     )
     item.save(update_fields=['status', 'submitted_at', 'retention_expires_at', 'updated_at'])
+    from .submission_plan import sync_from_submission
+    sync_from_submission(item)  # a planned venue moves to 'submitted' (never raises)
 
     # ── Confirmation email to author ────────────────────────────────────────────
     manuscript = item.manuscript

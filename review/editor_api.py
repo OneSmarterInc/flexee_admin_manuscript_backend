@@ -302,6 +302,8 @@ def admin_start_venue_review(request, submission_id):
     if item.status != 'under_review':
         item.status = 'under_review'
         item.save(update_fields=['status', 'updated_at'])
+        from .submission_plan import sync_from_submission
+        sync_from_submission(item)
     record_audit_event(
         request,
         'venue_submission.review_started',
@@ -353,6 +355,8 @@ def admin_venue_submission_decision(request, submission_id):
         'human_decision': True,
     }
     item.save(update_fields=['status', 'decision', 'updated_at'])
+    from .submission_plan import sync_from_submission
+    sync_from_submission(item)  # declined stops the author's plan; it never advances by itself
     record_audit_event(
         request,
         'venue_submission.decision_recorded',

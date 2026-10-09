@@ -501,6 +501,9 @@ class VenueMatch(models.Model):
     # or keyword overlap when the embedding model is unavailable) and its place in the topical shortlist.
     topic_similarity = models.FloatField(null=True, blank=True)
     shortlist_rank = models.PositiveIntegerField(null=True, blank=True)
+    # Instruction 2.5: the same gaps as structured items, so a plan can order venues by how much the
+    # manuscript must change: [{'code', 'message', 'class': ready|edit|section|study|out, 'quantity', 'unit'}]
+    gap_items = models.JSONField(default=list, blank=True)
 
     class Meta:
         ordering = ['created_at', 'id']
@@ -1162,3 +1165,98 @@ class PublicRequestWindow(models.Model):
         constraints = [
             models.UniqueConstraint(fields=['scope', 'remote_hash', 'window_start'], name='uniq_public_request_window'),
         ]
+
+
+class SubmissionPlan(models.Model):
+    """An ordered submission plan for one manuscript version (8 October instructions, 2.5).
+
+    The order rests on fit and compliance distance only: never on ratings, metrics or predicted
+    acceptance. Venues are tried one at a time, because simultaneous submission is not allowed.
+    """
+    STATUS_CHOICES = [('active', 'Active'), ('completed', 'Accepted somewhere'), ('stopped', 'Stopped')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    manuscript = models.ForeignKey(Manuscript, on_delete=models.CASCADE, related_name='plans')
+    built_on_version = models.ForeignKey(ManuscriptVersion, on_delete=models.PROTECT, related_name='plans')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active', db_index=True)
+    method_version = models.CharField(max_length=40, default='plan-v1')
+    not_included = models.JSONField(default=list, blank=True)  # [{'venue_id', 'venue', 'reason'}]
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['manuscript'], condition=models.Q(status='active'),
+                                    name='review_one_active_plan_per_manuscript'),
+        ]
+
+
+class PlanPosition(models.Model):
+    STATE_CHOICES = [
+        ('queued', 'Queued'),
+        ('preparing', 'Preparing'),
+        ('submitted', 'Submitted'),
+        ('under_review', 'Under review'),
+        ('revise_resubmit', 'Revise and resubmit'),
+        ('awaiting_author', 'Declined: waiting for the author'),
+        ('accepted', 'Accepted'),
+        ('closed', 'Closed'),
+        ('skipped', 'Skipped'),
+        ('withdrawn', 'Withdrawn'),
+    ]
+    EFFORT_CHOICES = [('ready', 'Ready'), ('edit', 'Edits'), ('section', 'New section'), ('study', 'New study')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    plan = models.ForeignKey(SubmissionPlan, on_delete=models.CASCADE, related_name='positions')
+    order = models.PositiveIntegerField()
+    venue = models.ForeignKey(Venue, on_delete=models.PROTECT, related_name='plan_positions')
+    venue_config = models.ForeignKey(VenueAgentConfig, null=True, blank=True, on_delete=models.SET_NULL,
+                                     related_name='plan_positions')
+    match = models.ForeignKey(VenueMatch, null=True, blank=True, on_delete=models.SET_NULL, related_name='plan_positions')
+    state = models.CharField(max_length=20, choices=STATE_CHOICES, default='queued', db_index=True)
+    reason = models.TextField()
+    effort_class = models.CharField(max_length=10, choices=EFFORT_CHOICES)
+    changes = models.JSONField(default=list, blank=True)
+    fit_band = models.CharField(max_length=10, default='moderate')
+    venue_submission = models.ForeignKey('VenueSubmission', null=True, blank=True, on_delete=models.SET_NULL,
+                                         related_name='plan_positions')
+    submitted_version = models.ForeignKey(ManuscriptVersion, null=True, blank=True, on_delete=models.SET_NULL,
+                                          related_name='+')
+    outcome = models.CharField(max_length=20, blank=True)  # accepted | revise_resubmit | declined | withdrawn
+    outcome_reported_by = models.CharField(max_length=10, blank=True)  # venue | author
+    outcome_at = models.DateTimeField(null=True, blank=True)
+    revision_answer = models.CharField(max_length=10, blank=True)  # revised | unchanged
+    revision_version = models.ForeignKey(ManuscriptVersion, null=True, blank=True, on_delete=models.SET_NULL,
+                                         related_name='+')
+    unchanged_reason = models.TextField(blank=True)
+    skip_reason = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['plan', 'order']
+        constraints = [
+            models.UniqueConstraint(fields=['plan', 'order'], name='review_unique_plan_position_order'),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not (self.reason or '').strip():
+            raise ValueError('Every plan position needs a stated reason.')
+        super().save(*args, **kwargs)
+
+
+class PlanEvent(models.Model):
+    """Append-only log of every plan change: who did it, from which state to which."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    plan = models.ForeignKey(SubmissionPlan, on_delete=models.CASCADE, related_name='events')
+    position = models.ForeignKey(PlanPosition, null=True, blank=True, on_delete=models.CASCADE, related_name='events')
+    actor = models.CharField(max_length=20)  # author | venue | system
+    action = models.CharField(max_length=40)
+    from_state = models.CharField(max_length=20, blank=True)
+    to_state = models.CharField(max_length=20, blank=True)
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['created_at']

@@ -142,16 +142,20 @@ class Command(BaseCommand):
                         'or use --allow-console-email only for a non-production local rehearsal.'
                     )
 
+            # Send what a browser on the frontend sends. Over HTTPS, Django's CSRF check needs an Origin
+            # (or Referer) header on unsafe requests; without one, author registration fails with 403.
+            browser_headers = {'Origin': origin, 'Referer': origin.rstrip('/') + '/'}
             author_client = httpx.Client(
                 base_url=report['base_url'],
                 timeout=60.0,
                 follow_redirects=False,
+                headers=browser_headers,
             )
             admin_client = httpx.Client(
                 base_url=report['base_url'],
                 timeout=60.0,
                 follow_redirects=False,
-                headers={'Origin': origin},
+                headers=browser_headers,
             )
             try:
                 self._stage(

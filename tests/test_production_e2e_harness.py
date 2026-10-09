@@ -83,3 +83,20 @@ def test_production_e2e_cost_report_uses_persisted_ai_usage():
     assert report['unpriced_cloud_calls'] == 0
     assert report['by_operation'][0]['operation'] == 'venue_assessment'
 
+
+
+def test_https_author_registration_passes_csrf_with_browser_headers(monkeypatch, settings, db):
+    """Over HTTPS Django's CSRF check needs Origin/Referer: the harness sends them like a browser."""
+    from django.test import Client
+    origin = 'https://frontend.example.org'
+    monkeypatch.setenv('FRONTEND_ORIGINS', origin)
+    settings.CSRF_TRUSTED_ORIGINS = [origin]
+    client = Client(enforce_csrf_checks=True, HTTP_ORIGIN=origin, HTTP_REFERER=origin + '/')
+    token = client.get('/api/csrf/', secure=True).json()['csrfToken']
+    blocked = Client(enforce_csrf_checks=True).post(
+        '/api/author/register/', data='{}', content_type='application/json', secure=True,
+        HTTP_X_CSRFTOKEN=token)
+    assert blocked.status_code == 403  # no Origin/Referer: refused, as on production
+    response = client.post('/api/author/register/', data='{"email": "e2e@example.org"}',
+                           content_type='application/json', secure=True, HTTP_X_CSRFTOKEN=token)
+    assert b'CSRF verification failed' not in response.content

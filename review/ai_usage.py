@@ -18,6 +18,11 @@ MILLION = Decimal('1000000')
 COST_QUANT = Decimal('0.000001')
 
 
+# Providers that run on our own hardware. They have no per-token bill, so cost
+# enforcement records their usage but never blocks them for missing prices.
+LOCAL_PROVIDERS = frozenset({'ollama', 'mock', 'shared_qwen'})
+
+
 class AIBudgetExceeded(RuntimeError):
     pass
 
@@ -147,7 +152,7 @@ def _validate_enforcement(provider: str, model: str, estimated_cost: Decimal, pr
     if not limits['enabled']:
         return limits
 
-    if provider in {'ollama', 'mock'} and not priced:
+    if provider in LOCAL_PROVIDERS and not priced:
         return limits
 
     if not priced:
@@ -185,7 +190,7 @@ def reserve_ai_call(
     )
     limits = _validate_enforcement(provider, model, estimated_cost, priced)
 
-    if provider in {'ollama', 'mock'} and not priced:
+    if provider in LOCAL_PROVIDERS and not priced:
         return None
 
     now = timezone.now()

@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 import pytest
 from django.core.management import call_command
@@ -31,7 +32,7 @@ def test_production_e2e_rejects_mock_provider_before_live_run(monkeypatch, tmp_p
     monkeypatch.setenv('AI_PROVIDER', 'mock')
     monkeypatch.setenv('ADMIN_SESSION_SECRET', 'test-secret')
 
-    with pytest.raises(CommandError, match='ollama or anthropic'):
+    with pytest.raises(CommandError, match='ollama, anthropic or shared_qwen'):
         call_command(
             'production_e2e',
             manuscript=str(manuscript),
@@ -100,3 +101,33 @@ def test_https_author_registration_passes_csrf_with_browser_headers(monkeypatch,
     response = client.post('/api/author/register/', data='{"email": "e2e@example.org"}',
                            content_type='application/json', secure=True, HTTP_X_CSRFTOKEN=token)
     assert b'CSRF verification failed' not in response.content
+
+
+def test_shared_qwen_is_available_only_when_its_queue_answers(monkeypatch):
+    from unittest import mock
+    from review.services.ai_provider import ai_available
+    monkeypatch.setenv('AI_PROVIDER', 'shared_qwen')
+    monkeypatch.setenv('SHARED_QWEN_QUEUE_ENABLED', 'false')
+    assert ai_available() is False
+    monkeypatch.setenv('SHARED_QWEN_QUEUE_ENABLED', 'true')
+    with mock.patch('redis.from_url') as from_url:
+        from_url.return_value.ping.return_value = True
+        assert ai_available() is True
+        from_url.return_value.ping.side_effect = ConnectionError('down')
+        assert ai_available() is False
+
+
+def test_production_e2e_accepts_shared_qwen_provider(monkeypatch, tmp_path):
+    """shared_qwen passes the provider check (it then stops at a later preflight step here)."""
+    manuscript = tmp_path / 'sample.md'
+    manuscript.write_text('# Sample\n\nTest manuscript.', encoding='utf-8')
+    monkeypatch.setenv('AI_PROVIDER', 'shared_qwen')
+    monkeypatch.setenv('SHARED_QWEN_QUEUE_ENABLED', 'false')
+    monkeypatch.setenv('ADMIN_SESSION_SECRET', 'test-secret')
+    with pytest.raises(CommandError) as raised:
+        call_command('production_e2e', manuscript=str(manuscript), author_email='e2e@example.com',
+                     report=str(tmp_path / 'report.json'))
+    assert 'not available' in str(raised.value)
+    assert 'ollama, anthropic or shared_qwen' not in str(raised.value)
+    report = json.loads((tmp_path / 'report.json').read_text())
+    assert report['ai_used'] is False and report['ai_fallback_stages'] == []

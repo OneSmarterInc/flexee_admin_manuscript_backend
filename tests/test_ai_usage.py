@@ -57,6 +57,36 @@ def test_ollama_usage_is_recorded_without_provider_cost(monkeypatch):
 
 
 @pytest.mark.django_db
+def test_shared_qwen_runs_with_cost_enforcement_and_no_pricing(monkeypatch):
+    # The shared Qwen worker is local hardware, like Ollama: enforcement must not block it.
+    monkeypatch.setenv('AI_PROVIDER', 'shared_qwen')
+    monkeypatch.setenv('AI_COST_ENFORCEMENT_ENABLED', 'true')
+    monkeypatch.setenv('AI_DAILY_COST_LIMIT_USD', '5')
+    monkeypatch.setenv('AI_MONTHLY_COST_LIMIT_USD', '100')
+    monkeypatch.delenv('AI_SHARED_QWEN_INPUT_USD_PER_MILLION', raising=False)
+    monkeypatch.delenv('AI_SHARED_QWEN_OUTPUT_USD_PER_MILLION', raising=False)
+    monkeypatch.delenv('AI_MODEL_PRICING_JSON', raising=False)
+
+    with patch(
+        'review.services.ai_provider.shared_qwen_chat_json',
+        return_value=(
+            'qwen2.5-shared',
+            '{"ok": true}',
+            {'input_tokens': 80, 'output_tokens': 20, 'usage_estimated': True},
+        ),
+    ):
+        model, payload = ai_chat_json('test prompt', max_tokens=50, operation='semantic_readiness')
+
+    assert model == 'qwen2.5-shared'
+    assert payload == '{"ok": true}'
+    event = AIUsageEvent.objects.get()
+    assert event.provider == 'shared_qwen'
+    assert event.status == 'completed'
+    assert event.actual_cost_usd == Decimal('0.000000')
+    assert event.priced is False
+
+
+@pytest.mark.django_db
 def test_cloud_budget_blocks_before_provider_call_and_auto_falls_back(monkeypatch):
     monkeypatch.setenv('AI_PROVIDER', 'auto')
     monkeypatch.setenv('ANTHROPIC_API_KEY', 'fake-key')

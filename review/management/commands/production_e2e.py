@@ -46,7 +46,7 @@ MANUSCRIPT_TYPES = {
 class Command(BaseCommand):
     help = (
         'Run a production-style scholarly-network E2E against a live Django API and a real qcluster worker. '
-        'The command requires AI_PROVIDER=ollama or AI_PROVIDER=anthropic and writes a timing/report JSON file.'
+        'The command requires AI_PROVIDER=ollama, anthropic or shared_qwen and writes a timing/report JSON file.'
     )
 
     def add_arguments(self, parser):
@@ -413,6 +413,9 @@ class Command(BaseCommand):
                     'error_type': cost_error.__class__.__name__,
                     'note': 'The E2E workflow finished, but its AI usage window could not be summarized.',
                 }
+            report['ai_fallback_stages'] = sorted(stage for stage, model in report['models_observed'].items()
+                                                  if 'fallback' in str(model or '').lower())
+            report['ai_used'] = bool(report['models_observed']) and not report['ai_fallback_stages']
             report_path = self._report_path(options, report['provider'])
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding='utf-8')
@@ -425,10 +428,18 @@ class Command(BaseCommand):
             if options.get('cleanup'):
                 self._cleanup(created)
 
+        fallback = sorted(stage for stage, model in report['models_observed'].items()
+                          if 'fallback' in str(model or '').lower())
+        if fallback:
+            # The workflow ran, but the AI did not: its timings and cost say nothing about the model.
+            self.stdout.write(self.style.WARNING(
+                f"WARNING: the AI provider was not used for {', '.join(fallback)} (deterministic fallback). "
+                'Check that the model or worker is running before using this report.'))
         self.stdout.write(
             self.style.SUCCESS(
                 f"PASS provider={report['provider']} total={report['total_seconds']}s "
                 f"submission={created.get('submission_id') or 'cleaned'}"
+                + (' (AI NOT USED)' if fallback else '')
             )
         )
 
@@ -481,9 +492,9 @@ class Command(BaseCommand):
 
     def _preflight(self, options, report):
         provider = report['provider']
-        if provider not in {'ollama', 'anthropic'}:
+        if provider not in {'ollama', 'anthropic', 'shared_qwen'}:
             raise CommandError(
-                'Set AI_PROVIDER explicitly to ollama or anthropic for a production E2E run. '
+                'Set AI_PROVIDER explicitly to ollama, anthropic or shared_qwen for a production E2E run. '
                 f'Current value: {provider!r}. Do not use mock or auto for this proof.'
             )
         if not os.getenv('ADMIN_SESSION_SECRET', '').strip():

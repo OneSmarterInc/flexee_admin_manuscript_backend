@@ -306,6 +306,16 @@ def ai_available() -> bool:
             return r.status_code == 200
         except Exception:
             return False
+    if provider == 'shared_qwen':
+        # The shared worker answers jobs from a Redis queue: reachable when the queue is on and Redis answers.
+        if os.getenv('SHARED_QWEN_QUEUE_ENABLED', 'false').strip().lower() not in {'1', 'true', 'yes', 'on'}:
+            return False
+        try:
+            import redis
+            url = os.getenv('SHARED_QWEN_REDIS_URL') or os.getenv('REDIS_URL', 'redis://127.0.0.1:6379/0')
+            return bool(redis.from_url(url, socket_connect_timeout=3, socket_timeout=3).ping())
+        except Exception:
+            return False
     if os.getenv('ANTHROPIC_API_KEY', '').strip():
         return True
     try:

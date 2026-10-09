@@ -64,6 +64,18 @@ def _manuscript_usage(queryset):
     return int(queryset.aggregate(total=Sum('manuscript_bytes'))['total'] or 0)
 
 
+def _earlier_version_usage(author=None):
+    """Earlier manuscript versions keep their own files (instruction 2.4); the current one is the
+    working copy, already counted."""
+    from django.db.models import F
+    from .models import ManuscriptVersion
+    versions = (ManuscriptVersion.objects.filter(content_purged_at__isnull=True)
+                .exclude(manuscript__current_version_id=F('id')))
+    if author is not None:
+        versions = versions.filter(manuscript__author_account=author)
+    return int(versions.aggregate(total=Sum('bytes'))['total'] or 0)
+
+
 def storage_usage(*, author=None):
     manuscripts = Manuscript.objects.filter(content_purged_at__isnull=True)
     requirements = SubmissionRequirementFile.objects.filter(
@@ -76,7 +88,7 @@ def storage_usage(*, author=None):
             venue_submission__manuscript__author_account=author,
         )
 
-    return _manuscript_usage(manuscripts) + _requirement_usage(requirements)
+    return _manuscript_usage(manuscripts) + _requirement_usage(requirements) + _earlier_version_usage(author)
 
 
 @contextmanager

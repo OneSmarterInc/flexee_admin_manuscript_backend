@@ -355,6 +355,10 @@ class Manuscript(models.Model):
     shortlisted_at = models.DateTimeField(null=True, blank=True)
     # When the author last opened their venue matches; matches created later are shown as new.
     matches_seen_at = models.DateTimeField(null=True, blank=True)
+    # Instruction 2.4: the version the working copy above currently mirrors. Earlier versions keep
+    # their own file, so a brief, match or submission stays attached to the text it was made for.
+    current_version = models.ForeignKey('ManuscriptVersion', null=True, blank=True, on_delete=models.SET_NULL,
+                                        related_name='+')
 
     class Meta:
         ordering = ['-created_at']
@@ -364,6 +368,81 @@ class Manuscript(models.Model):
 
     def __str__(self):
         return self.title
+
+    def save(self, *args, **kwargs):
+        creating = self._state.adding
+        super().save(*args, **kwargs)
+        if creating and self.current_version_id is None and self.manuscript_file:
+            from .manuscript_versions import create_initial_version
+            create_initial_version(self)
+
+    def current_matches(self):
+        return self.venue_matches.filter(version_id=self.current_version_id)
+
+    def current_readiness(self):
+        return self.readiness_assessments.filter(version_id=self.current_version_id)
+
+
+class ManuscriptVersion(models.Model):
+    """One immutable version of a manuscript (instruction 2.4).
+
+    A version's file is never overwritten once its version has been submitted somewhere; a revision
+    is a new version. Readiness assessments, venue matches and venue submissions point at the
+    version they were made for.
+    """
+    SOURCE_CHOICES = [('upload', 'Uploaded'), ('migration', 'Created from an existing manuscript')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    manuscript = models.ForeignKey(Manuscript, on_delete=models.CASCADE, related_name='versions')
+    number = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    file = models.FileField(upload_to='author_manuscripts/', blank=True)
+    filename = models.CharField(max_length=500, blank=True)
+    bytes = models.BigIntegerField(default=0)
+    sha256 = models.CharField(max_length=64, blank=True)
+    title = models.CharField(max_length=500, blank=True)
+    abstract = models.TextField(blank=True)
+    keywords = models.JSONField(default=list, blank=True)
+    manuscript_type = models.CharField(max_length=40, blank=True)
+    parsed_profile = models.JSONField(default=dict, blank=True)
+    change_note = models.TextField(blank=True)
+    revised_after = models.ForeignKey('VenueSubmission', null=True, blank=True, on_delete=models.SET_NULL,
+                                      related_name='revisions')
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default='upload')
+    content_purged_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['manuscript', 'number']
+        constraints = [
+            models.UniqueConstraint(fields=['manuscript', 'number'], name='review_unique_manuscript_version'),
+        ]
+
+    def __str__(self):
+        return f'{self.manuscript_id} v{self.number}'
+
+    # Same attribute names as Manuscript, so text extraction and downloads work on either.
+    @property
+    def manuscript_file(self):
+        return self.file
+
+    @property
+    def manuscript_filename(self):
+        return self.filename
+
+    @property
+    def manuscript_sha256(self):
+        return self.sha256
+
+    @property
+    def manuscript_bytes(self):
+        return self.bytes
+
+
+def _default_version(instance):
+    """Rows made without an explicit version belong to the manuscript's current version."""
+    if instance.version_id is None and instance.manuscript_id:
+        instance.version_id = (Manuscript.objects.filter(id=instance.manuscript_id)
+                               .values_list('current_version_id', flat=True).first())
 
 
 class ReadinessAssessment(models.Model):
@@ -375,6 +454,8 @@ class ReadinessAssessment(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     manuscript = models.ForeignKey(Manuscript, on_delete=models.CASCADE, related_name='readiness_assessments')
+    version = models.ForeignKey(ManuscriptVersion, null=True, blank=True, on_delete=models.SET_NULL,
+                                related_name='readiness_assessments')
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     completed_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', db_index=True)
@@ -386,6 +467,10 @@ class ReadinessAssessment(models.Model):
     class Meta:
         ordering = ['-created_at']
 
+    def save(self, *args, **kwargs):
+        _default_version(self)
+        super().save(*args, **kwargs)
+
 
 class VenueMatch(models.Model):
     ELIGIBILITY_CHOICES = [
@@ -396,6 +481,8 @@ class VenueMatch(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     manuscript = models.ForeignKey(Manuscript, on_delete=models.CASCADE, related_name='venue_matches')
+    version = models.ForeignKey(ManuscriptVersion, null=True, blank=True, on_delete=models.SET_NULL,
+                                related_name='venue_matches')
     venue = models.ForeignKey(Venue, on_delete=models.CASCADE, related_name='manuscript_matches')
     venue_config = models.ForeignKey(
         VenueAgentConfig,
@@ -418,8 +505,12 @@ class VenueMatch(models.Model):
     class Meta:
         ordering = ['created_at', 'id']
         constraints = [
-            models.UniqueConstraint(fields=['manuscript', 'venue'], name='review_unique_ms_venue_match'),
+            models.UniqueConstraint(fields=['manuscript', 'venue', 'version'], name='review_unique_ms_venue_version_match'),
         ]
+
+    def save(self, *args, **kwargs):
+        _default_version(self)
+        super().save(*args, **kwargs)
 
 
 class VenueSubmission(models.Model):
@@ -437,6 +528,8 @@ class VenueSubmission(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     manuscript = models.ForeignKey(Manuscript, on_delete=models.PROTECT, related_name='venue_submissions')
+    version = models.ForeignKey(ManuscriptVersion, null=True, blank=True, on_delete=models.PROTECT,
+                                related_name='venue_submissions')
     venue = models.ForeignKey(Venue, on_delete=models.PROTECT, related_name='submissions')
     venue_config = models.ForeignKey(
         VenueAgentConfig,
@@ -460,6 +553,15 @@ class VenueSubmission(models.Model):
         indexes = [
             models.Index(fields=['venue', 'status', '-created_at'], name='review_vsub_venue_status_idx'),
         ]
+
+    def save(self, *args, **kwargs):
+        _default_version(self)
+        super().save(*args, **kwargs)
+
+    @property
+    def file_source(self):
+        """The text this submission was made with: its version, or the manuscript for older rows."""
+        return self.version if self.version_id else self.manuscript
 
 
 class EvidenceFinding(models.Model):

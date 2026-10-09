@@ -573,6 +573,45 @@ class AuthorAgentApiTests(TestCase):
 
     @patch('review.services.author_agents._chunk_numbered_lines')
     @patch('review.services.author_agents.ai_chat_json')
+    def test_one_malformed_chunk_does_not_discard_the_others(self, mock_chat, mock_chunker):
+        # 9 Oct production e2e: one bad answer from the 0.5b model threw away the
+        # whole readiness result. A failed chunk is retried once, then skipped.
+        manuscript = self._create_manuscript()
+        self._run_mechanical(manuscript)
+        mock_chunker.return_value = [
+            {'index': i, 'start_line': i, 'end_line': i, 'text': f'Chunk {i}'} for i in range(1, 4)
+        ]
+        good = ('mock-qwen', json.dumps({
+            'summary': 'A chunk.', 'topics': ['AI agents'], 'methods': [],
+            'contributions': [], 'limitations': [], 'findings': [],
+        }))
+        bad = ('mock-qwen', 'not json at all')
+        # chunk 1 good; chunk 2 bad twice (skipped); chunk 3 bad then good (retried).
+        mock_chat.side_effect = [good, bad, bad, bad, good]
+
+        response = self.client.post(
+            f'/api/author/manuscripts/{manuscript.id}/readiness/semantic/',
+            **self._auth(manuscript),
+        )
+        self.assertEqual(response.status_code, 202, response.content)
+        job = ReviewJob.objects.get(id=response.json()['job_id'])
+        from review.tasks import run_semantic_readiness_task
+        run_semantic_readiness_task(job.id, manuscript.id)
+
+        assessment = manuscript.readiness_assessments.filter(
+            status='completed',
+            engine_version__startswith='author-agents-v1:semantic-readiness',
+        ).order_by('-created_at').first()
+        self.assertIsNotNone(assessment)
+        self.assertNotIn('deterministic-fallback', assessment.engine_version)
+        self.assertEqual(assessment.summary['model'], 'mock-qwen')
+        self.assertEqual(assessment.summary['chunks_analyzed'], 2)
+        self.assertEqual(assessment.summary['chunks_total'], 3)
+        self.assertEqual(assessment.summary['chunks_failed'], 1)
+        self.assertEqual(mock_chat.call_count, 5)
+
+    @patch('review.services.author_agents._chunk_numbered_lines')
+    @patch('review.services.author_agents.ai_chat_json')
     def test_semantic_readiness_long_manuscript_samples_coverage(self, mock_chat, mock_chunker):
         manuscript = self._create_manuscript()
         self._run_mechanical(manuscript)

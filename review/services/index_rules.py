@@ -211,7 +211,7 @@ def run_rules(run, profile, budget, *, say=lambda m: None, fetcher=None, extract
     fetcher = fetcher or SafeFetcher(config)
     from .rules_escalation import Escalation
     escalation = Escalation.from_env()
-    provider = 'local Ollama' if config.ai_provider == 'ollama' else config.ai_provider
+    provider = {'ollama': 'local Ollama', 'shared_qwen': 'shared Qwen worker'}.get(config.ai_provider, config.ai_provider)
     say(f'Reading the rules of up to {min(limit, total_due)} of {total_due} {label} journals from their official '
         f'pages ({provider}, {escalation.describe()}; every rule must be quoted on the page)…')
     blocked_sites = set()

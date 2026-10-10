@@ -950,7 +950,7 @@ def extract_with_ai(pages, config, *, operation='venue_discovery_extraction', fe
             _model, raw = ai_chat_json(
                 prompt,
                 max_tokens=2200,
-                timeout=180,
+                timeout=_env_int('VENUE_DISCOVERY_AI_TIMEOUT', 180, 30, 1800),
                 force_provider=config.ai_provider or None,
                 operation=operation,
             )

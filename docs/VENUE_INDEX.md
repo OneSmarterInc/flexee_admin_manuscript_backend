@@ -152,6 +152,12 @@ The AI is local Ollama by default (`VENUE_INDEX_RULES_AI_PROVIDER=ollama`, model
 run stops with that reason instead of failing every journal. `VENUE_INDEX_RULES_PER_RUN` (40)
 is the per-run ceiling, together with the time limit.
 
+With `VENUE_INDEX_RULES_AI_PROVIDER=shared_qwen` the rules go to the shared Qwen worker over Redis
+instead. It is treated as a local model: one local retry, then Anthropic only if `VENUE_INDEX_ESCALATE`
+turns it on. A worker that does not answer within `VENUE_DISCOVERY_AI_TIMEOUT` is recorded as an
+error for that journal and retried; it does not stop the run. Keep `VENUE_DISCOVERY_MAX_AI_CHARS`
+small enough for the worker's context (5000 works for qwen2.5 0.5b).
+
 Journals with a DOAJ author-guidelines page are read first (those pages are usually readable).
 If one official URL cannot be read, the other (guidelines page or homepage) is tried.
 

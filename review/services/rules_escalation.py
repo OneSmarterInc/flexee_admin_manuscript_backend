@@ -33,6 +33,9 @@ FIELD_LABELS = {
     'submission_types': 'Submission types',
 }
 MOVE_TO_CLOUD_RATE = 0.20
+# Providers that run on our own hardware. Both get the local retry before any cloud escalation.
+LOCAL_PROVIDERS = frozenset({'ollama', 'shared_qwen'})
+SHARED_QWEN_LABEL = 'qwen2.5-shared'
 
 
 def _env_int(name, default, low, high):
@@ -106,7 +109,7 @@ class Escalation:
 
 def _plan(config, escalation):
     stages = ['local']
-    if config.ai_provider == 'ollama':
+    if config.ai_provider in LOCAL_PROVIDERS:
         stages.append('local_retry')
         if escalation.cloud_allowed():
             stages.append('cloud')
@@ -124,6 +127,8 @@ def _call(stage, pages, config, *, extractor, feedback, escalation):
     if config.ai_provider == 'ollama':
         model = model or vd.local_ai_settings()['model']
     raw = vd.extract_with_ai(pages, config, operation=OPERATIONS[stage], feedback=feedback, model=model)
+    if config.ai_provider == 'shared_qwen':
+        return config.ai_provider, SHARED_QWEN_LABEL, raw
     return config.ai_provider, model or os.getenv('ANTHROPIC_MODEL', ''), raw
 
 
@@ -161,6 +166,10 @@ def extract_with_escalation(record, pages, config, hints, *, escalation, min_con
             escalation.cloud_blocked, raw, error = f'AI budget reached: {exc}', None, f'AI budget reached: {exc}'
         except vd.DiscoveryExtractionError as exc:
             raw, error = {}, f'The model returned unusable output: {exc}'
+        except TimeoutError as exc:
+            # A busy shared worker can miss its wait on one journal. Record it and move on (the
+            # retry or the next journal may get through); it is not a reason to stop the run.
+            raw, error = None, f'The AI did not answer in time: {exc}'[:300]
         except Exception as exc:  # a cloud SDK error must not stop the run
             if stage != 'cloud':
                 raise

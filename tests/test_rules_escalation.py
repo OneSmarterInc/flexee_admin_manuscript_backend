@@ -232,3 +232,49 @@ def test_failing_retry_model_does_not_stop_the_run(monkeypatch):
     assert RulesAttempt.objects.get(record=second, stage='local_retry').model == 'qwen3:1.7b'
     first.refresh_from_db()
     assert first.rules_status in {'ready', 'incomplete'}
+
+
+# --- shared Qwen worker (10 Oct): same local retry and escalation path as Ollama -------------------
+
+@pytest.mark.django_db
+def test_shared_qwen_gets_the_local_retry(monkeypatch):
+    monkeypatch.setenv('VENUE_INDEX_RULES_AI_PROVIDER', 'shared_qwen')
+    item = journal()
+    fetcher, _ = make_fetcher(JOURNAL_PAGES)
+    extractor = Scripted(NAME_ONLY, journal_extraction)
+    run = run_rules(fetcher, extractor=extractor)
+    item.refresh_from_db()
+    assert extractor.calls == ['shared_qwen', 'shared_qwen']
+    assert stages(item) == [('local', 'inadequate'), ('local_retry', 'adequate')]
+    assert item.rules_status == 'ready' and run.rules_retried == 1
+
+
+@pytest.mark.django_db
+def test_shared_qwen_escalates_to_the_cloud_when_turned_on(monkeypatch):
+    monkeypatch.setenv('VENUE_INDEX_RULES_AI_PROVIDER', 'shared_qwen')
+    monkeypatch.setenv('VENUE_INDEX_ESCALATE', 'anthropic')
+    item = journal()
+    fetcher, _ = make_fetcher(JOURNAL_PAGES)
+    extractor = Scripted(NAME_ONLY, NAME_ONLY, cloud=journal_extraction)
+    run = run_rules(fetcher, extractor=extractor)
+    item.refresh_from_db()
+    assert extractor.calls == ['shared_qwen', 'shared_qwen', 'anthropic']
+    assert [s for s, _ in stages(item)] == ['local', 'local_retry', 'cloud']
+    assert run.rules_escalated == 1
+
+
+@pytest.mark.django_db
+def test_a_worker_timeout_is_recorded_and_retried_not_fatal(monkeypatch):
+    monkeypatch.setenv('VENUE_INDEX_RULES_AI_PROVIDER', 'shared_qwen')
+    item = journal()
+    fetcher, _ = make_fetcher(JOURNAL_PAGES)
+
+    def timeout():
+        raise TimeoutError('Shared Qwen worker did not return job x within 600 seconds.')
+
+    run = run_rules(fetcher, extractor=Scripted(timeout, journal_extraction))
+    item.refresh_from_db()
+    assert run.status == 'completed'
+    assert stages(item) == [('local', 'error'), ('local_retry', 'adequate')]
+    first = RulesAttempt.objects.get(record=item, attempt=1)
+    assert 'did not answer in time' in first.reason

@@ -29,6 +29,18 @@ def anthropic_model() -> str:
     return os.getenv('ANTHROPIC_MODEL', '').strip() or DEFAULT_ANTHROPIC_MODEL
 
 
+def anthropic_min_output_tokens() -> int:
+    """Floor on max_tokens for Anthropic calls (ANTHROPIC_MIN_OUTPUT_TOKENS, default 4000).
+
+    The review path's budgets (650 to 1,100 tokens) were sized for the small local model. Claude
+    writes fuller JSON, and a cut-off answer is invalid JSON, so the whole step falls back. Output is
+    billed only for tokens actually written, so a higher ceiling costs nothing extra by itself."""
+    try:
+        return max(256, min(int(os.getenv('ANTHROPIC_MIN_OUTPUT_TOKENS', '4000')), 32000))
+    except ValueError:
+        return 4000
+
+
 def anthropic_thinking_disabled() -> bool:
     """True unless ANTHROPIC_THINKING=on. The review path asks for short JSON answers."""
     return os.getenv('ANTHROPIC_THINKING', 'off').strip().lower() not in {'1', 'true', 'yes', 'on'}
@@ -150,6 +162,8 @@ def _normalise_result(result, prompt):
 
 def _tracked_call(provider, prompt, *, max_tokens, timeout, operation):
     model_hint = _model_hint(provider)
+    if provider == 'anthropic':
+        max_tokens = max(int(max_tokens or 0), anthropic_min_output_tokens())
     prompt_for_estimate = (
         ANTHROPIC_SYSTEM + '\n' + prompt if provider == 'anthropic' else prompt
     )

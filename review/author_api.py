@@ -1027,7 +1027,13 @@ def author_login(request):
     recent_failures = AuthorAuthEvent.objects.filter(
         remote_hash=rh, success=False, occurred_at__gte=timezone.now() - timedelta(minutes=window_minutes)
     ).count()
-    if recent_failures >= max_failures:
+    # A per-account limit as well, so rotating networks cannot brute-force one account.
+    max_account_failures = int(os.getenv('AUTHOR_LOGIN_MAX_FAILURES_PER_ACCOUNT', '20'))
+    account_failures = AuthorAuthEvent.objects.filter(
+        success=False, detail__email=email, detail__reason='invalid_credentials',
+        occurred_at__gte=timezone.now() - timedelta(minutes=window_minutes),
+    ).count()
+    if recent_failures >= max_failures or account_failures >= max_account_failures:
         AuthorAuthEvent.objects.create(remote_hash=rh, success=False, detail={'reason': 'rate_limited', 'action': 'login'})
         return JsonResponse({'detail': 'Too many failed login attempts. Try again later.'}, status=429)
 

@@ -95,6 +95,13 @@ class Command(BaseCommand):
                 'rate limits (journal search, claims, sign-in) count all traffic together. Set it to 127.0.0.1.'
             )
 
+        rules_provider = os.getenv('VENUE_INDEX_RULES_AI_PROVIDER', 'ollama').strip().lower() or 'ollama'
+        require(rules_provider in {'ollama', 'shared_qwen'},
+                f'VENUE_INDEX_RULES_AI_PROVIDER={rules_provider!r} must be ollama or shared_qwen '
+                '(journal rules are read by a local model only).')
+        if os.getenv('VENUE_INDEX_ESCALATE', 'off').strip().lower() != 'off':
+            warn('VENUE_INDEX_ESCALATE is not off, so journal rules may be sent to Anthropic.')
+
         private_media = os.getenv('PRIVATE_MEDIA_ROOT', '').strip()
         require(bool(private_media), 'PRIVATE_MEDIA_ROOT must be configured.')
         if private_media:

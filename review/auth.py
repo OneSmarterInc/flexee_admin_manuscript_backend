@@ -106,15 +106,28 @@ def verify_totp(secret, code, timestamp=None, window=1):
     return False
 
 
-def remote_hash(request):
-    remote = request.META.get('REMOTE_ADDR', 'unknown')
-    trusted_proxies = [p.strip() for p in os.getenv('TRUSTED_PROXIES', '').split(',') if p.strip()]
-    
-    if remote in trusted_proxies or '*' in trusted_proxies:
-        forwarded = request.META.get('HTTP_X_FORWARDED_FOR', '')
-        if forwarded:
-            remote = forwarded.split(',')[0].strip() or remote
+def client_address(request):
+    """The visitor's address, as seen by the nearest proxy we trust.
 
+    nginx appends the address it saw to whatever X-Forwarded-For the client sent, so the
+    left-most values are client-controlled. Walk the chain from the right and stop at the
+    first hop that is not a trusted proxy.
+    """
+    remote = request.META.get('REMOTE_ADDR', 'unknown')
+    trusted = {p.strip() for p in os.getenv('TRUSTED_PROXIES', '').split(',') if p.strip()}
+    if remote not in trusted and '*' not in trusted:
+        return remote
+    forwarded = [h.strip() for h in request.META.get('HTTP_X_FORWARDED_FOR', '').split(',') if h.strip()]
+    if '*' in trusted:  # development only; production refuses '*'
+        return forwarded[0] if forwarded else remote
+    for hop in reversed(forwarded):
+        if hop not in trusted:
+            return hop
+    return forwarded[0] if forwarded else remote
+
+
+def remote_hash(request):
+    remote = client_address(request)
     key = os.getenv('ADMIN_SESSION_SECRET', 'dev-session-key').encode('utf-8')
     return hmac.new(key, remote.encode('utf-8'), hashlib.sha256).hexdigest()
 

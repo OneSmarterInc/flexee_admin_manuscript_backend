@@ -27,6 +27,14 @@ EDITOR_STATUSES = {
 DECISION_STATUSES = {'revision_requested', 'accepted', 'rejected'}
 
 
+def _editor_submissions():
+    """Venue submissions an editor may see: only those the author has formally submitted.
+
+    A draft exists as soon as an author picks a venue; it stays private to the author.
+    """
+    return VenueSubmission.objects.filter(status__in=EDITOR_STATUSES)
+
+
 def _feedback_payload(item):
     return {
         'id': str(item.id),
@@ -208,7 +216,7 @@ def admin_activate_venue_config(request, venue_id, config_id):
 @require_GET
 @require_admin
 def admin_venue_submissions(request):
-    queryset = VenueSubmission.objects.select_related(
+    queryset = _editor_submissions().select_related(
         'manuscript', 'venue', 'venue__organization', 'venue_config'
     ).all()
 
@@ -220,10 +228,7 @@ def admin_venue_submissions(request):
     venue_id = str(request.GET.get('venue_id', '')).strip()
     status = str(request.GET.get('status', '')).strip()
     query = str(request.GET.get('q', '')).strip()
-    scope = str(request.GET.get('scope', 'editor')).strip()
 
-    if scope == 'editor':
-        queryset = queryset.filter(status__in=EDITOR_STATUSES)
     if venue_id:
         queryset = queryset.filter(venue_id=venue_id)
     if status:
@@ -236,7 +241,7 @@ def admin_venue_submissions(request):
             | Q(venue__name__icontains=query)
         )
 
-    counts_base = VenueSubmission.objects.all()
+    counts_base = _editor_submissions()
     if not user.platform_superuser:
         counts_base = counts_base.filter(venue__organization_id__in=org_ids)
     if venue_id:
@@ -261,7 +266,7 @@ def admin_venue_submissions(request):
 @require_admin
 def admin_venue_submission_detail(request, submission_id):
     try:
-        item = VenueSubmission.objects.select_related(
+        item = _editor_submissions().select_related(
             'manuscript', 'venue', 'venue__organization', 'venue_config'
         ).prefetch_related('evidence_findings', 'editor_feedback', 'requirement_files').get(id=submission_id)
     except VenueSubmission.DoesNotExist:
@@ -286,7 +291,7 @@ def admin_venue_submission_detail(request, submission_id):
 @require_admin
 def admin_start_venue_review(request, submission_id):
     try:
-        item = VenueSubmission.objects.select_related('venue').get(id=submission_id)
+        item = _editor_submissions().select_related('venue').get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
 
@@ -322,7 +327,7 @@ def admin_start_venue_review(request, submission_id):
 @require_admin
 def admin_venue_submission_decision(request, submission_id):
     try:
-        item = VenueSubmission.objects.select_related('manuscript', 'venue').get(id=submission_id)
+        item = _editor_submissions().select_related('manuscript', 'venue').get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
 
@@ -417,7 +422,7 @@ def admin_venue_submission_decision(request, submission_id):
 @require_admin
 def admin_submission_requirement_download(request, submission_id, requirement_key):
     try:
-        item = VenueSubmission.objects.select_related('venue').get(id=submission_id)
+        item = _editor_submissions().select_related('venue').get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
 
@@ -457,7 +462,7 @@ def admin_submission_requirement_download(request, submission_id, requirement_ke
 
 def _venue_submission_manuscript_response(request, submission_id, audit_action):
     try:
-        item = VenueSubmission.objects.select_related('manuscript', 'venue').get(id=submission_id)
+        item = _editor_submissions().select_related('manuscript', 'venue').get(id=submission_id)
     except VenueSubmission.DoesNotExist:
         return JsonResponse({'detail': 'Venue submission not found'}, status=404)
 

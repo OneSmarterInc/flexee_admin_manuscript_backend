@@ -123,13 +123,39 @@ def _call(stage, pages, config, *, extractor, feedback, escalation):
         config = replace(config, ai_provider='anthropic')
     if extractor is not None:
         return config.ai_provider, '', extractor(pages, config)
+    if stage != 'cloud' and config.ai_provider not in LOCAL_PROVIDERS:
+        # Only the explicit cloud stage may leave our hardware.
+        raise vd.DiscoveryModelUnavailable(f'{config.ai_provider!r} is not a local model provider.')
     model = escalation.retry_model if stage == 'local_retry' and escalation.retry_model else None
     if config.ai_provider == 'ollama':
         model = model or vd.local_ai_settings()['model']
-    raw = vd.extract_with_ai(pages, config, operation=OPERATIONS[stage], feedback=feedback, model=model)
+    try:
+        raw = vd.extract_with_ai(pages, config, operation=OPERATIONS[stage], feedback=feedback, model=model)
+    except (vd.DiscoveryExtractionError, TimeoutError):
+        raise
+    except Exception as exc:
+        if config.ai_provider == 'shared_qwen' and _shared_qwen_down(exc):
+            # Queue off, Redis unreachable or the prompt cannot fit: every journal would fail the same way.
+            raise vd.DiscoveryModelUnavailable(f'Shared Qwen worker unavailable: {exc}') from exc
+        raise
     if config.ai_provider == 'shared_qwen':
         return config.ai_provider, SHARED_QWEN_LABEL, raw
     return config.ai_provider, model or os.getenv('ANTHROPIC_MODEL', ''), raw
+
+
+def _shared_qwen_down(exc):
+    try:
+        import redis
+        if isinstance(exc, redis.exceptions.RedisError):
+            return True
+    except ImportError:  # pragma: no cover
+        pass
+    if isinstance(exc, OSError):  # connection refused, DNS and the like
+        return True
+    text = str(exc)
+    return isinstance(exc, RuntimeError) and any(
+        marker in text for marker in ('queue is disabled', 'too large for the configured local',
+                                      'context is misconfigured'))
 
 
 def extract_with_escalation(record, pages, config, hints, *, escalation, min_confidence, extractor=None, run=None):

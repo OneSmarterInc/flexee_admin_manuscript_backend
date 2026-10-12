@@ -4,7 +4,9 @@ Policy carried into code:
   * the order rests on fit and compliance distance only, never on ratings, journal metrics or
     predicted acceptance; rationales are generated from the ordering key, not by an AI model;
   * three bands, never mixed: eligible with no changes, eligible with changes, needs changes;
-    inside a band, ascending compliance distance, then fit; ineligible venues are listed separately;
+    inside a band, the spec key: effort class (edits before a new section before a new study),
+    then fit band (strong before moderate), then the amount of change, then topic similarity,
+    then the venue name for exact ties; ineligible venues are listed separately;
   * one venue at a time (simultaneous submission is not allowed);
   * a decline never advances the plan: it pauses and asks whether the author revised;
   * a venue that declined is never proposed again for the same manuscript;
@@ -20,7 +22,7 @@ import os
 from django.db import transaction
 from django.utils import timezone
 
-from .gap_classes import CLASS_KIND, CLASS_LABEL, compliance_distance, effort_of, items_for, preparation_items
+from .gap_classes import CLASS_KIND, CLASS_LABEL, CLASS_RANK, compliance_distance, effort_of, items_for, preparation_items
 from .models import ManuscriptVersion, PlanEvent, SubmissionPlan, SubmissionPlanStep, Venue
 
 METHOD_VERSION = 'plan-v2'
@@ -84,19 +86,27 @@ def assess(match, config):
         band = 2
     else:
         band = 3
-    cls, _count, _quantity = effort_of(items)
+    cls, count, quantity = effort_of(items)
     return {
         'match': match, 'venue': match.venue, 'items': items, 'band': band, 'class': cls,
+        'count': count, 'quantity': quantity,
         'distance': compliance_distance(items), 'similarity': sim,
         'fit_band': 'strong' if (sim is not None and sim >= config['strong_fit']) else 'moderate',
     }, None
 
 
+FIT_BAND_RANK = {'strong': 0, 'moderate': 1}
+EFFORT_PHRASE = {'ready': 'no changes', 'edit': 'edits', 'section': 'a new section', 'study': 'a new study'}
+
+
 def order_key(entry):
-    """Band, then compliance distance, then fit (the match score). Nothing else."""
-    return (entry['band'], entry['distance'],
+    """Band, then the spec key inside the band. Nothing else: no ratings, metrics or tiers.
+
+    (effort class, fit band, how many changes of that class, their total amount, -similarity, name)
+    """
+    return (entry['band'], CLASS_RANK.get(entry['class'], CLASS_RANK['section']),
+            FIT_BAND_RANK.get(entry['fit_band'], 1), entry.get('count', 0), entry.get('quantity', 0),
             -(entry['similarity'] if entry['similarity'] is not None else -1.0),
-            entry['match'].shortlist_rank if entry['match'].shortlist_rank is not None else 10 ** 6,
             entry['venue'].name.lower())
 
 
@@ -122,8 +132,14 @@ def rationale_for(number, entry, previous):
     if previous is not None:
         if entry['band'] > previous['band']:
             text += f' Placed after the "{BAND_TEXT[previous["band"]].lower()}" venues.'
-        elif entry['distance'] > previous['distance']:
-            text += ' Placed after the venue before it in our order because it needs more change.'
+        elif CLASS_RANK.get(entry['class'], 2) > CLASS_RANK.get(previous['class'], 2):
+            text += (f' Placed after the venue before it in our order because it needs '
+                     f'{EFFORT_PHRASE.get(entry["class"], "more work")} rather than '
+                     f'{EFFORT_PHRASE.get(previous["class"], "less")}.')
+        elif FIT_BAND_RANK.get(entry['fit_band'], 1) > FIT_BAND_RANK.get(previous['fit_band'], 1):
+            text += ' Same kind of change as the venue before it in our order; its scope is a less close match.'
+        elif (entry.get('count', 0), entry.get('quantity', 0)) > (previous.get('count', 0), previous.get('quantity', 0)):
+            text += ' Placed after the venue before it in our order because it needs more change of the same kind.'
         elif (entry['similarity'] or 0) < (previous['similarity'] or 0):
             text += ' Same amount of change as the venue before it in our order; its scope is slightly less close.'
         else:
@@ -375,6 +391,8 @@ def skip(plan_id, step_id, *, note=''):
     plan, step = _lock(plan_id, step_id)
     _require_status(plan, 'draft', 'active', 'paused')
     _require(step, 'queued', 'current')
+    if not (note or '').strip():
+        raise PlanError('Say why you are skipping this venue.', 'needs_reason', 400)
     step.skip_reason = (note or '').strip()[:2000]
     _move(step, 'skipped', 'skipped', note=note, fields=('skip_reason',))
     if plan.status == 'active':
@@ -455,6 +473,8 @@ def answer_revision(plan_id, *, answer, version_number=None, note=''):
     if step is None:
         raise PlanError('There is no declined venue waiting for an answer.', 'bad_state')
     if answer == 'unchanged':
+        if not (note or '').strip():
+            raise PlanError('Say why the next venue should get the manuscript unchanged.', 'needs_reason', 400)
         step.revision_answer = 'unchanged'
         step.save(update_fields=['revision_answer', 'updated_at'])
         _log(plan, 'answered_unchanged', step=step, note=note)

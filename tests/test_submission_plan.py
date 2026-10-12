@@ -292,7 +292,10 @@ def test_not_revised_makes_the_next_step_current_unchanged():
     client, author = author_client()
     m, _ = setup_plan(client, author)
     plan, _first, _body = decline_first(client, m)
-    body = post(client, f'/api/author/plans/{plan["id"]}/revision/', answer='unchanged').json()['plan']
+    no_reason = post(client, f'/api/author/plans/{plan["id"]}/revision/', answer='unchanged')
+    assert no_reason.status_code == 400 and no_reason.json()['code'] == 'needs_reason'
+    body = post(client, f'/api/author/plans/{plan["id"]}/revision/', answer='unchanged',
+                note='Desk reject on scope, no reviewer comments.').json()['plan']
     assert body['status'] == 'active' and body['steps'][1]['state'] == 'current'
     assert body['steps'][0]['revision_answer'] == 'unchanged'
 
@@ -448,3 +451,62 @@ def test_no_odds_or_rating_language_anywhere_in_the_plan():
     text = json.dumps(payload).lower()
     for key in ('probability', 'likelihood', 'odds', 'score'):
         assert f'"{key}' not in text
+
+
+# --- 12 Oct audit: order inside a band follows the spec key; reasons are required ------------------
+
+from types import SimpleNamespace  # noqa: E402
+
+from review.submission_plan import order_key, rationale_for  # noqa: E402
+
+
+def _entry(name, *, band=2, cls='edit', fit='strong', count=1, quantity=0, sim=0.8, distance=1, works=0):
+    venue_obj = SimpleNamespace(name=name, works_count=works)
+    return {'venue': venue_obj, 'match': SimpleNamespace(shortlist_rank=None), 'band': band, 'class': cls,
+            'fit_band': fit, 'count': count, 'quantity': quantity, 'similarity': sim, 'distance': distance,
+            'items': []}
+
+
+def _order(*entries):
+    return [e['venue'].name for e in sorted(entries, key=order_key)]
+
+
+def test_inside_a_band_edits_come_before_a_new_section_whatever_the_count():
+    four_edits = _entry('Four edits', cls='edit', count=4, distance=4)
+    one_section = _entry('One section', cls='section', count=1, distance=3)
+    assert _order(one_section, four_edits) == ['Four edits', 'One section']
+
+
+def test_bands_still_come_first():
+    needs_changes_edit = _entry('Band three', band=3, cls='edit')
+    eligible_section = _entry('Band two', band=2, cls='section')
+    assert _order(needs_changes_edit, eligible_section) == ['Band two', 'Band three']
+
+
+def test_strong_fit_before_moderate_within_a_class_then_amount_then_similarity():
+    moderate = _entry('Moderate', fit='moderate', sim=0.9)
+    strong_more = _entry('Strong, more edits', count=2, sim=0.7)
+    strong_less = _entry('Strong, one edit', count=1, sim=0.6)
+    strong_closer = _entry('Strong, one edit, closer', count=1, sim=0.75)
+    assert _order(moderate, strong_more, strong_less, strong_closer) == [
+        'Strong, one edit, closer', 'Strong, one edit', 'Strong, more edits', 'Moderate']
+
+
+def test_ties_are_broken_by_name_and_journal_metrics_do_not_matter():
+    a = _entry('Alpha', works=10)
+    b = _entry('Beta', works=100000)
+    assert _order(b, a) == ['Alpha', 'Beta']
+
+
+def test_rationale_names_the_kind_of_change():
+    first, second = _entry('A', cls='edit'), _entry('B', cls='section')
+    assert 'a new section rather than edits' in rationale_for(2, second, first)
+
+
+@pytest.mark.django_db
+def test_skip_needs_a_reason():
+    client, author = author_client()
+    m, _ = setup_plan(client, author)
+    plan = activate(client, generate(client, m))
+    response = step(client, plan, plan['steps'][0], 'skip')
+    assert response.status_code == 400 and response.json()['code'] == 'needs_reason'

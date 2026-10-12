@@ -4,14 +4,14 @@
     GET    /api/author/manuscripts/<id>/plan/               the current plan with steps
     POST   /api/author/plans/<id>/activate/
     PATCH  /api/author/plans/<id>/reorder/                  {"steps": [step_id, ...]} in the new order
-    POST   /api/author/plans/<id>/steps/<id>/skip/          {"note": "..."} optional
+    POST   /api/author/plans/<id>/steps/<id>/skip/          {"note": "..."} required (why)
     POST   /api/author/plans/<id>/steps/<id>/outcome/       {"outcome": accepted|declined|withdrawn, "note": "..."}
     POST   /api/author/manuscripts/<id>/versions/           upload a revision (manuscript versions API)
 
 Beyond the spec's list, needed by the same state machine:
     POST   /api/author/plans/<id>/steps/<id>/submitted/     for a venue outside Flexee (Flexee venues update it)
     POST   /api/author/plans/<id>/steps/<id>/remove/        take a venue out of the plan
-    POST   /api/author/plans/<id>/revision/                 after a decline: {"answer": revised|unchanged, "version": n}
+    POST   /api/author/plans/<id>/revision/                 after a decline: {"answer": revised|unchanged, "version": n, "note": why (required for unchanged)}
     POST   /api/author/plans/<id>/abandon/                  end the plan
     GET    /api/admin/plans/?manuscript=<id>                read-only, platform admins (support)
 

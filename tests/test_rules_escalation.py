@@ -278,3 +278,54 @@ def test_a_worker_timeout_is_recorded_and_retried_not_fatal(monkeypatch):
     assert stages(item) == [('local', 'error'), ('local_retry', 'adequate')]
     first = RulesAttempt.objects.get(record=item, attempt=1)
     assert 'did not answer in time' in first.reason
+
+
+# --- 12 Oct audit: rules never leave our hardware unless the cloud stage is turned on ----------------
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('provider', ['auto', 'anthropic', 'shared-qwen', 'qwen'])
+def test_a_non_local_rules_provider_stops_the_run(monkeypatch, provider):
+    monkeypatch.setenv('VENUE_INDEX_RULES_AI_PROVIDER', provider)
+    monkeypatch.setenv('ANTHROPIC_API_KEY', 'sk-test')
+    journal()
+    fetcher, _ = make_fetcher(JOURNAL_PAGES)
+    called = []
+    monkeypatch.setattr(vd, 'extract_with_ai', lambda *a, **k: called.append(1) or journal_extraction())
+    run = run_rules(fetcher, extractor=None)
+    assert called == [] and run.rules_attempted == 0 and not RulesAttempt.objects.exists()
+    assert not AIUsageEvent.objects.filter(provider='anthropic').exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('error', [
+    RuntimeError('Shared Qwen queue is disabled.'),
+    RuntimeError('Manuscript review prompt is too large for the configured local context. Estimated 8,157'),
+    ConnectionRefusedError('Connection refused'),
+])
+def test_shared_qwen_outage_stops_the_run_instead_of_failing_every_journal(monkeypatch, error):
+    monkeypatch.setenv('VENUE_INDEX_RULES_AI_PROVIDER', 'shared_qwen')
+    journal('One', openalex_id='S1')
+    journal('Two', openalex_id='S2', homepage='https://two.example/')
+    fetcher, _ = make_fetcher({**JOURNAL_PAGES, 'https://two.example': '<html><body><p>Two.</p></body></html>'})
+
+    def down(*a, **k):
+        raise error
+    monkeypatch.setattr(vd, 'extract_with_ai', down)
+    run = run_rules(fetcher, extractor=None)
+    assert run.rules_attempted == 0
+    assert not IndexedVenue.objects.filter(rules_status='failed').exists()
+
+
+@pytest.mark.django_db
+def test_shared_qwen_page_text_is_capped_to_its_context(monkeypatch):
+    monkeypatch.setenv('VENUE_INDEX_RULES_AI_PROVIDER', 'shared_qwen')
+    journal()
+    fetcher, _ = make_fetcher(JOURNAL_PAGES)
+    seen = []
+
+    def fake_extract(pages, config, **k):
+        seen.append(config.max_ai_chars)
+        return journal_extraction()
+    monkeypatch.setattr(vd, 'extract_with_ai', fake_extract)
+    run_rules(fetcher, extractor=None)
+    assert seen and all(chars == 5000 for chars in seen)

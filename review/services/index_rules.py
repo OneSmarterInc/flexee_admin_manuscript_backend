@@ -208,6 +208,21 @@ def run_rules(run, profile, budget, *, say=lambda m: None, fetcher=None, extract
     config = replace(DiscoveryConfig.from_env(),
                      ai_provider=os.getenv('VENUE_INDEX_RULES_AI_PROVIDER', 'ollama').strip().lower() or 'ollama',
                      max_pages_per_run=len(due) * 6 + 10)
+    from .rules_escalation import LOCAL_PROVIDERS
+    if extractor is None and config.ai_provider not in LOCAL_PROVIDERS:
+        # Rules are read on our own hardware only. A typo or 'auto' must never fall through to Anthropic.
+        from .venue_index import _record_error
+        exc = RulesModelUnavailable(
+            f'VENUE_INDEX_RULES_AI_PROVIDER={config.ai_provider!r} is not a local model; '
+            f'use one of {", ".join(sorted(LOCAL_PROVIDERS))}.')
+        _record_error(run, 'ai', exc)
+        run.save()
+        say(f'Stopped: {exc}')
+        return
+    if config.ai_provider == 'shared_qwen':
+        # The shared Qwen worker has a small context (about 2,000 prompt tokens): fit the page text to it.
+        config = replace(config, max_ai_chars=min(
+            config.max_ai_chars, _env_int('VENUE_INDEX_SHARED_QWEN_MAX_AI_CHARS', 5000, 1000, 30000)))
     fetcher = fetcher or SafeFetcher(config)
     from .rules_escalation import Escalation
     escalation = Escalation.from_env()

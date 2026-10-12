@@ -2772,7 +2772,7 @@ def author_job_status(request, job_id):
     except ReviewJob.DoesNotExist:
         return JsonResponse({'detail': 'Job not found'}, status=404)
         
-    if job.job_type in ('semantic_readiness', 'semantic_matches'):
+    if job.job_type in ('semantic_readiness', 'semantic_matches', 'submission_plan'):
         try:
             item = Manuscript.objects.get(id=job.reference_id)
         except Manuscript.DoesNotExist:
@@ -2794,7 +2794,9 @@ def author_job_status(request, job_id):
         return JsonResponse({'detail': 'Job not found'}, status=404)
 
     public_error = None
-    if job.status == 'failed':
+    if job.status == 'failed' and job.job_type == 'submission_plan':
+        public_error = job.error_message or 'The plan could not be generated. Please try again.'  # author-facing
+    elif job.status == 'failed':
         public_error = (
             'Background processing timed out. Please try again.'
             if 'timed out' in str(job.error_message or '').lower()

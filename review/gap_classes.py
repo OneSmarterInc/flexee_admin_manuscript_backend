@@ -12,6 +12,12 @@ Unknown gaps are 'section' and marked unclassified, so they are never treated as
 CLASS_RANK = {'ready': 0, 'edit': 1, 'section': 2, 'study': 3}
 CLASS_LABEL = {'ready': 'Ready', 'edit': 'Edits', 'section': 'New section', 'study': 'New study'}
 
+# Compliance distance (submission plan spec, section 5): a count of required changes weighted by
+# kind. A length or formatting change is light, a missing section or declaration is medium, a
+# methodological or scope change is heavy. Tune these from evidence, here and nowhere else.
+CLASS_KIND = {'edit': 'light', 'section': 'medium', 'study': 'heavy'}
+COMPLIANCE_WEIGHTS = {'light': 1, 'medium': 3, 'heavy': 9}
+
 
 def _int(value):
     try:
@@ -76,3 +82,23 @@ def effort_of(items):
     hardest = max(items, key=lambda i: CLASS_RANK.get(i['class'], 2))['class']
     same = [i for i in items if i['class'] == hardest]
     return hardest, len(same), sum(i.get('quantity') or 0 for i in same)
+
+
+def compliance_distance(items):
+    """Sum of the weights of the manuscript changes (preparation items such as a cover letter do not count)."""
+    return sum(COMPLIANCE_WEIGHTS[CLASS_KIND.get(i.get('class'), 'medium')] for i in items
+               if i.get('class') in CLASS_KIND or i.get('class') not in {'prepare', 'out'})
+
+
+def preparation_items(config):
+    """The venue's required submission items (cover letter, data statement, ...), as things to prepare.
+    They are listed with the step's required changes but are not changes to the manuscript, so they
+    never move a venue out of the 'no changes' band."""
+    out = []
+    for entry in (getattr(config, 'required_submission_items', None) or []):
+        if not isinstance(entry, dict) or entry.get('required') is False:
+            continue
+        label = str(entry.get('label') or entry.get('name') or '').strip()
+        if label:
+            out.append(item('venue_item', f'Prepare for the submission form: {label}.', 'prepare'))
+    return out

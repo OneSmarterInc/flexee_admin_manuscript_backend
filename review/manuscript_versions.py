@@ -62,9 +62,10 @@ def version_locked(manuscript):
         return manuscript.venue_submissions.exclude(status__in=EDITABLE_SUBMISSION_STATUSES).exists()
     if locked_submissions(manuscript.current_version_id).exists():
         return True
-    # An active plan was built against this text: a change is a new version, not an overwrite.
+    # A live plan was built against this text: a change is a new version, not an overwrite.
     from .models import SubmissionPlan
-    return SubmissionPlan.objects.filter(built_on_version_id=manuscript.current_version_id, status='active').exists()
+    return SubmissionPlan.objects.filter(manuscript_version_id=manuscript.current_version_id,
+                                         status__in=SubmissionPlan.LIVE_STATUSES).exists()
 
 
 def file_in_use(name, *, exclude_version_id=None):
@@ -91,7 +92,7 @@ def create_new_version(manuscript, *, upload, content_bytes, sha256, change_note
     number = (manuscript.versions.aggregate(top=Max('number'))['top'] or 0) + 1
     version = ManuscriptVersion(
         manuscript=manuscript, number=number, source='upload', change_note=change_note[:5000],
-        revised_after=revised_after, filename=upload.name, bytes=content_bytes, sha256=sha256,
+        revised_after=revised_after, supersedes=manuscript.current_version, filename=upload.name, bytes=content_bytes, sha256=sha256,
         title=fields.get('title') or manuscript.title,
         abstract=fields.get('abstract', manuscript.abstract) or '',
         keywords=fields.get('keywords', manuscript.keywords) or [],
@@ -146,6 +147,7 @@ def version_payload(version, *, current_id=None):
         'is_current': str(version.id) == str(current_id),
         'content_purged': bool(version.content_purged_at),
         'revised_after_submission_id': str(version.revised_after_id) if version.revised_after_id else None,
+        'supersedes': version.supersedes.number if version.supersedes_id else None,
         'submissions': [{'id': str(s.id), 'venue': s.venue.name, 'status': s.status} for s in submissions],
         'readiness_count': version.readiness_assessments.count(),
         'match_count': VenueMatch.objects.filter(version=version).count(),

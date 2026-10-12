@@ -29,6 +29,11 @@ def anthropic_model() -> str:
     return os.getenv('ANTHROPIC_MODEL', '').strip() or DEFAULT_ANTHROPIC_MODEL
 
 
+def anthropic_thinking_disabled() -> bool:
+    """True unless ANTHROPIC_THINKING=on. The review path asks for short JSON answers."""
+    return os.getenv('ANTHROPIC_THINKING', 'off').strip().lower() not in {'1', 'true', 'yes', 'on'}
+
+
 ANTHROPIC_SYSTEM = (
     'You are an expert scholarly manuscript analyst. '
     'You always respond with valid JSON exactly matching the requested schema. '
@@ -62,24 +67,31 @@ def _anthropic_chat_json(
     model = anthropic_model()
     client = _anthropic_sdk.Anthropic(api_key=api_key, timeout=timeout)
 
+    request = {
+        'model': model,
+        'max_tokens': max_tokens,
+        'system': ANTHROPIC_SYSTEM,
+        'messages': [{'role': 'user', 'content': prompt}],
+    }
+    if anthropic_thinking_disabled():
+        # Claude 5.5 models think by default, and thinking tokens count toward max_tokens: with our
+        # small JSON budgets the answer can stop after the thinking block, before any text.
+        request['thinking'] = {'type': 'disabled'}
     try:
-        message = client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            system=ANTHROPIC_SYSTEM,
-            messages=[{'role': 'user', 'content': prompt}],
-        )
+        message = client.messages.create(**request)
     except Exception as exc:
         raise RuntimeError(f'Anthropic API call failed: {exc}') from exc
 
-    raw = ''
-    for block in message.content:
-        if hasattr(block, 'text'):
-            raw += block.text
+    # Select text blocks by type: a response can begin with thinking blocks.
+    raw = ''.join(getattr(block, 'text', '') or '' for block in message.content
+                  if getattr(block, 'type', 'text') == 'text')
 
     raw = _strip_fences(raw.strip())
+    stop_reason = getattr(message, 'stop_reason', None)
+    if stop_reason == 'refusal':
+        raise RuntimeError('Anthropic declined this request (stop_reason: refusal).')
     if not raw:
-        raise RuntimeError('Anthropic returned an empty response.')
+        raise RuntimeError(f'Anthropic returned an empty response (stop_reason: {stop_reason}).')
 
     if return_usage:
         usage = getattr(message, 'usage', None)

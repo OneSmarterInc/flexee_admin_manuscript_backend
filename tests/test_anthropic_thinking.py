@@ -58,3 +58,19 @@ def test_an_empty_or_refused_answer_names_the_stop_reason(monkeypatch):
     install_fake_sdk(monkeypatch, reply(stop_reason='refusal'))
     with pytest.raises(RuntimeError, match='declined'):
         ai_provider._anthropic_chat_json('prompt', max_tokens=650)
+
+
+@pytest.mark.django_db
+def test_anthropic_calls_get_room_for_a_full_answer(monkeypatch):
+    """12 Oct: Haiku's readiness answer was cut off at 650 tokens (invalid JSON)."""
+    monkeypatch.setenv('AI_PROVIDER', 'anthropic')
+    monkeypatch.setenv('AI_COST_ENFORCEMENT_ENABLED', 'false')
+    monkeypatch.delenv('ANTHROPIC_MIN_OUTPUT_TOKENS', raising=False)
+    messages = install_fake_sdk(monkeypatch, reply(SimpleNamespace(type='text', text='{"ok": true}')))
+    ai_provider.ai_chat_json('prompt', max_tokens=650, operation='semantic_readiness')
+    assert messages.calls[-1]['max_tokens'] == 4000
+    monkeypatch.setenv('ANTHROPIC_MIN_OUTPUT_TOKENS', '1500')
+    ai_provider.ai_chat_json('prompt', max_tokens=650, operation='semantic_readiness')
+    assert messages.calls[-1]['max_tokens'] == 1500
+    ai_provider.ai_chat_json('prompt', max_tokens=6000, operation='semantic_readiness')
+    assert messages.calls[-1]['max_tokens'] == 6000  # a larger request is never reduced

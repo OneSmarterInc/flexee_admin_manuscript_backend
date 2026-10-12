@@ -242,6 +242,33 @@ def run_semantic_matching_task(job_id, manuscript_id, venue_ids=None):
         job.completed_at = timezone.now()
         job.save(update_fields=['status', 'error_message', 'completed_at'])
 
+@monitor_background_task('submission_plan')
+def run_submission_plan_task(job_id, manuscript_id):
+    """Generate a submission plan (spec 7). A PlanError is author-facing and stored as the job's error."""
+    from .submission_plan import PlanError, generate_plan
+    job = ReviewJob.objects.get(id=job_id)
+    job.status = 'processing'
+    job.save(update_fields=['status', 'updated_at'])
+    try:
+        generate_plan(Manuscript.objects.get(id=manuscript_id))
+        job.status = 'completed'
+        job.completed_at = timezone.now()
+        job.progress = 100
+        job.save(update_fields=['status', 'completed_at', 'progress'])
+    except PlanError as e:
+        job.status = 'failed'
+        job.error_message = str(e)
+        job.completed_at = timezone.now()
+        job.save(update_fields=['status', 'error_message', 'completed_at'])
+    except Exception as e:
+        capture_exception(e, component='django_q', operation='submission_plan',
+                          tags={'job_type': 'submission_plan'})
+        job.status = 'failed'
+        job.error_message = 'The plan could not be generated. Please try again.'
+        job.completed_at = timezone.now()
+        job.save(update_fields=['status', 'error_message', 'completed_at'])
+
+
 @monitor_background_task('venue_assessment')
 def run_venue_assessment_task(job_id, submission_id):
     job = ReviewJob.objects.get(id=job_id)

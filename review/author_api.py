@@ -1292,6 +1292,9 @@ def author_password_reset_confirm(request):
     author = _author_from_reset_token(str(data.get('token', '')))
     if not author:
         return JsonResponse({'detail': 'This reset link is invalid or has expired. Request a new one.', 'code': 'invalid_token'}, status=400)
+    if data.get('check'):
+        # Audit item 31: the page checks its link with a POST, so the token never sits in a GET URL.
+        return JsonResponse({'valid': True, 'email': author.email})
     new = str(data.get('new_password', ''))
     confirm = str(data.get('confirm_password', ''))
     if not new or not confirm:

@@ -20,8 +20,13 @@ from tests.test_author_dashboard_actions import author_client, env, make_manuscr
 BANNED = re.compile(r'probab|likel|chance|odds|%|top tier|\bA\*|ranked|rating', re.I)
 
 
-def venue(name, slug, *, rules=None, types=('Practitioner article',), items=None):
+def venue(name, slug, *, rules=None, types=('Practitioner article',), items=None, tier=Venue.TIER_VERIFIED_INDEX):
+    """Verified from official pages by default: the author sends outside Flexee and marks it sent.
+    A claimed venue's editors work on Flexee, so its step can only come from a real packet."""
     v = make_venue(name, slug, types=types)
+    if v.trust_tier != tier:
+        v.trust_tier = tier
+        v.save(update_fields=['trust_tier'])
     config = v.agent_configs.get()
     if rules:
         config.structured_desk_rejection_rules = rules

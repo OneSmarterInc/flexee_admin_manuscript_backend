@@ -444,11 +444,20 @@ def remove(plan_id, step_id, *, note=''):
     return plan
 
 
+def reviews_on_flexee(venue):
+    """A venue whose own editors work on Flexee: the author sends the packet here and the editor decides here."""
+    return venue.trust_tier == Venue.TIER_CLAIMED
+
+
 @transaction.atomic
 def mark_submitted(plan_id, step_id, *, venue_submission=None, actor='author'):
     plan, step = _lock(plan_id, step_id)
     _require_status(plan, 'active')
     _require(step, 'current')
+    if venue_submission is None and reviews_on_flexee(step.venue):
+        # "I have sent it" would skip the editor: the step must come from a real Flexee packet.
+        raise PlanError(f'{step.venue.name} is on Flexee: send the packet from its venue page, and this plan '
+                        'updates by itself.', 'send_packet', 409)
     if venue_submission is None:
         _require_current_version(plan)  # a Flexee submission records the version it actually carries
     step.submitted_version_id = (venue_submission.version_id if venue_submission and venue_submission.version_id
@@ -634,7 +643,8 @@ def step_payload(step):
         'order': step.order,
         'state': step.state,
         'state_label': step.get_state_display(),
-        'venue': {'id': str(venue.id), 'name': venue.name, 'slug': venue.slug, 'trust': _venue_trust_payload(venue)},
+        'venue': {'id': str(venue.id), 'name': venue.name, 'slug': venue.slug, 'trust': _venue_trust_payload(venue),
+                  'on_flexee': reviews_on_flexee(venue)},
         'open_calls': _open_calls(step),
         'rationale': _plain_rationale(step.rationale),
         'band': step.band,

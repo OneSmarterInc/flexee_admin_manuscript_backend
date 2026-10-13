@@ -93,11 +93,12 @@ def _editor_submission_payload(item, *, detail=False):
         'retention_purged_at': item.retention_purged_at.isoformat() if item.retention_purged_at else None,
     }
     if detail:
-        full = _submission_payload(item)
+        full = _submission_payload(item, for_editor=True)
         payload.update({
             'packet': full['packet'],
             'editorial_brief': full['editorial_brief'],
             'evidence': full['evidence'],
+            'requirements': full['requirements'],  # the cover letter and files the author gave this venue
             'venue_config': _venue_config_payload(item.venue_config),
             'feedback': [_feedback_payload(row) for row in item.editor_feedback.all()],
         })
@@ -350,22 +351,26 @@ def admin_venue_submission_decision(request, submission_id):
         )
     if decision in {'rejected', 'revision_requested'} and not note:
         return JsonResponse({'detail': 'A note is required for rejection or revision request'}, status=400)
-    if item.status not in {'submitted', 'under_review', 'revision_requested'}:
-        return JsonResponse(
-            {'detail': f'Cannot record an editorial decision from status {item.status}'},
-            status=409,
-        )
+    with transaction.atomic():
+        # Bug H4: lock the row, so the author's withdraw and this decision cannot overwrite each other.
+        item = (VenueSubmission.objects.select_for_update(of=('self',))
+                .select_related('manuscript', 'venue').get(id=item.id))
+        if item.status not in {'submitted', 'under_review', 'revision_requested'}:
+            return JsonResponse(
+                {'detail': f'Cannot record an editorial decision from status {item.status}'},
+                status=409,
+            )
 
-    decided_at = timezone.now()
-    item.status = decision
-    item.decision = {
-        'decision': decision,
-        'note': note,
-        'decided_at': decided_at.isoformat(),
-        'decided_by': request.flexee_admin.get('u', 'admin'),
-        'human_decision': True,
-    }
-    item.save(update_fields=['status', 'decision', 'updated_at'])
+        decided_at = timezone.now()
+        item.status = decision
+        item.decision = {
+            'decision': decision,
+            'note': note,
+            'decided_at': decided_at.isoformat(),
+            'decided_by': request.flexee_admin.get('u', 'admin'),
+            'human_decision': True,
+        }
+        item.save(update_fields=['status', 'decision', 'updated_at'])
     from .submission_plan import sync_from_submission
     sync_from_submission(item)  # declined stops the author's plan; it never advances by itself
     record_audit_event(

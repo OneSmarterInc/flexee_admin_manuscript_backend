@@ -646,6 +646,7 @@ def _match_payload(item):
         'venue_config_version': item.venue_config.version if item.venue_config_id else None,
         'eligibility': item.eligibility,
         'fit_summary': item.fit_summary,
+        'semantic_checked': item.fit_summary not in (GATE_SUMMARY_ELIGIBLE, GATE_SUMMARY_OTHER),
         'reasons': item.reasons,
         'gaps': item.gaps,
         'evidence': item.evidence,
@@ -655,7 +656,21 @@ def _match_payload(item):
     }
 
 
-def _submission_payload(item):
+def _author_decision(decision):
+    """The editor's decision as the author sees it: never who decided (blind review)."""
+    if not isinstance(decision, dict):
+        return decision
+    return {key: value for key, value in decision.items() if key != 'decided_by'}
+
+
+# The summary the deterministic gate writes. Semantic matching replaces it, so a match still showing one of
+# these has not been through semantic matching for this version yet (bug H7).
+GATE_SUMMARY_ELIGIBLE = ('Passes the currently configured deterministic routing checks. Semantic scope fit still '
+                         'requires the matching agent.')
+GATE_SUMMARY_OTHER = 'Requires configuration review or manuscript changes before semantic matching.'
+
+
+def _submission_payload(item, *, for_editor=False):
     return {
         'id': str(item.id),
         'manuscript_id': str(item.manuscript_id),
@@ -668,7 +683,7 @@ def _submission_payload(item):
         'status': item.status,
         'packet': item.packet,
         'editorial_brief': item.editorial_brief,
-        'decision': item.decision,
+        'decision': item.decision if for_editor else _author_decision(item.decision),
         'retention_expires_at': item.retention_expires_at.isoformat() if item.retention_expires_at else None,
         'retention_purged_at': item.retention_purged_at.isoformat() if item.retention_purged_at else None,
         'requirements': _submission_requirements_payload(item),
@@ -1692,11 +1707,7 @@ def _generate_deterministic_matches(manuscript, latest_readiness, venues):
                         'rule': violation,
                     })
 
-        fit_summary = (
-            'Passes the currently configured deterministic routing checks. Semantic scope fit still requires the matching agent.'
-            if eligibility == 'eligible'
-            else 'Requires configuration review or manuscript changes before semantic matching.'
-        )
+        fit_summary = GATE_SUMMARY_ELIGIBLE if eligibility == 'eligible' else GATE_SUMMARY_OTHER
 
         match, _ = VenueMatch.objects.update_or_create(
             manuscript=manuscript,
@@ -2335,14 +2346,18 @@ def author_withdraw_submission(request, submission_id):
     access_error = _author_access_error(request, item.manuscript)
     if access_error:
         return access_error
-    if item.status not in LIVE_SUBMISSION_STATUSES:
-        return JsonResponse({'detail': 'Only a submission the venue is still deciding on can be withdrawn.',
-                             'code': 'not_live'}, status=409)
     data = _json_body(request) if request.body else {}
     reason = str((data or {}).get('reason', '')).strip()[:2000]
-    previous = item.status
-    item.status = 'withdrawn'
-    item.save(update_fields=['status', 'updated_at'])
+    with transaction.atomic():
+        # Bug H4: lock the row, so a withdraw racing an editor's decision cannot overwrite it.
+        item = (VenueSubmission.objects.select_for_update(of=('self',))
+                .select_related('manuscript', 'venue').get(id=item.id))
+        if item.status not in LIVE_SUBMISSION_STATUSES:
+            return JsonResponse({'detail': 'Only a submission the venue is still deciding on can be withdrawn.',
+                                 'code': 'not_live'}, status=409)
+        previous = item.status
+        item.status = 'withdrawn'
+        item.save(update_fields=['status', 'updated_at'])
     record_audit_event(request, 'venue_submission.withdrawn_by_author', resource_type='venue_submission',
                        resource_id=item.id, venue_id=item.venue_id,
                        organization_id=item.venue.organization_id if item.venue_id else None,
@@ -2364,38 +2379,45 @@ def author_submit_packet(request, submission_id):
     if access_error:
         return access_error
 
-    if item.status != 'packet_ready':
-        return JsonResponse(
-            {'detail': 'Complete the venue assessment and prepare the packet before submission'},
-            status=409,
+    with transaction.atomic():
+        # Bug H4: lock the manuscript, then this row. Two sends at the same moment (a double click, or two
+        # venues in two tabs) are handled one after the other, so the checks below see the first one.
+        Manuscript.objects.select_for_update().filter(id=item.manuscript_id).first()
+        item = (VenueSubmission.objects.select_for_update(of=('self',))
+                .select_related('manuscript', 'venue', 'venue_config')
+                .prefetch_related('requirement_files').get(id=item.id))
+        if item.status != 'packet_ready':
+            return JsonResponse(
+                {'detail': 'Complete the venue assessment and prepare the packet before submission'},
+                status=409,
+            )
+
+        requirements = _submission_requirements_payload(item)
+        if not requirements['complete']:
+            return JsonResponse(
+                {
+                    'detail': 'Complete all required venue submission items before submission',
+                    'requirements': requirements,
+                },
+                status=409,
+            )
+
+        live_elsewhere = _live_venue_elsewhere(item)
+        if live_elsewhere:
+            return JsonResponse({'detail': f'{live_elsewhere} is still deciding on this manuscript. One venue at a '
+                                           'time: wait for its decision, or withdraw, before sending it here.',
+                                 'code': 'one_venue_at_a_time'}, status=409)
+
+        submitted_at = timezone.now()
+        item.status = 'submitted'
+        item.submitted_at = submitted_at
+        retention_days = item.venue_config.retention_days if item.venue_config_id else None
+        item.retention_expires_at = (
+            submitted_at + timedelta(days=retention_days)
+            if retention_days
+            else None
         )
-
-    requirements = _submission_requirements_payload(item)
-    if not requirements['complete']:
-        return JsonResponse(
-            {
-                'detail': 'Complete all required venue submission items before submission',
-                'requirements': requirements,
-            },
-            status=409,
-        )
-
-    live_elsewhere = _live_venue_elsewhere(item)
-    if live_elsewhere:
-        return JsonResponse({'detail': f'{live_elsewhere} is still deciding on this manuscript. One venue at a '
-                                       'time: wait for its decision, or withdraw, before sending it here.',
-                             'code': 'one_venue_at_a_time'}, status=409)
-
-    submitted_at = timezone.now()
-    item.status = 'submitted'
-    item.submitted_at = submitted_at
-    retention_days = item.venue_config.retention_days if item.venue_config_id else None
-    item.retention_expires_at = (
-        submitted_at + timedelta(days=retention_days)
-        if retention_days
-        else None
-    )
-    item.save(update_fields=['status', 'submitted_at', 'retention_expires_at', 'updated_at'])
+        item.save(update_fields=['status', 'submitted_at', 'retention_expires_at', 'updated_at'])
     from .submission_plan import sync_from_submission
     sync_from_submission(item)  # a planned venue moves to 'submitted' (never raises)
 
@@ -2497,6 +2519,8 @@ def author_transfer_submission(request, submission_id):
     )
     source.status = 'transferred'
     source.save(update_fields=['status', 'updated_at'])
+    from .submission_plan import sync_from_submission
+    sync_from_submission(source)  # bug H1: the planned step leaves 'submitted', so the plan is not stuck
     return JsonResponse({'submission': _submission_payload(target)}, status=201)
 
 

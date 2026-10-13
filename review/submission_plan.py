@@ -163,9 +163,12 @@ def rationale_for(number, entry, previous):
 
 
 def declined_venue_ids(manuscript):
-    """A venue that declined is never proposed again for the same manuscript (spec 6)."""
-    return set(SubmissionPlanStep.objects.filter(plan__manuscript=manuscript, state='declined')
-               .values_list('venue_id', flat=True))
+    """A venue that declined is never proposed again for the same manuscript (spec 6). That includes a
+    Flexee editor's rejection the plan never saw, for example one sent while no plan was running (bug H2)."""
+    from .models import VenueSubmission
+    planned = SubmissionPlanStep.objects.filter(plan__manuscript=manuscript, state='declined')
+    rejected = VenueSubmission.objects.filter(manuscript=manuscript, status='rejected')
+    return set(planned.values_list('venue_id', flat=True)) | set(rejected.values_list('venue_id', flat=True))
 
 
 def _author_exclusions(previous_plan):
@@ -257,6 +260,10 @@ def live_plan(manuscript):
 
 def check_can_generate(manuscript):
     """Raise if a new plan cannot be generated now. Used by the API before queueing the job."""
+    accepted_by = _accepted(manuscript.id)
+    if accepted_by:
+        raise PlanError(f'{accepted_by} accepted this manuscript, so there is nothing left to plan.',
+                        'already_accepted')
     ready_to_plan(manuscript)
     live = live_plan(manuscript)
     if live is None:
@@ -354,6 +361,54 @@ def _advance(plan, *, actor='author'):
     return nxt
 
 
+LIVE_SUBMISSION_STATUSES = ('submitted', 'under_review', 'revision_requested')  # as in author_api
+
+
+def _live_submission(manuscript_id, *, other_than_venue=None):
+    """The Flexee packet a venue is still deciding on for this manuscript, if any."""
+    from .models import VenueSubmission
+    found = VenueSubmission.objects.filter(manuscript_id=manuscript_id, status__in=LIVE_SUBMISSION_STATUSES)
+    if other_than_venue is not None:
+        found = found.exclude(venue_id=other_than_venue)
+    return found.select_related('venue').order_by('-submitted_at').first()
+
+
+def _adopt_live_submission(plan, *, actor='venue'):
+    """Bug H2: a packet the author sent before Start, while the plan was paused, or straight to a venue
+    further down still belongs to the plan. That venue becomes the current step and is linked, so its
+    editor's decision reaches the plan. Only on an active plan with nothing in progress."""
+    if plan.status != 'active' or plan.steps.filter(state='submitted').exists():
+        return None
+    live = _live_submission(plan.manuscript_id)
+    if live is None:
+        return None
+    step = plan.steps.select_for_update().filter(venue_id=live.venue_id, state__in={'queued', 'current'}).first()
+    if step is None:
+        return None
+    current = plan.steps.filter(state='current').exclude(id=step.id).first()
+    if current is not None:
+        _move(current, 'queued', 'moved_back', actor=actor, note=f'The manuscript was sent to {step.venue.name} first.')
+    if step.state == 'queued':
+        _move(step, 'current', 'became_current', actor=actor)
+    _set_position(plan, step)
+    step.submitted_version_id = live.version_id or plan.manuscript.current_version_id
+    step.venue_submission = live
+    _move(step, 'submitted', 'submitted', actor=actor, fields=('submitted_version', 'venue_submission'))
+    return step
+
+
+def _accepted(manuscript_id):
+    """Bug H5: a manuscript a venue accepted is finished; no new plan is made for it."""
+    from .models import VenueSubmission
+    step = (SubmissionPlanStep.objects.filter(plan__manuscript_id=manuscript_id, state='accepted')
+            .select_related('venue').first())
+    if step is not None:
+        return step.venue.name
+    item = (VenueSubmission.objects.filter(manuscript_id=manuscript_id, status='accepted')
+            .select_related('venue').first())
+    return item.venue.name if item is not None else ''
+
+
 def _unanswered(plan):
     return (plan.steps.filter(state__in={'declined', 'withdrawn'}, revision_answer='')
             .order_by('-order').first())
@@ -373,10 +428,15 @@ def activate(plan_id):
     plan, _ = _lock(plan_id)
     _require_status(plan, 'draft')
     _require_current_version(plan)
+    live = _live_submission(plan.manuscript_id)
+    if live is not None and not plan.steps.filter(venue_id=live.venue_id, state__in={'queued', 'current'}).exists():
+        raise PlanError(f'{live.venue.name} is still deciding on this manuscript. One venue at a time: wait for '
+                        'its decision, or withdraw it, before starting this plan.', 'one_venue_at_a_time')
     plan.status = 'active'
     _log(plan, 'activated')
     _advance(plan)
     plan.save(update_fields=['status', 'updated_at'])
+    _adopt_live_submission(plan)  # bug H2: a packet already sent to a planned venue is linked now
     return plan
 
 
@@ -458,6 +518,16 @@ def mark_submitted(plan_id, step_id, *, venue_submission=None, actor='author'):
         # "I have sent it" would skip the editor: the step must come from a real Flexee packet.
         raise PlanError(f'{step.venue.name} is on Flexee: send the packet from its venue page, and this plan '
                         'updates by itself.', 'send_packet', 409)
+    if venue_submission is None:
+        # Bug H3: one venue at a time also holds against a Flexee packet sent outside the plan. The
+        # manuscript lock is the one a packet submit takes, so the two cannot pass at the same moment.
+        from .models import Manuscript
+        Manuscript.objects.select_for_update().filter(id=plan.manuscript_id).first()
+        live = _live_submission(plan.manuscript_id, other_than_venue=step.venue_id)
+        if live is not None:
+            raise PlanError(f'{live.venue.name} is still deciding on this manuscript. One venue at a time: wait '
+                            'for its decision, or withdraw it, first.', 'one_venue_at_a_time', 409)
+        venue_submission = _live_submission(plan.manuscript_id)  # a packet already sent to this same venue
     if venue_submission is None:
         _require_current_version(plan)  # a Flexee submission records the version it actually carries
     step.submitted_version_id = (venue_submission.version_id if venue_submission and venue_submission.version_id
@@ -588,15 +658,22 @@ def sync_from_submission(submission):
     """Keep a plan in step with a Flexee venue's own workflow (submitted, decision).
     Never raises: plan problems must not break the editorial flow."""
     try:
+        status = submission.status
+        if status == 'submitted':
+            plan = (SubmissionPlan.objects.filter(status='active', manuscript_id=submission.manuscript_id).first())
+            if plan is not None:
+                with transaction.atomic():
+                    plan, _ = _lock(plan.id)
+                    return _adopt_live_submission(plan)  # current, queued (bug H2) or nothing to do
+            return None
         step = (SubmissionPlanStep.objects.filter(plan__status='active', plan__manuscript_id=submission.manuscript_id,
                                                   venue_id=submission.venue_id, state__in={'current', 'submitted'})
                 .select_related('plan').first())
         if step is None:
             return None
-        status = submission.status
-        if status == 'submitted' and step.state == 'current':
-            return mark_submitted(step.plan_id, step.id, venue_submission=submission, actor='venue')
-        outcome = {'accepted': 'accepted', 'rejected': 'declined', 'withdrawn': 'withdrawn'}.get(status)
+        # A transfer moves the manuscript away from this venue: for the plan that is a withdrawal (bug H1).
+        outcome = {'accepted': 'accepted', 'rejected': 'declined', 'withdrawn': 'withdrawn',
+                   'transferred': 'withdrawn'}.get(status)
         if outcome and step.state == 'submitted':
             return report_outcome(step.plan_id, step.id, outcome, actor='venue')
     except Exception:  # noqa: BLE001

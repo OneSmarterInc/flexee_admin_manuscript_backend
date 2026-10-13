@@ -529,7 +529,9 @@ class FetchedPage:
 
 TEMPORARY_FAILURE_PATTERNS = (r'Could not resolve', r'HTTP (429|500|502|503|504|520|521|522|523|524)\b',
                               r'Timed out', r'Could not fetch')
-BLOCKED_FAILURE_PATTERNS = (r'HTTP (401|403|429)\b', r'robots\.txt does not allow', r'HTTP 52\d\b')
+# Audit item 38: HTTP 429 means "too many requests, try later". It is a temporary failure (retried in
+# 30 days), not a refusal of automated reading (parked for 90 days).
+BLOCKED_FAILURE_PATTERNS = (r'HTTP (401|403)\b', r'robots\.txt does not allow', r'HTTP 52\d\b')
 
 
 def is_temporary_failure(exc):
@@ -607,8 +609,12 @@ class SafeFetcher:
             try:
                 body, _ = self._get(origin + '/robots.txt', accept_any=True, max_bytes=200_000)
                 parser.parse(body.splitlines())
-            except DiscoveryFetchError:
-                parser.parse([])  # no robots.txt reachable: treat as allowed
+            except DiscoveryFetchError as exc:
+                if re.search(r'HTTP (429|5\d\d)\b', str(exc)):
+                    # Audit item 38: the site is busy or failing, so its rules are unknown. Do not read it
+                    # now; this is a temporary failure, tried again later.
+                    raise DiscoveryFetchError(f'robots.txt could not be read ({exc}); try again later.') from exc
+                parser.parse([])  # no robots.txt (404 and the like): the site sets no rules
             self._robots[origin] = parser
         return self._robots[origin].can_fetch(self.config.user_agent, url)
 
@@ -923,12 +929,15 @@ def build_local_prompt(pages, local):
     )
 
 
-def extract_with_local_ollama(pages, config, *, model=None, feedback='', operation='venue_discovery_extraction'):
+def extract_with_local_ollama(pages, config, *, model=None, feedback='', operation='venue_discovery_extraction',
+                              timeout=None):
     """Rule extraction with a local Ollama model (free). Recorded in AI usage at zero cost.
 
     `feedback` (a retry after validation failed) tells the model what was wrong the first time."""
     from ..ai_usage import complete_ai_call
     local = local_ai_settings()
+    if timeout:
+        local['timeout'] = float(min(local['timeout'], max(10, int(timeout))))
     if model:
         local['model'] = model
     prompt = build_local_prompt(pages, local)
@@ -974,20 +983,29 @@ def extract_with_local_ollama(pages, config, *, model=None, feedback='', operati
     return parse_ai_json(content)
 
 
-def extract_with_ai(pages, config, *, operation='venue_discovery_extraction', feedback='', model=None):
+def extract_with_ai(pages, config, *, operation='venue_discovery_extraction', feedback='', model=None, timeout=None):
+    """timeout: the most this whole extraction may wait, in seconds (a run's remaining time)."""
     if config.ai_provider == 'ollama':
-        return extract_with_local_ollama(pages, config, model=model, feedback=feedback, operation=operation)
+        return extract_with_local_ollama(pages, config, model=model, feedback=feedback, operation=operation,
+                                         timeout=timeout)
     from .ai_provider import ai_chat_json
     prompt = build_extraction_prompt(pages, config)
     if feedback:
         prompt = f'{feedback}\n\n{prompt}'
     last_error = None
+    deadline = time.monotonic() + timeout if timeout else None
     for _attempt in range(2):
+        wait = _env_int('VENUE_DISCOVERY_AI_TIMEOUT', 180, 30, 1800)
+        if deadline is not None:
+            left = int(deadline - time.monotonic())
+            if left < 10:
+                break
+            wait = min(wait, left)
         try:
             _model, raw = ai_chat_json(
                 prompt,
                 max_tokens=2200,
-                timeout=_env_int('VENUE_DISCOVERY_AI_TIMEOUT', 180, 30, 1800),
+                timeout=wait,
                 force_provider=config.ai_provider or None,
                 operation=operation,
             )
@@ -1393,6 +1411,11 @@ def upsert_candidate(candidate, fingerprint, existing=_FIND):
     with transaction.atomic():
         if existing is _FIND:
             existing = find_existing(candidate)
+            if existing is not None and existing.origin == 'index':
+                # Audit item 33: Venue Discovery found a journal the Venue Index keeps. The index
+                # record stays as the index read it; discovery only notes that it saw it.
+                DiscoveredVenue.objects.filter(id=existing.id).update(last_checked_at=now)
+                return existing, 'unchanged'
         if existing is None:
             record = DiscoveredVenue.objects.create(
                 **{f: candidate[f] for f in STAGED_FIELDS}, **keys,
@@ -1525,6 +1548,28 @@ def _parse_dates(text):
     return sorted(found)
 
 
+DEADLINE_MARKERS = re.compile(r'deadline|due\b|closes|close on|until|last date|submissions? (?:by|before)|'
+                              r'submit (?:by|before)|extended to', re.I)
+
+
+def _deadline_dates(window, today):
+    """Future dates in the window, the one stated as the deadline first (audit item 36).
+
+    A call often lists several dates ("Publication: December 2027. Submission deadline: 15 March
+    2027"). The deadline is the future date right after a deadline word; failing that, the one
+    nearest such a word; dates far from any deadline word come last."""
+    markers = [m.end() for m in DEADLINE_MARKERS.finditer(window)]
+    ranked = []
+    for position, day in _parse_dates(window):
+        if day < today:
+            continue
+        after = [position - end for end in markers if 0 <= position - end <= 80]
+        near = [abs(position - end) for end in markers]
+        score = (0, min(after)) if after else (1, min(near)) if near else (2, position)
+        ranked.append((score, day))
+    return [day for _score, day in sorted(ranked)]
+
+
 def detect_calls_for_papers(pages, today=None):
     """Open special issues / calls for papers with a future deadline, read straight from official pages."""
     today = today or timezone.localdate()
@@ -1546,7 +1591,7 @@ def detect_calls_for_papers(pages, today=None):
             window = ' '.join(block)[:600]
             if not DEADLINE_WORDS.search(window):
                 continue
-            future = [d for _pos, d in _parse_dates(window) if d >= today]
+            future = _deadline_dates(window, today)
             if not future:
                 continue
             title = line if CFP_LINE.search(line) else (page.title or line)
@@ -1942,8 +1987,11 @@ def _recheck_existing(run, fetcher, config, extractor, skip):
     if config.max_rechecks_per_run <= 0:
         return
     stale_before = timezone.now() - timedelta(hours=config.recheck_after_hours)
+    # Audit item 33: journals read by the Venue Index are re-read by the index itself (quarterly, local
+    # model only, per-journal records). Discovery must not re-check them with its own settings.
     due = (DiscoveredVenue.objects
            .exclude(discovery_status='ignored')
+           .exclude(origin='index')
            .filter(last_checked_at__lt=stale_before)
            .order_by('last_checked_at')[: config.max_rechecks_per_run])
     for record in due:

@@ -677,6 +677,15 @@ def fetch_enrichment(record, http, now):
 # Runs
 # ---------------------------------------------------------------------------
 
+def force_close_runs(now=None):
+    """--force: close runs left over from a restart, never a run that may still be working (audit item
+    37). A run older than the run time limit (plus a margin) cannot still be inside its own limit."""
+    now = now or timezone.now()
+    cutoff = now - timedelta(seconds=IndexConfig().time_limit_seconds + 300)
+    return VenueIndexRun.objects.filter(status__in=['queued', 'processing'], created_at__lt=cutoff).update(
+        status='failed', completed_at=now, summary='Closed with --force (left over from a restart).')
+
+
 def close_stale_runs(now=None):
     now = now or timezone.now()
     VenueIndexRun.objects.filter(status__in=['queued', 'processing'], created_at__lt=now - timedelta(hours=1)).update(
@@ -729,8 +738,7 @@ def run_index(run, *, http=None, now=None, clock=None, progress=None, time_limit
     """
     config = IndexConfig()
     clock = clock or time.monotonic
-    deadline = clock() + (time_limit_seconds or config.time_limit_seconds)
-    budget = lambda: clock() < deadline  # noqa: E731
+    budget = RunBudget(clock, time_limit_seconds or config.time_limit_seconds)
     http = http or IndexHttp(config)
     say = progress or (lambda message: None)
     now = now or timezone.now()
@@ -765,8 +773,30 @@ def run_index(run, *, http=None, now=None, clock=None, progress=None, time_limit
         run.status = 'failed'
         run.summary = f'Stopped: {exc}'[:500]
     run.completed_at = timezone.now()
-    run.save()
+    final_status = run.status
+    # Audit item 37: if the run was closed meanwhile (for example by --force), keep that status;
+    # everything else this run counted is still saved.
+    closed = VenueIndexRun.objects.filter(id=run.id).exclude(status__in=['queued', 'processing']).exists()
+    keep = {'id', 'status', 'created_at'} | ({'summary'} if closed else set())
+    run.save(update_fields=[f.name for f in run._meta.concrete_fields if f.name not in keep])
+    if not VenueIndexRun.objects.filter(id=run.id, status='processing').update(status=final_status):
+        run.refresh_from_db(fields=['status', 'summary'])
     return run
+
+
+class RunBudget:
+    """The run's time limit. Calling it says whether there is time left; remaining() says how much, so
+    a single slow journal can be given only the time that is left (audit item 35)."""
+
+    def __init__(self, clock, seconds):
+        self.clock = clock
+        self.deadline = clock() + seconds
+
+    def __call__(self):
+        return self.clock() < self.deadline
+
+    def remaining(self):
+        return max(0.0, self.deadline - self.clock())
 
 
 def _catalogue_pass(run, config, http, now, budget, say=lambda m: None):

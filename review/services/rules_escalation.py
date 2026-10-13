@@ -116,7 +116,7 @@ def _plan(config, escalation):
     return stages
 
 
-def _call(stage, pages, config, *, extractor, feedback, escalation):
+def _call(stage, pages, config, *, extractor, feedback, escalation, timeout=None):
     """Run one stage. Returns (provider, model, raw). Custom extractors (tests) get (pages, config)."""
     from . import venue_discovery as vd
     if stage == 'cloud':
@@ -130,7 +130,8 @@ def _call(stage, pages, config, *, extractor, feedback, escalation):
     if config.ai_provider == 'ollama':
         model = model or vd.local_ai_settings()['model']
     try:
-        raw = vd.extract_with_ai(pages, config, operation=OPERATIONS[stage], feedback=feedback, model=model)
+        raw = vd.extract_with_ai(pages, config, operation=OPERATIONS[stage], feedback=feedback, model=model,
+                                 timeout=timeout)
     except (vd.DiscoveryExtractionError, TimeoutError):
         raise
     except Exception as exc:
@@ -158,12 +159,20 @@ def _shared_qwen_down(exc):
                                       'context is misconfigured'))
 
 
-def extract_with_escalation(record, pages, config, hints, *, escalation, min_confidence, extractor=None, run=None):
-    """Extract, validate and escalate. Returns the best validated candidate dict (or None)."""
+MIN_STAGE_SECONDS = 30  # do not start a model call with less time than this left in the run
+
+
+def extract_with_escalation(record, pages, config, hints, *, escalation, min_confidence, extractor=None, run=None,
+                            time_left=None):
+    """Extract, validate and escalate. Returns the best validated candidate dict (or None).
+
+    time_left (audit item 35): seconds left in the run. Each model call waits at most that long, and no
+    call starts with less than MIN_STAGE_SECONDS left. If not even the first call can start, RulesTimeUp
+    is raised so the journal is left for the next run instead of being marked failed."""
     from ..ai_usage import AIBudgetExceeded
     from ..models import RulesAttempt
     from . import venue_discovery as vd
-    from .index_rules import RulesModelUnavailable, rules_found
+    from .index_rules import RulesModelUnavailable, RulesTimeUp, rules_found
 
     chain = uuid.uuid4()
     best, best_key, attempts = None, None, []
@@ -171,10 +180,18 @@ def extract_with_escalation(record, pages, config, hints, *, escalation, min_con
     for number, stage in enumerate(_plan(config, escalation), 1):
         if stage == 'cloud' and not escalation.cloud_allowed():
             break
+        wait = None
+        if time_left is not None:
+            left = time_left()
+            if left < MIN_STAGE_SECONDS:
+                if not attempts:
+                    raise RulesTimeUp(f'{int(left)} s left in the run')
+                break  # keep the best result so far
+            wait = int(left)
         provider, model, error = config.ai_provider, '', ''
         try:
             provider, model, raw = _call(stage, pages, config, extractor=extractor, feedback=feedback,
-                                         escalation=escalation)
+                                         escalation=escalation, timeout=wait)
         except vd.DiscoveryModelUnavailable as exc:
             if stage == 'local':
                 raise RulesModelUnavailable(str(exc)) from exc  # the main model is down: stop the run

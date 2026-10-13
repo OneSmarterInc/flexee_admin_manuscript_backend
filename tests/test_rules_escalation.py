@@ -122,7 +122,7 @@ def test_retry_tells_the_model_what_failed_and_uses_its_own_operation(monkeypatc
     fetcher, _ = make_fetcher(JOURNAL_PAGES)
     seen = []
 
-    def fake_extract(pages, config, *, operation, feedback='', model=None):
+    def fake_extract(pages, config, *, operation, feedback='', model=None, timeout=None):
         seen.append((operation, feedback, model))
         return NAME_ONLY if operation == 'index_rules_local' else journal_extraction()
     monkeypatch.setattr(vd, 'extract_with_ai', fake_extract)
@@ -216,7 +216,7 @@ def test_failing_retry_model_does_not_stop_the_run(monkeypatch):
     fetcher, _ = make_fetcher({**JOURNAL_PAGES, 'https://two.example': '<html><body><p>Two.</p></body></html>'})
     models = []
 
-    def fake_extract(pages, config, *, operation, feedback='', model=None):
+    def fake_extract(pages, config, *, operation, feedback='', model=None, timeout=None):
         models.append((operation, model))
         if model == 'qwen2.5:7b-instruct':
             raise vd.DiscoveryModelUnavailable('Could not reach Ollama at http://127.0.0.1:11434.')

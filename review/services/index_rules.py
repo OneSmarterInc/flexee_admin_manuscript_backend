@@ -39,6 +39,10 @@ class RulesModelUnavailable(Exception):
     """The AI model cannot be reached at all: stop the run instead of failing every journal."""
 
 
+class RulesTimeUp(Exception):
+    """The run's time limit leaves too little time to read this journal; it is left for the next run."""
+
+
 def _env_int(name, default, low, high):
     try:
         return max(low, min(int(os.getenv(name, str(default))), high))
@@ -202,7 +206,7 @@ def _match_for(record, candidate):
 
 
 def read_rules_for(record, fetcher, config, *, extractor=None, min_confidence=40, now=None, blocked_sites=None,
-                   escalation=None, run=None):
+                   escalation=None, run=None, time_left=None):
     """Read one journal's rules. Updates the record; returns its new rules_status.
 
     Tries each official URL (guidelines page, then homepage). A site that refuses automated reading
@@ -248,7 +252,8 @@ def read_rules_for(record, fetcher, config, *, extractor=None, min_confidence=40
             item = previous
             break
         candidate, _attempts = extract_with_escalation(record, pages, config, hints, escalation=escalation,
-                                                       min_confidence=min_confidence, extractor=extractor, run=run)
+                                                       min_confidence=min_confidence, extractor=extractor, run=run,
+                                                       time_left=time_left)
         if candidate is None:
             errors.append('The AI could not extract rules from the pages.')
             break  # the pages were read; another URL on the same journal would not help the model
@@ -341,7 +346,14 @@ def run_rules(run, profile, budget, *, say=lambda m: None, fetcher=None, extract
         retried, escalated = escalation.retried, escalation.escalated
         try:
             status = read_rules_for(record, fetcher, config, extractor=extractor, min_confidence=min_confidence,
-                                    blocked_sites=blocked_sites, escalation=escalation, run=run)
+                                    blocked_sites=blocked_sites, escalation=escalation, run=run,
+                                    time_left=getattr(budget, 'remaining', None))
+        except RulesTimeUp:
+            # Audit item 35: not enough time left for this journal. It is not marked failed; the next run
+            # reads it first.
+            run.rules_attempted -= 1
+            say('Time limit reached; the remaining journals are read in the next run.')
+            break
         except RulesModelUnavailable as exc:
             from .venue_index import _record_error
             _record_error(run, 'ai', exc)

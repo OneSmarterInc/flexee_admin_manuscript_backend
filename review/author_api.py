@@ -1716,7 +1716,7 @@ def refresh_matches_for_new_venues(manuscript):
     added only if it makes the manuscript's topical shortlist.
     Returns the number of new matches created.
     """
-    from .services.venue_shortlist import build_shortlist
+    from .services.venue_shortlist import build_shortlist, request_time_limit
     if not manuscript.current_matches().exists():
         return 0
     latest_readiness = manuscript.current_readiness().filter(status='completed').first()
@@ -1730,7 +1730,7 @@ def refresh_matches_for_new_venues(manuscript):
     if not changed.exists():
         return 0
     venues = list(Venue.objects.matchable().select_related('organization'))
-    kept, info = build_shortlist(manuscript, venues, prefer=matched)
+    kept, info = build_shortlist(manuscript, venues, prefer=matched, time_limit=request_time_limit())
     changed_ids = set(changed.values_list('id', flat=True))
     new_venues = [v for v in kept if v.id in changed_ids]
     Manuscript.objects.filter(id=manuscript.id).update(shortlisted_at=timezone.now())
@@ -1759,9 +1759,9 @@ def author_generate_matches(request, manuscript_id):
 
     # Build plan step 5: a local embedding model narrows the venues to the topical shortlist first;
     # only those get the policy gate and, later, the AI fit explanation.
-    from .services.venue_shortlist import build_shortlist, shortlist_summary
+    from .services.venue_shortlist import build_shortlist, request_time_limit, shortlist_summary
     venues = list(Venue.objects.matchable().select_related('organization'))
-    kept, info = build_shortlist(manuscript, venues)
+    kept, info = build_shortlist(manuscript, venues, time_limit=request_time_limit())
     matches = _apply_shortlist(manuscript, _generate_deterministic_matches(manuscript, latest_readiness, kept), info)
     Manuscript.objects.filter(id=manuscript.id).update(shortlisted_at=timezone.now())
     if info['considered'] > info['kept']:

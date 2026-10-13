@@ -5,7 +5,8 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from review.models import VenueIndexRun
-from review.services.venue_index import IndexConfig, coverage_counts, read_issn_worklist, run_index, start_index_run
+from review.services.venue_index import (IndexConfig, coverage_counts, force_close_runs, read_issn_worklist, run_index,
+                                         start_index_run)
 
 
 class Command(BaseCommand):
@@ -62,8 +63,7 @@ class Command(BaseCommand):
                 raise CommandError('No valid ISSNs found in the file. Use one ISSN per line, or a CSV with an ISSN column.')
             mode = 'worklist'
         if options['force']:
-            closed = VenueIndexRun.objects.filter(status__in=['queued', 'processing']).update(
-                status='failed', completed_at=timezone.now(), summary='Closed with --force (left over from a restart).')
+            closed = force_close_runs()
             if closed:
                 self.stdout.write(self.style.WARNING(f'Closed {closed} run left over from a restart.'))
         run, created = start_index_run(mode=mode, trigger='command', requested_by='manage.py')

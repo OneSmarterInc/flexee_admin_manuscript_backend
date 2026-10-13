@@ -138,7 +138,9 @@ def test_topic_similarity_lifts_scope_for_close_meaning_without_shared_words():
 
 @pytest.mark.django_db
 def test_force_closes_a_run_left_by_a_restart(capsys):
-    VenueIndexRun.objects.create(mode='rules', status='processing', trigger='manual')
+    left = VenueIndexRun.objects.create(mode='rules', status='processing', trigger='manual')
+    # Older than the run time limit, so it cannot still be working (audit item 37).
+    VenueIndexRun.objects.filter(id=left.id).update(created_at=timezone.now() - timezone.timedelta(minutes=40))
     call_command('import_venue_index', '--calls-only', '--force')
     out = capsys.readouterr().out
     assert 'Closed 1 run left over from a restart' in out

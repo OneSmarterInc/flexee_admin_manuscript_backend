@@ -61,6 +61,7 @@ urlpatterns = [
     path('author/venue-submissions/<uuid:submission_id>/requirements/', author_api.author_save_submission_requirements),
     path('author/venue-submissions/<uuid:submission_id>/requirements/<str:requirement_key>/upload/', author_api.author_upload_submission_requirement),
     path('author/venue-submissions/<uuid:submission_id>/submit/', author_api.author_submit_packet),
+    path('author/venue-submissions/<uuid:submission_id>/withdraw/', author_api.author_withdraw_submission),
     path('author/venue-submissions/<uuid:submission_id>/transfer/', author_api.author_transfer_submission),
 
     path('admin/verify-password/', views.admin_verify_password),

@@ -260,6 +260,7 @@ def run_submission_plan_task(job_id, manuscript_id):
         job.error_message = str(e)
         job.completed_at = timezone.now()
         job.save(update_fields=['status', 'error_message', 'completed_at'])
+        _reopen_after_failed_plan(manuscript_id, job.error_message)
     except Exception as e:
         capture_exception(e, component='django_q', operation='submission_plan',
                           tags={'job_type': 'submission_plan'})
@@ -267,6 +268,17 @@ def run_submission_plan_task(job_id, manuscript_id):
         job.error_message = 'The plan could not be generated. Please try again.'
         job.completed_at = timezone.now()
         job.save(update_fields=['status', 'error_message', 'completed_at'])
+        _reopen_after_failed_plan(manuscript_id, job.error_message)
+
+
+def _reopen_after_failed_plan(manuscript_id, reason):
+    """A failed regeneration after "revised" must not leave the plan paused with no way forward."""
+    from .submission_plan import reopen_revision_answer
+    try:
+        reopen_revision_answer(Manuscript.objects.get(id=manuscript_id), reason)
+    except Exception as exc:  # noqa: BLE001  (recovery must not hide the job's own failure)
+        capture_exception(exc, component='django_q', operation='submission_plan_reopen',
+                          tags={'job_type': 'submission_plan'})
 
 
 @monitor_background_task('venue_assessment')

@@ -237,19 +237,18 @@ def test_full_purge_still_happens_when_the_current_version_expires():
     assert all(not v.file for v in m.versions.all())
 
 
-@pytest.mark.django_db
-def test_backfill_migration_creates_version_1(django_db_blocker):
-    """Rows that existed before versions get a version 1 sharing their file."""
+@pytest.mark.django_db(transaction=True)
+def test_backfill_migration_creates_version_1():
+    """Rows that existed before versions get a version 1 sharing their file (run on the schema of that
+    time: since audit item 16 a version link is required)."""
     import importlib
+    from tests.migration_state import BEFORE_REQUIRED_VERSIONS, make_old_manuscript, remove_old_manuscript, schema_at
     migration = importlib.import_module('review.migrations.0038_backfill_manuscript_versions')
-    from django.apps import apps
-    _client, author = author_client()
-    m = make_manuscript(author)
-    ManuscriptVersion.objects.filter(manuscript=m).delete()
-    Manuscript.objects.filter(id=m.id).update(current_version=None)
-    ReadinessAssessment.objects.filter(manuscript=m).update(version=None)
-    migration.forwards(apps, None)
-    m.refresh_from_db()
-    assert m.current_version.number == 1 and m.current_version.source == 'migration'
-    assert m.current_version.file.name == m.manuscript_file.name
-    assert ReadinessAssessment.objects.get(manuscript=m).version_id == m.current_version_id
+    with schema_at(BEFORE_REQUIRED_VERSIONS) as old:
+        m = make_old_manuscript(old)
+        migration.forwards(old, None)
+        m.refresh_from_db()
+        version = old.get_model('review', 'ManuscriptVersion').objects.get(id=m.current_version_id)
+        assert version.number == 1 and version.source == 'migration' and version.file == m.manuscript_file
+        assert old.get_model('review', 'ReadinessAssessment').objects.get(manuscript_id=m.id).version_id == version.id
+        remove_old_manuscript(old, m.id)

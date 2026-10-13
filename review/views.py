@@ -391,11 +391,39 @@ def admin_verify_password(request):
         issuer = quote('Flexee Manuscript Admin')
         totp_setup_uri = f'otpauth://totp/{label}?secret={user.totp_secret}&issuer={issuer}&algorithm=SHA1&digits=6&period=30'
 
-    resp = {'ok': True}
+    # Audit item 27: the browser keeps this short-lived ticket for the second step, not the password.
+    resp = {'ok': True, 'login_ticket': _login_ticket(user)}
     if totp_setup_uri:
         resp['totp_setup_uri'] = totp_setup_uri
 
     return JsonResponse(resp)
+
+
+LOGIN_TICKET_SALT = 'flexee.admin.login-ticket'
+LOGIN_TICKET_MAX_AGE = 300  # seconds between the password step and the authenticator step
+
+
+def _password_fingerprint(user):
+    return hashlib.sha256(f'{user.id}:{user.password_hash}'.encode('utf-8')).hexdigest()[:24]
+
+
+def _login_ticket(user):
+    from django.core import signing
+    return signing.dumps({'u': str(user.id), 'fp': _password_fingerprint(user)}, salt=LOGIN_TICKET_SALT)
+
+
+def _user_from_login_ticket(ticket):
+    """The user a valid, unexpired ticket was issued to, or None. A password change voids it."""
+    from django.core import signing
+    from .models import EditorUser
+    try:
+        data = signing.loads(ticket, salt=LOGIN_TICKET_SALT, max_age=LOGIN_TICKET_MAX_AGE)
+    except signing.BadSignature:  # includes SignatureExpired
+        return None
+    user = EditorUser.objects.filter(id=data.get('u')).first() if isinstance(data, dict) else None
+    if user is None or data.get('fp') != _password_fingerprint(user):
+        return None
+    return user
 
 
 def _fresh_totp(user, code):
@@ -433,15 +461,25 @@ def admin_login(request):
 
     password = str(data.get('password', ''))
     code = str(data.get('totp', '')).strip()
-    
+    ticket = str(data.get('ticket', '')).strip()
+
     from .models import EditorUser
-    user = EditorUser.objects.filter(email=username).first()
-    
+    if ticket:
+        # Audit item 27: the second step proves the password with the ticket from the first step.
+        user = _user_from_login_ticket(ticket)
+        if user is not None:
+            username = user.email
+        credentials_ok = user is not None
+    else:
+        # Older screens still send the password again; accepted until every screen sends a ticket.
+        user = EditorUser.objects.filter(email=username).first()
+        credentials_ok = bool(user and verify_password(password, user.password_hash))
+
     ok = False
     totp_missing_error = False
     password_ok = False
-    
-    if user and os.getenv('ADMIN_SESSION_SECRET', '') and verify_password(password, user.password_hash):
+
+    if user and os.getenv('ADMIN_SESSION_SECRET', '') and credentials_ok:
         password_ok = True
         requires_totp = user.memberships.filter(role__in=['owner', 'editor']).exists() or user.platform_superuser
         if requires_totp:

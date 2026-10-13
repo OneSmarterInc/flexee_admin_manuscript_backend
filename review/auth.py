@@ -95,6 +95,19 @@ def totp_code(secret, timestamp=None, step=30, digits=6):
     return str(binary % (10 ** digits)).zfill(digits)
 
 
+def start_totp_setup(user):
+    """Give the user an authenticator secret and return the otpauth:// link for the QR code."""
+    import base64
+    import secrets
+    from urllib.parse import quote
+    user.totp_secret = base64.b32encode(secrets.token_bytes(20)).decode('ascii').rstrip('=')
+    user.totp_last_step = None
+    user.save(update_fields=['totp_secret', 'totp_last_step'])
+    label = quote(f'Flexee Admin:{user.email}')
+    issuer = quote('Flexee Manuscript Admin')
+    return f'otpauth://totp/{label}?secret={user.totp_secret}&issuer={issuer}&algorithm=SHA1&digits=6&period=30'
+
+
 def totp_step(secret, code, timestamp=None, window=1):
     """The 30-second time step a valid code belongs to, or None."""
     code = ''.join(str(code or '').split())

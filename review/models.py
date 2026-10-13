@@ -2,6 +2,9 @@ import uuid
 from django.utils import timezone
 from django.db import models
 
+from .secret_fields import EncryptedCharField
+
+
 class Author(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -151,7 +154,8 @@ class SMTPSettings(models.Model):
     host = models.CharField(max_length=255, blank=True)
     port = models.IntegerField(default=587)
     username = models.CharField(max_length=255, blank=True)
-    password = models.CharField(max_length=255, blank=True)
+    # Audit item 28: stored encrypted; reads give the plain password back.
+    password = EncryptedCharField(max_length=600, blank=True)
     use_tls = models.BooleanField(default=True)
     use_ssl = models.BooleanField(default=False)
     admin_notification_emails = models.TextField(blank=True, help_text="Comma-separated emails to BCC on accept/reject")

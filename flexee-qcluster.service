@@ -11,6 +11,8 @@ ExecStart=/var/www/flexee/flexee_admin_manuscript_backend/.venv/bin/python manag
 Restart=always
 RestartSec=5
 
+NoNewPrivileges=true
+PrivateTmp=true
 UMask=0077
 
 [Install]

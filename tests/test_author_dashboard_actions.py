@@ -1,5 +1,6 @@
 import hashlib
 import json
+import time
 
 import pytest
 from django.core.files.base import ContentFile
@@ -64,6 +65,9 @@ def test_new_admin_venue_appears_for_author_and_is_marked_new():
     m = make_manuscript(author)
     client.post(f'/api/author/manuscripts/{m.id}/matches/run/')
     client.post(f'/api/author/manuscripts/{m.id}/matches/seen/')
+    # Windows' clock moves in ~16 ms steps: without a pause the new match can get the very same
+    # timestamp as "seen", and "newer than seen" is then false.
+    time.sleep(0.05)
 
     make_venue('Journal of Applied AI', 'jaai')  # admin adds a venue later
 

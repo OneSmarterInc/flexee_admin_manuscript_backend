@@ -145,10 +145,16 @@ def ollama_embed(texts, *, model=None, timeout=None, client=None):
         raise EmbeddingUnavailable(f'The embedding model {model} is not installed. Run: ollama pull {model}')
     if response.status_code >= 400:
         raise EmbeddingUnavailable(f'Ollama embedding failed with HTTP {response.status_code}: {response.text[:200]}')
-    vectors = (response.json() or {}).get('embeddings') or []
+    try:
+        vectors = (response.json() or {}).get('embeddings') or []
+    except ValueError as exc:  # audit item 34: a broken reply is "unavailable", never a crash
+        raise EmbeddingUnavailable('Ollama returned an unreadable embedding response.') from exc
     if len(vectors) != len(texts):
         raise EmbeddingUnavailable('Ollama returned a different number of embeddings than texts sent.')
-    out = [_unit([float(x) for x in v]) for v in vectors]
+    try:
+        out = [_unit([float(x) for x in v]) for v in vectors]
+    except (TypeError, ValueError) as exc:
+        raise EmbeddingUnavailable('Ollama returned an embedding that is not a list of numbers.') from exc
     if any(v is None for v in out):
         raise EmbeddingUnavailable('Ollama returned an empty embedding.')
     return out
@@ -233,7 +239,20 @@ def _keyword_similarity(ms, venue, config):
     return round(len(ms & vt) / min(len(ms), 40), 4)
 
 
-def build_shortlist(manuscript, venues, *, size=None, embed=None, prefer=()):
+def request_time_limit():
+    """Seconds matching may spend on embeddings inside a web request (audit item 34). The gunicorn
+    timeout is 120 s; anything not embedded in time falls back to keyword matching, and
+    `manage.py embed_venues` embeds the rest outside the request."""
+    return _env_int('VENUE_EMBED_REQUEST_SECONDS', 10, 2, 60)
+
+
+def _with_timeout(embed, seconds):
+    if embed is not ollama_embed:
+        return embed
+    return lambda texts, model=None: ollama_embed(texts, model=model, timeout=seconds)
+
+
+def build_shortlist(manuscript, venues, *, size=None, embed=None, prefer=(), time_limit=None):
     """Rank venues by topical closeness to the manuscript and keep the top `size`.
 
     Returns (kept_venues, info). info = {'method', 'considered', 'kept', 'size', 'similarity': {id: float},
@@ -245,8 +264,10 @@ def build_shortlist(manuscript, venues, *, size=None, embed=None, prefer=()):
     similarity = {}
     if venues and embeddings_enabled():
         try:
+            if time_limit is not None:
+                embed = _with_timeout(embed or _embedder(), time_limit)
             query = manuscript_vector(manuscript, embed=embed)
-            vectors = ensure_venue_vectors(venues, embed=embed)
+            vectors = ensure_venue_vectors(venues, embed=embed, time_limit=time_limit)
             if len(vectors) < len(venues):
                 raise EmbeddingUnavailable(f'{len(venues) - len(vectors)} venues are not embedded yet.')
             similarity = {v.id: round(dot(query, vectors[v.id]), 4) for v in venues}

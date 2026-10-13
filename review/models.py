@@ -1030,6 +1030,15 @@ class VenueIndexRun(models.Model):
     class Meta:
         ordering = ['-created_at']
 
+    def save(self, *args, **kwargs):
+        # Audit item 37: a worker saves its progress as it goes. If the run was closed meanwhile (--force,
+        # or the hourly clean-up), its progress is still saved but the run is not reopened.
+        if self.pk and self.status == 'processing' and not kwargs.get('update_fields'):
+            current = type(self).objects.filter(pk=self.pk).values_list('status', 'summary').first()
+            if current is not None and current[0] not in {'queued', 'processing'}:
+                self.status, self.summary = current
+        super().save(*args, **kwargs)
+
 
 class IndexReviewDecision(models.Model):
     """A person's decision on an index record: the evidence trail for every exclusion. Never deleted."""

@@ -397,6 +397,16 @@ def sweep_stuck_jobs_task():
 
     return f"Swept {count} stuck jobs."
 
+def purge_old_auth_events(now):
+    """Audit item 32: sign-in counters are kept for rate limits and a short look-back, not for ever.
+    The audit trail of sign-ins (AuditEvent) is kept; only these raw counters are removed."""
+    from .models import AdminAuthEvent, AuthorAuthEvent
+    days = max(30, int(os.getenv('AUTH_EVENT_RETENTION_DAYS', '180') or 180))
+    cutoff = now - timedelta(days=days)
+    AdminAuthEvent.objects.filter(occurred_at__lt=cutoff).delete()
+    AuthorAuthEvent.objects.filter(occurred_at__lt=cutoff).delete()
+
+
 @monitor_background_task('retention_sweep')
 def sweep_retention_task():
     """Purge expired venue-scoped content and remove the shared manuscript payload once every venue copy has expired."""
@@ -435,9 +445,9 @@ def sweep_retention_task():
             ):
                 continue
 
+            from .manuscript_versions import delete_file_after_commit
             for row in submission.requirement_files.all():
-                if row.file:
-                    row.file.delete(save=False)
+                delete_file_after_commit(row.file)   # audit item 21: after commit, not before
             submission.requirement_files.all().delete()
             submission.evidence_findings.all().delete()
 
@@ -493,8 +503,7 @@ def sweep_retention_task():
                 else:  # shares the working copy's file, which is deleted just below
                     type(version).objects.filter(id=version.id).update(file='', bytes=0, abstract='',
                                                                        parsed_profile={}, content_purged_at=now)
-            if manuscript.manuscript_file:
-                manuscript.manuscript_file.delete(save=False)
+            delete_file_after_commit(manuscript.manuscript_file)   # audit item 21
             manuscript.manuscript_file = ''
             manuscript.manuscript_bytes = 0
             manuscript.parsed_profile = {}
@@ -528,6 +537,7 @@ def sweep_retention_task():
     # Public rate-limit counters are only useful for the current window; drop old ones here.
     from .public_rate import purge_old_windows
     purge_old_windows()
+    purge_old_auth_events(now)
 
     return (
         f'Purged {purged_submissions} expired venue submission(s) and '

@@ -134,7 +134,10 @@ def shared_qwen_chat_json(
     request_timeout = float(timeout if timeout is not None else SHARED_QWEN_WAIT_TIMEOUT)
     assert_prompt_fits_context(prompt, num_ctx=num_ctx, num_predict=max_tokens)
 
-    client = redis.from_url(SHARED_QWEN_REDIS_URL, decode_responses=True)
+    # Audit item 38: a Redis that stops answering must fail fast, not hang the worker. Results are
+    # polled with short GETs, so a 10-second socket timeout never cuts a normal wait short.
+    client = redis.from_url(SHARED_QWEN_REDIS_URL, decode_responses=True, socket_connect_timeout=5,
+                            socket_timeout=10)
     client.ping()
 
     job_id = str(uuid.uuid4())

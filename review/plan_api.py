@@ -201,6 +201,11 @@ def abandon_plan(request, plan_id):
 def admin_plans(request):
     items = SubmissionPlan.objects.select_related('manuscript', 'manuscript_version').order_by('-created_at')
     if request.GET.get('manuscript'):
-        items = items.filter(manuscript_id=request.GET['manuscript'])
+        import uuid
+        try:
+            manuscript_id = uuid.UUID(str(request.GET['manuscript']))
+        except ValueError:  # audit item 22: a malformed id is the caller's mistake, not a server error
+            return JsonResponse({'detail': 'manuscript must be a manuscript id.'}, status=400)
+        items = items.filter(manuscript_id=manuscript_id)
     return JsonResponse({'plans': [{**plans.plan_payload(p), 'manuscript_id': str(p.manuscript_id),
                                     'manuscript_title': p.manuscript.title} for p in items[:50]]})

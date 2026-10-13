@@ -567,7 +567,10 @@ def mark_editor_confirmed(venue, user=None):
                                                user__platform_superuser=False) if venue.organization_id else None
     is_outside_owner = bool(user is not None and outside_owners is not None
                             and outside_owners.filter(user=user).exists())
-    if is_outside_owner:
+    # Only a venue Flexee already stands behind (claimed) or one with an approved claim can become
+    # editor-confirmed; a venue an owner created for themselves stays listed (audit item 23).
+    approved = venue.trust_tier == Venue.TIER_CLAIMED or venue.claims.filter(status='approved').exists()
+    if is_outside_owner and approved:
         venue.trust_tier = Venue.TIER_CLAIMED
         venue.last_verified_at = timezone.now()
         venue.save(update_fields=['trust_tier', 'last_verified_at', 'updated_at'])
@@ -2447,6 +2450,8 @@ def admin_venues(request):
 
     candidate = unique_venue_slug(name, data.get('slug', ''))
 
+    # Audit item 23: a venue an org owner creates is only listed. It shows as editor-confirmed after a
+    # Flexee admin approves a claim for it, so nobody can label their own "Nature" as editor-confirmed.
     venue = Venue.objects.create(
         organization=organization,
         name=name,
@@ -2454,6 +2459,7 @@ def admin_venues(request):
         venue_type=venue_type,
         description=str(data.get('description', '')).strip(),
         active=bool(data.get('active', True)),
+        trust_tier=Venue.TIER_CLAIMED if request.editor_user.platform_superuser else Venue.TIER_LISTED,
     )
     record_audit_event(
         request,

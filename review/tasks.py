@@ -397,6 +397,30 @@ def sweep_stuck_jobs_task():
 
     return f"Swept {count} stuck jobs."
 
+def purge_old_public_submission_files(now):
+    """Audit item 32: files sent through the old public submit page. Off unless
+    PUBLIC_SUBMISSION_RETENTION_DAYS is set; then files older than that are deleted after commit and
+    the record (title, author, review result) is kept."""
+    from django.db import transaction
+    from .manuscript_versions import delete_file_after_commit
+    from .models import Submission
+    try:
+        days = int(os.getenv('PUBLIC_SUBMISSION_RETENTION_DAYS', '0') or 0)
+    except ValueError:
+        days = 0
+    if days <= 0:
+        return 0
+    cutoff = now - timedelta(days=max(30, days))
+    purged = 0
+    for submission in (Submission.objects.filter(created_at__lt=cutoff).exclude(manuscript_file='')
+                       .exclude(manuscript_file__isnull=True)[:500]):
+        with transaction.atomic():
+            delete_file_after_commit(submission.manuscript_file)
+            Submission.objects.filter(id=submission.id).update(manuscript_file='')
+        purged += 1
+    return purged
+
+
 def purge_old_auth_events(now):
     """Audit item 32: sign-in counters are kept for rate limits and a short look-back, not for ever.
     The audit trail of sign-ins (AuditEvent) is kept; only these raw counters are removed."""
@@ -538,6 +562,7 @@ def sweep_retention_task():
     from .public_rate import purge_old_windows
     purge_old_windows()
     purge_old_auth_events(now)
+    purge_old_public_submission_files(now)
 
     return (
         f'Purged {purged_submissions} expired venue submission(s) and '

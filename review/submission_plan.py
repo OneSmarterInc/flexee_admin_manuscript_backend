@@ -58,7 +58,9 @@ def settings():
         steps = 8
     return {'max_steps': steps,
             'min_fit': _env_float('PLAN_MIN_FIT', '0.40'),       # cosine of local embeddings
-            'strong_fit': _env_float('PLAN_STRONG_FIT', '0.60')}
+            'strong_fit': _env_float('PLAN_STRONG_FIT', '0.60'),
+            # Audit item 22: with no similarity score (embeddings off), keyword overlap is the floor.
+            'min_keyword_fit': _env_float('PLAN_MIN_KEYWORD_FIT', '0.10')}
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +83,9 @@ def assess(match, config):
     sim = match.topic_similarity
     if sim is not None and sim < config['min_fit']:
         return None, 'Its scope is too far from this manuscript\'s topic.'
+    if sim is None and _keyword_fit(match) < config.get('min_keyword_fit', 0.10):
+        # Audit item 22: no similarity score (embeddings off) is not a free pass for an off-topic venue.
+        return None, 'Its scope shares too few topics with this manuscript.'
     if not items and match.eligibility == 'eligible':
         band = 1
     elif match.eligibility == 'eligible':
@@ -94,6 +99,15 @@ def assess(match, config):
         'distance': compliance_distance(items), 'similarity': sim,
         'fit_band': 'strong' if (sim is not None and sim >= config['strong_fit']) else 'moderate',
     }, None
+
+
+def _keyword_fit(match):
+    """Share of the manuscript's topic terms the venue uses (the matcher's keyword fallback)."""
+    try:
+        from .services.venue_shortlist import _keyword_similarity, _manuscript_terms
+        return _keyword_similarity(_manuscript_terms(match.manuscript), match.venue, match.venue_config)
+    except Exception:  # noqa: BLE001  (never drop a venue because the fallback itself failed)
+        return 1.0
 
 
 FIT_BAND_RANK = {'strong': 0, 'moderate': 1}

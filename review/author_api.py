@@ -1043,6 +1043,8 @@ def author_login(request):
     try:
         author = Author.objects.get(email=email)
     except Author.DoesNotExist:
+        # Audit item 32: an unknown email takes as long as a wrong password, so timing does not tell.
+        verify_password(password, _dummy_password_hash())
         AuthorAuthEvent.objects.create(remote_hash=rh, success=False, detail={'email': email, 'reason': 'invalid_credentials', 'action': 'login'})
         return JsonResponse({'detail': 'Invalid email or password'}, status=401)
 
@@ -1115,6 +1117,26 @@ def author_change_password(request):
 
     token, max_age = issue_author_session(author.id)
     response = JsonResponse({'ok': True})
+    set_author_session_cookie(response, token, max_age)
+    return response
+
+
+@require_POST
+@require_author
+def author_sign_out_other_devices(request):
+    """Audit item 32: end every other session of this author (a lost laptop, a shared computer).
+    Sessions issued before now stop working; this browser gets a fresh session and stays signed in."""
+    try:
+        author = Author.objects.get(id=request.flexee_author['aid'])
+    except Author.DoesNotExist:
+        return JsonResponse({'detail': 'Author not found'}, status=401)
+    author.password_changed_at = timezone.now()  # sessions are checked against this time
+    author.save(update_fields=['password_changed_at', 'updated_at'])
+    AuditEvent.objects.create(actor_email=author.email, actor_role='author', action='author.signed_out_other_devices',
+                              resource_type='author_account', resource_id=str(author.id),
+                              remote_hash=remote_hash(request), detail={})
+    token, max_age = issue_author_session(author.id)
+    response = JsonResponse({'ok': True, 'detail': 'You are signed out on every other device.'})
     set_author_session_cookie(response, token, max_age)
     return response
 

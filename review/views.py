@@ -364,7 +364,9 @@ def admin_verify_password(request):
 
     from .models import EditorUser
     user = EditorUser.objects.filter(email=username).first()
-    ok = bool(user and verify_password(password, user.password_hash) and os.getenv('ADMIN_SESSION_SECRET', ''))
+    # Audit item 32: an unknown account takes as long as a wrong password, so timing does not tell.
+    password_ok = verify_password(password, user.password_hash if user else _dummy_hash())
+    ok = bool(user and password_ok and os.getenv('ADMIN_SESSION_SECRET', ''))
 
     if not ok:
         AdminAuthEvent.objects.create(remote_hash=rh, success=False, detail={'username': username, 'reason': 'invalid_credentials'})
@@ -392,6 +394,11 @@ def admin_verify_password(request):
         resp['totp_setup_uri'] = totp_setup_uri
 
     return JsonResponse(resp)
+
+
+def _dummy_hash():
+    from .author_api import _dummy_password_hash
+    return _dummy_password_hash()
 
 
 LOGIN_TICKET_SALT = 'flexee.admin.login-ticket'
@@ -468,7 +475,7 @@ def admin_login(request):
     else:
         # Older screens still send the password again; accepted until every screen sends a ticket.
         user = EditorUser.objects.filter(email=username).first()
-        credentials_ok = bool(user and verify_password(password, user.password_hash))
+        credentials_ok = bool(verify_password(password, user.password_hash if user else _dummy_hash()) and user)
 
     ok = False
     totp_missing_error = False

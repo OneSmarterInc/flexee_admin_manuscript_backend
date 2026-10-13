@@ -109,13 +109,16 @@ def test_page_without_rules_is_incomplete_with_a_reason():
 
 
 @pytest.mark.django_db
-def test_rules_quoted_by_the_page_scanner_count_even_if_the_ai_returns_nothing():
+def test_phrases_found_by_the_page_scanner_alone_are_not_rules_found():
+    """Audit item 4: phrases the system spots itself ("research articles" on the page) are kept as
+    quoted types, but they are not the journal's rules, so the read is incomplete, not ready."""
     item = journal()
     fetcher, _config = make_fetcher(JOURNAL_PAGES)
     run_rules(fetcher, extractor=lambda *a: {'name': 'Journal of Applied AI in Organizations', 'venue_type': 'journal'})
     item.refresh_from_db()
     summary = ir.rules_summary(item.discovered)
-    assert item.rules_status == 'ready' and summary['article_types'] and all(e['quote'] for e in summary['evidence'])
+    assert item.rules_status == 'incomplete' and 'quote' in item.rules_error
+    assert summary['article_types'] and all(e['quote'] for e in summary['evidence'])
 
 
 @pytest.mark.django_db
@@ -175,7 +178,8 @@ def test_publish_creates_a_verified_index_venue_and_links_it():
     run_rules(fetcher)
     client = admin_client()
     detail = client.get(f'/api/admin/venue-index/{item.id}/').json()['item']
-    assert detail['rules']['status'] == 'ready' and detail['rules_read']['article_types'] == ['Research article', 'Review article']
+    # The model's types had only a fabricated quote, so only the type quoted on the page is kept (item 4).
+    assert detail['rules']['status'] == 'ready' and detail['rules_read']['article_types'] == ['Research article']
 
     response = client.post(f'/api/admin/venue-index/{item.id}/publish/')
     assert response.status_code == 200

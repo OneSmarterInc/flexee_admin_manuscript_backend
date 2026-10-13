@@ -100,19 +100,105 @@ def site_of(url):
     return host[4:] if host.startswith('www.') else host
 
 
+def _is_page_signal(evidence):
+    """Evidence found by fixed phrases on the page (a status line, a type mentioned), not read by the
+    model. It is a real quote, but it is not the journal's rules."""
+    claim = str(evidence.get('claim') or '')
+    return evidence.get('origin') == 'page_signal' or claim.startswith('The official page ')
+
+
+# Which quoted evidence supports which rule field (the model names the field in its own words).
+QUOTE_FIELDS = {
+    'aims_scope': ('scope', 'aim'),
+    'article_types': ('type',),
+    'required_submission_items': ('item', 'require', 'checklist', 'declaration', 'statement'),
+}
+
+
+def _get(item, name):
+    return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
+
+
+def quoted_fields(item):
+    """The rule fields backed by their own quote on the official pages.
+
+    Word and reference limits and required sections are checked against the page text when they are
+    extracted (number with its unit, each section name), so they count when present. Scope, article
+    types and required items count only when the model quoted the page for that field."""
+    model_evidence = [e for e in (_get(item, 'source_evidence') or [])
+                      if isinstance(e, dict) and not _is_page_signal(e)]
+    quoted = set()
+    if _get(item, 'structured_desk_rejection_rules'):
+        quoted.add('structured_desk_rejection_rules')
+    for field, words in QUOTE_FIELDS.items():
+        if not _get(item, field):
+            continue
+        if any(any(w in str(e.get('field') or '').lower() for w in words) for e in model_evidence):
+            quoted.add(field)
+    return quoted, model_evidence
+
+
+def keep_quoted_rules(candidate):
+    """Index reading: drop any rule field without its own quote, so nothing unverified is published.
+    Article types found only by fixed phrases on the page keep just those types."""
+    quoted, _model = quoted_fields(candidate)
+    out = dict(candidate)
+    if 'aims_scope' not in quoted:
+        out['aims_scope'] = ''
+    if 'required_submission_items' not in quoted:
+        out['required_submission_items'] = []
+    if 'article_types' not in quoted:
+        from .venue_discovery import TYPE_LABELS
+        signal_types = []
+        for e in out.get('source_evidence') or []:
+            key = e.get('type_key') if isinstance(e, dict) and _is_page_signal(e) else None
+            if key in TYPE_LABELS and key not in signal_types:
+                signal_types.append(key)
+        out['submission_types'] = signal_types
+        out['article_types'] = [TYPE_LABELS[k] for k in signal_types]
+    return out
+
+
 def rules_found(item, min_confidence):
-    """Did the read find real rules? Official pages, at least one quote verified on them, and at
-    least one rule a manuscript can be checked against."""
+    """Did the read find real rules? Official pages, a quote the model took from them, and at least
+    one rule a manuscript can be checked against that is backed by its own quote (audit item 4).
+    Phrases the system spotted itself (page signals) never count as rules found."""
     if item is None:
         return False, 'Nothing was extracted.'
-    get = item.get if isinstance(item, dict) else (lambda name: getattr(item, name, None))
-    if not get('source_evidence'):
+    quoted, model_evidence = quoted_fields(item)
+    if not model_evidence:
         return False, 'No rule could be confirmed by a quote on the official pages.'
-    if (get('confidence') or 0) < min_confidence:
-        return False, f'Confidence {get("confidence")} is below {min_confidence} (official pages not clear enough).'
-    if not any(get(f) for f in RULE_FIELDS):
-        return False, 'The pages did not state article types, limits, required items or scope.'
+    if (_get(item, 'confidence') or 0) < min_confidence:
+        return False, f'Confidence {_get(item, "confidence")} is below {min_confidence} (official pages not clear enough).'
+    if not quoted:
+        return False, 'No article types, limits, required items or scope were backed by a quote on the pages.'
     return True, ''
+
+
+def own_discovered(record):
+    """The record this journal's rules are kept in, unless another journal shares it (audit item 5:
+    journals on one publisher-wide page were merged). A shared record is not reused."""
+    if not record.discovered_id:
+        return None
+    if IndexedVenue.objects.filter(discovered_id=record.discovered_id).exclude(id=record.id).exists():
+        return None
+    return record.discovered
+
+
+def _match_for(record, candidate):
+    """An existing staged record for this same journal (e.g. found by Venue Discovery), never one that
+    belongs to another journal in the index."""
+    from . import venue_discovery as vd
+    found = vd.find_existing(candidate)
+    if found is None:
+        return None
+    if IndexedVenue.objects.filter(discovered=found).exclude(id=record.id).exists():
+        return None
+    if found.added_venue_id and IndexedVenue.objects.filter(venue_id=found.added_venue_id).exclude(id=record.id).exists():
+        return None
+    if vd.normalize_name(found.name) != vd.normalize_name(record.title):
+        return None
+    return found
 
 
 def read_rules_for(record, fetcher, config, *, extractor=None, min_confidence=40, now=None, blocked_sites=None,
@@ -126,7 +212,6 @@ def read_rules_for(record, fetcher, config, *, extractor=None, min_confidence=40
     Pages are fetched once; the extraction then goes local model -> local retry -> cloud model,
     stopping at the first result the page validator accepts (build plan step 6)."""
     from . import venue_discovery as vd
-    from ..models import DiscoveredVenue
     from .rules_escalation import Escalation, extract_with_escalation
     now = now or timezone.now()
     blocked_sites = blocked_sites if blocked_sites is not None else set()
@@ -152,7 +237,9 @@ def read_rules_for(record, fetcher, config, *, extractor=None, min_confidence=40
             errors.append('The page has no readable text (it may need JavaScript).')
             continue
         fingerprint = vd.content_fingerprint(pages)
-        previous = DiscoveredVenue.objects.filter(content_fingerprint=fingerprint).first()
+        own = own_discovered(record)
+        # Reuse only this journal's own earlier reading: another journal on the same page is not this one.
+        previous = own if own is not None and own.content_fingerprint == fingerprint else None
         if previous and rules_found(previous, min_confidence)[0]:
             # Unchanged pages that were read well before: reuse, no model call.
             previous.last_checked_at = now
@@ -165,7 +252,10 @@ def read_rules_for(record, fetcher, config, *, extractor=None, min_confidence=40
         if candidate is None:
             errors.append('The AI could not extract rules from the pages.')
             break  # the pages were read; another URL on the same journal would not help the model
-        item, _outcome = vd.upsert_candidate(candidate, fingerprint)
+        # This read is about this journal, whatever name a shared page shows.
+        candidate = keep_quoted_rules(dict(candidate, name=record.title[:300] or candidate['name']))
+        item, _outcome = vd.upsert_candidate(candidate, fingerprint,
+                                             existing=own if own is not None else _match_for(record, candidate))
         break
 
     if item is not None:

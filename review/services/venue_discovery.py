@@ -1023,23 +1023,58 @@ def _squash(text):
     return re.sub(r'\s+', ' ', str(text or '')).strip().lower()
 
 
+MIN_QUOTE_CHARS = 12         # a whole quote shorter than this proves little (a year, "Submit")
+MIN_ELIDED_QUOTE_CHARS = 20  # an elided quote ("A ... B") needs this much text actually on the page
+
+
 def _quote_found(quote, page_text):
-    """True if a meaningful part of the quote really appears on the page."""
+    """True if the quote really appears on the page (audit item 4: no loose fragment matches).
+
+    A whole quote must be on the page and at least MIN_QUOTE_CHARS long. In an elided quote
+    ("A ... B") every part long enough to mean something must be on the page, and together they
+    must be at least MIN_ELIDED_QUOTE_CHARS long; one matching fragment is no longer enough."""
     quote = _squash(quote).strip('"“”\' ')
     if not quote:
         return False
     haystack = _squash(page_text)
-    for part in re.split(r'\s*(?:\.\.\.|…)\s*', quote):
-        part = part.strip(' .,;:')
-        if len(part) >= 12 and part in haystack:
-            return True
-    return len(quote) >= 6 and quote in haystack
+    parts = [part.strip(' .,;:') for part in re.split(r'\s*(?:\.\.\.|…)\s*', quote)]
+    parts = [part for part in parts if part]
+    if len(parts) <= 1:
+        whole = parts[0] if parts else quote
+        return len(whole) >= MIN_QUOTE_CHARS and whole in haystack
+    long_parts = [part for part in parts if len(part) >= MIN_QUOTE_CHARS]
+    if not long_parts or not all(part in haystack for part in long_parts):
+        return False
+    return sum(len(part) for part in long_parts) >= MIN_ELIDED_QUOTE_CHARS
 
 
 def _number_in_text(number, text):
     variants = {str(number), f'{number:,}', f'{number:,}'.replace(',', ' '), f'{number:,}'.replace(',', '.')}
     lowered = text.lower()
     return any(re.search(r'(?<![\d,.])' + re.escape(v) + r'(?![\d])', lowered) for v in variants)
+
+
+LIMIT_UNITS = {
+    'word_count': r'words?',
+    'reference_count': r'references?|citations?|sources',
+}
+
+
+def _limit_in_text(number, field, text):
+    """True if the page states this number as a limit of this kind: the number with its unit next to it
+    ("8,000 words", "maximum of 50 references"). A bare number, such as a year, is not a limit."""
+    unit = LIMIT_UNITS.get(field)
+    if not unit:
+        return _number_in_text(number, text)
+    lowered = text.lower()
+    variants = {str(number), f'{number:,}', f'{number:,}'.replace(',', ' '), f'{number:,}'.replace(',', '.')}
+    for variant in variants:
+        for match in re.finditer(r'(?<![\d,.])' + re.escape(variant) + r'(?![\d])', lowered):
+            after = lowered[match.end():match.end() + 40]
+            before = lowered[max(0, match.start() - 40):match.start()]
+            if re.match(r'\s*(?:-|–)?\s*(?:' + unit + r')\b', after) or re.search(r'\b(?:' + unit + r')\b[^.\d]{0,25}$', before):
+                return True
+    return False
 
 
 def verify_evidence(raw_evidence, pages):
@@ -1064,6 +1099,10 @@ def verify_evidence(raw_evidence, pages):
             'source_title': _clean_text(item.get('source_title') or page.title, 200),
             'excerpt': _clean_text(quote, 300),
             'checked_at': checked_at,
+            # Evidence found by fixed phrases (not read by the model) is marked, so it is never
+            # counted as the model having read the rules.
+            **({'origin': 'page_signal'} if item.get('origin') == 'page_signal' else {}),
+            **({'type_key': item['type_key']} if item.get('origin') == 'page_signal' and item.get('type_key') else {}),
         })
         if len(verified) >= 25:
             break
@@ -1082,8 +1121,8 @@ def _verified_structured_rules(raw_rules, pages):
         except (ValueError, TypeError):
             continue
         if normalised['field'] in {'word_count', 'reference_count'}:
-            if not _number_in_text(int(normalised['value']), corpus):
-                continue
+            if not _limit_in_text(int(normalised['value']), normalised['field'], corpus):
+                continue  # the number must be stated as a limit of that kind, not just appear (a year)
         if normalised['field'] == 'required_sections':
             if not all(_squash(section) in _squash(corpus) for section in normalised['value']):
                 continue
@@ -1297,8 +1336,15 @@ def _is_weaker_reading(record, candidate):
     return candidate['confidence'] < record.confidence
 
 
-def upsert_candidate(candidate, fingerprint):
-    """Create or update one DiscoveredVenue. Returns (record, outcome)."""
+_FIND = object()
+
+
+def upsert_candidate(candidate, fingerprint, existing=_FIND):
+    """Create or update one DiscoveredVenue. Returns (record, outcome).
+
+    By default the record is matched by submission URL, name and domain. The Venue Index passes
+    `existing` itself (its own record, or None for a new one), because journals that share a
+    publisher's guidelines page or submission system must never merge into one record."""
     now = timezone.now()
     domain = registrable_domain(canonical_host(candidate.get('website_url') or candidate.get('submission_url') or ''))
     keys = {
@@ -1308,7 +1354,8 @@ def upsert_candidate(candidate, fingerprint):
         'canonical_submission_url': canonical_url(candidate.get('submission_url')),
     }
     with transaction.atomic():
-        existing = find_existing(candidate)
+        if existing is _FIND:
+            existing = find_existing(candidate)
         if existing is None:
             record = DiscoveredVenue.objects.create(
                 **{f: candidate[f] for f in STAGED_FIELDS}, **keys,
@@ -1564,19 +1611,22 @@ def apply_page_signals(raw, pages):
         page, quote = signals['closed']
         merged['acceptance_status'] = 'closed'
         evidence.append({'field': 'acceptance_status', 'claim': 'The official page says submissions are closed.',
-                         'url': page.url, 'source_title': page.title, 'evidence_text': quote})
+                         'url': page.url, 'source_title': page.title, 'evidence_text': quote,
+                         'origin': 'page_signal'})
     elif signals['accepting'] and current != 'closed':
         page, quote = signals['accepting']
         merged['acceptance_status'] = 'accepting'
         evidence.append({'field': 'acceptance_status', 'claim': 'The official page offers a way to submit.',
-                         'url': page.url, 'source_title': page.title, 'evidence_text': quote})
+                         'url': page.url, 'source_title': page.title, 'evidence_text': quote,
+                         'origin': 'page_signal'})
     types = list(merged.get('submission_types') or [])
     for type_key, (page, quote) in signals['types'].items():
         label = TYPE_LABELS[type_key]
         if label not in types and type_key not in types:
             types.append(label)
             evidence.append({'field': 'accepted_types', 'claim': f'The official page mentions {label.lower()}s.',
-                             'url': page.url, 'source_title': page.title, 'evidence_text': quote})
+                             'url': page.url, 'source_title': page.title, 'evidence_text': quote,
+                             'origin': 'page_signal', 'type_key': type_key})
     merged['submission_types'] = types
     merged['source_evidence'] = evidence
     return merged

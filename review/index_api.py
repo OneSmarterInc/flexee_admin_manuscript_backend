@@ -331,6 +331,21 @@ def index_publish(request, record_id):
         return JsonResponse({'detail': 'Decide the exclusion review first (Keep or Exclude).'}, status=409)
     if item.rules_status != 'ready' or not item.discovered_id:
         return JsonResponse({'detail': 'Its rules have not been read successfully yet.'}, status=409)
+    # Audit item 5: never publish one journal onto another journal's reading or live venue.
+    shared = (IndexedVenue.objects.filter(discovered_id=item.discovered_id).exclude(id=item.id)
+              .values_list('title', flat=True).first())
+    if shared is not None:
+        return JsonResponse({'detail': f'These rules were read from a page shared with "{shared}". '
+                                       'Read this journal\'s rules again before publishing.',
+                             'code': 'shared_reading'}, status=409)
+    added_venue_id = item.discovered.added_venue_id
+    if added_venue_id:
+        other = (IndexedVenue.objects.filter(venue_id=added_venue_id).exclude(id=item.id)
+                 .values_list('title', flat=True).first())
+        if other is not None or (item.venue_id and item.venue_id != added_venue_id):
+            return JsonResponse({'detail': 'These rules are already live as a different journal'
+                                           + (f' ("{other}")' if other else '') + '. Read this journal\'s '
+                                           'rules again before publishing.', 'code': 'other_venue'}, status=409)
     try:
         discovered, _already = add_discovered_to_venue_agent(request, item.discovered_id)
     except AddToVenueError as exc:

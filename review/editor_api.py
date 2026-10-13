@@ -125,6 +125,12 @@ def admin_venue_detail(request, venue_id):
         name = str(data.get('name', '')).strip()
         if not name:
             return JsonResponse({'detail': 'name cannot be empty'}, status=400)
+        if (name != venue.name and venue.trust_tier in Venue.RULE_TIERS
+                and not request.editor_user.platform_superuser):
+            # Audit item 23: the label "Editor-confirmed" or "Checked from official pages" belongs to
+            # the journal it was given for; renaming it is a Flexee decision.
+            return JsonResponse({'detail': 'This venue is confirmed under its current name. Ask Flexee to rename it.',
+                                 'code': 'rename_needs_approval'}, status=403)
         venue.name = name
     if 'venue_type' in data:
         venue_type = str(data.get('venue_type', '')).strip()

@@ -313,6 +313,15 @@ def _site(url):
     return host[4:] if host.startswith('www.') else host
 
 
+def _recently_refused_sites(now):
+    """Sites that refused the rules reader in the last 90 days (rules_status 'blocked')."""
+    from .index_rules import BLOCKED_RETRY_DAYS
+    recent = now - timedelta(days=BLOCKED_RETRY_DAYS)
+    rows = (IndexedVenue.objects.filter(rules_status='blocked', rules_read_at__gte=recent)
+            .values_list('homepage_url', flat=True))
+    return {_site(url) for url in rows if url}
+
+
 def gather_page_evidence(run, profile, budget, *, fetcher=None, say=lambda m: None, now=None):
     """Read the official pages of candidate journals and record exact-quote evidence.
 
@@ -342,10 +351,21 @@ def gather_page_evidence(run, profile, budget, *, fetcher=None, say=lambda m: No
             local.fetcher = SafeFetcher(config)
         return local.fetcher
 
+    from .venue_discovery import DiscoveryFetchError, is_blocked_failure
+    refused = set(_recently_refused_sites(now))   # audit item 38: never ask a refusing site again
+    refused_lock = threading.Lock()
+
     def read(record):
+        site = _site(record.homepage_url)
+        with refused_lock:
+            if site in refused:
+                return record, [], f'{site} refuses automated reading; not requested again.'
         try:
-            with gate.hold(_site(record.homepage_url)):
+            with gate.hold(site):
                 flags, problem = page_evidence(record, fetcher_for_thread())
+            if problem and is_blocked_failure(DiscoveryFetchError(problem)):
+                with refused_lock:
+                    refused.add(site)
         except Exception as exc:  # one bad site must not stop the run
             logger.warning('Page evidence failed for %s: %s', record.title, exc)
             flags, problem = [], str(exc)[:200]

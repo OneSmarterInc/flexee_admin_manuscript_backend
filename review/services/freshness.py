@@ -14,6 +14,7 @@ venues are the editor's to maintain: they are hidden once their deadline passes.
 import logging
 import os
 from datetime import date, timedelta
+from datetime import timezone as dt_timezone
 
 from django.db.models import Q
 from django.utils import timezone
@@ -83,12 +84,20 @@ def call_candidates(venue, config):
             for c in _config_calls(config)]
 
 
+def deadline_today(now=None):
+    """The date a deadline is compared with (audit item 38). A deadline "15 March" is open until
+    15 March has ended everywhere on Earth (UTC-12), so a call is never hidden early for an author in
+    the Americas just because the server runs on UTC."""
+    now = now or timezone.now()
+    return (now.astimezone(dt_timezone.utc) - timedelta(hours=12)).date()
+
+
 def visible_calls(venue, config, now=None):
     """Calls an author may see: deadline not passed and, on Flexee-verified venues, re-confirmed
     within the window. Returns (visible, hidden_count)."""
     from ..models import Venue
     now = now or timezone.now()
-    today = timezone.localdate(now)
+    today = deadline_today(now)
     window = now - timedelta(days=confirm_days())
     visible, hidden = [], 0
     for call in call_candidates(venue, config):
@@ -113,7 +122,7 @@ def author_config_view(venue, config, payload, now=None):
     if payload is None:
         return None
     now = now or timezone.now()
-    today = timezone.localdate(now)
+    today = deadline_today(now)
     payload = dict(payload)
     demand = dict(payload.get('current_demand') or {})
     demand.pop('calls_for_papers', None)

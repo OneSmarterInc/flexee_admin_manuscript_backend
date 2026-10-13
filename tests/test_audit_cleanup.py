@@ -25,21 +25,23 @@ from tests.test_venue_index import MIS, OPS, FakeHttp, crossref_payload, run_ful
 # 19: the version backfill can be rolled back and run again
 # ---------------------------------------------------------------------------
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_the_backfill_rolls_back_cleanly_and_runs_again():
+    from tests.migration_state import BEFORE_REQUIRED_VERSIONS, make_old_manuscript, remove_old_manuscript, schema_at
     migration = importlib.import_module('review.migrations.0038_backfill_manuscript_versions')
-    _client, author = author_client()
-    m = make_manuscript(author)
-    ManuscriptVersion.objects.filter(manuscript=m).delete()
-    Manuscript.objects.filter(id=m.id).update(current_version=None)
-    ReadinessAssessment.objects.filter(manuscript=m).update(version=None)
-    migration.forwards(apps, None)
-    migration.backwards(apps, None)
-    assert not ManuscriptVersion.objects.filter(manuscript=m).exists()
-    assert ReadinessAssessment.objects.get(manuscript=m).version_id is None
-    migration.forwards(apps, None)          # before the fix: a second version 1 (unique error)
-    m.refresh_from_db()
-    assert ManuscriptVersion.objects.filter(manuscript=m).count() == 1 and m.current_version.number == 1
+    with schema_at(BEFORE_REQUIRED_VERSIONS) as old:
+        Version = old.get_model('review', 'ManuscriptVersion')
+        Readiness = old.get_model('review', 'ReadinessAssessment')
+        m = make_old_manuscript(old)
+        migration.forwards(old, None)
+        migration.backwards(old, None)
+        assert not Version.objects.filter(manuscript_id=m.id).exists()
+        assert Readiness.objects.get(manuscript_id=m.id).version_id is None
+        migration.forwards(old, None)          # before the fix: a second version 1 (unique error)
+        m.refresh_from_db()
+        assert Version.objects.filter(manuscript_id=m.id).count() == 1
+        assert Version.objects.get(id=m.current_version_id).number == 1
+        remove_old_manuscript(old, m.id)
 
 
 # ---------------------------------------------------------------------------

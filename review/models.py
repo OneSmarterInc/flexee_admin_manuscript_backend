@@ -447,10 +447,15 @@ class ManuscriptVersion(models.Model):
 
 
 def _default_version(instance):
-    """Rows made without an explicit version belong to the manuscript's current version."""
+    """Rows made without an explicit version belong to the manuscript's current version. A manuscript
+    with no version yet gets its version 1 here (audit item 16: the link is required)."""
     if instance.version_id is None and instance.manuscript_id:
         instance.version_id = (Manuscript.objects.filter(id=instance.manuscript_id)
                                .values_list('current_version_id', flat=True).first())
+        if instance.version_id is None:
+            from .manuscript_versions import create_initial_version
+            manuscript = Manuscript.objects.get(id=instance.manuscript_id)
+            instance.version_id = create_initial_version(manuscript).id
 
 
 class ReadinessAssessment(models.Model):
@@ -462,8 +467,9 @@ class ReadinessAssessment(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     manuscript = models.ForeignKey(Manuscript, on_delete=models.CASCADE, related_name='readiness_assessments')
-    version = models.ForeignKey(ManuscriptVersion, null=True, blank=True, on_delete=models.SET_NULL,
-                                related_name='readiness_assessments')
+    # Audit item 16: every row belongs to a version; a version with rows cannot be deleted on its own
+    # (RESTRICT still lets a whole manuscript be deleted together with its versions).
+    version = models.ForeignKey(ManuscriptVersion, on_delete=models.RESTRICT, related_name='readiness_assessments')
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     completed_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', db_index=True)
@@ -489,8 +495,7 @@ class VenueMatch(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     manuscript = models.ForeignKey(Manuscript, on_delete=models.CASCADE, related_name='venue_matches')
-    version = models.ForeignKey(ManuscriptVersion, null=True, blank=True, on_delete=models.SET_NULL,
-                                related_name='venue_matches')
+    version = models.ForeignKey(ManuscriptVersion, on_delete=models.RESTRICT, related_name='venue_matches')  # item 16
     venue = models.ForeignKey(Venue, on_delete=models.CASCADE, related_name='manuscript_matches')
     venue_config = models.ForeignKey(
         VenueAgentConfig,
@@ -539,8 +544,7 @@ class VenueSubmission(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     manuscript = models.ForeignKey(Manuscript, on_delete=models.PROTECT, related_name='venue_submissions')
-    version = models.ForeignKey(ManuscriptVersion, null=True, blank=True, on_delete=models.PROTECT,
-                                related_name='venue_submissions')
+    version = models.ForeignKey(ManuscriptVersion, on_delete=models.PROTECT, related_name='venue_submissions')  # item 16
     venue = models.ForeignKey(Venue, on_delete=models.PROTECT, related_name='submissions')
     venue_config = models.ForeignKey(
         VenueAgentConfig,
@@ -1253,12 +1257,13 @@ class SubmissionPlanStep(models.Model):
     fit_band = models.CharField(max_length=10, default='moderate')
     author_moved = models.BooleanField(default=False)
     outcome_note = models.TextField(blank=True)
-    submitted_version = models.ForeignKey(ManuscriptVersion, null=True, blank=True, on_delete=models.SET_NULL,
+    # Audit item 16: a version a venue received is never deleted from under the plan.
+    submitted_version = models.ForeignKey(ManuscriptVersion, null=True, blank=True, on_delete=models.RESTRICT,
                                           related_name='+')
     outcome_reported_by = models.CharField(max_length=10, blank=True)  # venue | author
     outcome_at = models.DateTimeField(null=True, blank=True)
     revision_answer = models.CharField(max_length=10, blank=True)  # revised | unchanged
-    revision_version = models.ForeignKey(ManuscriptVersion, null=True, blank=True, on_delete=models.SET_NULL,
+    revision_version = models.ForeignKey(ManuscriptVersion, null=True, blank=True, on_delete=models.RESTRICT,
                                          related_name='+')
     skip_reason = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

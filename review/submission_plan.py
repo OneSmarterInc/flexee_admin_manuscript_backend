@@ -22,7 +22,8 @@ import os
 from django.db import transaction
 from django.utils import timezone
 
-from .gap_classes import CLASS_KIND, CLASS_LABEL, CLASS_RANK, compliance_distance, effort_of, items_for, preparation_items
+from .gap_classes import (CLASS_KIND, CLASS_LABEL, CLASS_RANK, compliance_distance, effort_of, items_for, plain_item,
+                          plain_words, preparation_items)
 from .models import ManuscriptVersion, PlanEvent, SubmissionPlan, SubmissionPlanStep, Venue
 
 METHOD_VERSION = 'plan-v2'
@@ -71,7 +72,7 @@ def assess(match, config):
     a breach the author can fix by revising (a word cut, a missing section) is 'needs changes';
     only a gap revising cannot fix (article type not accepted, rules not configured) excludes it.
     """
-    items = items_for(match)
+    items = [plain_item(i) for i in items_for(match)]  # venue text never brings odds into the plan
     out = [i for i in items if i['class'] == 'out']
     if out:
         return None, out[0]['message']
@@ -278,7 +279,8 @@ def generate_plan(manuscript, *, generated_by=''):
             rationale += ' You set this order in the previous plan; it is kept.'
         SubmissionPlanStep.objects.create(
             plan=plan, order=number, venue=entry['venue'], venue_config=entry['config'], venue_match=entry['match'],
-            rationale=rationale, required_changes=entry['items'] + preparation_items(entry['config']),
+            rationale=rationale,
+            required_changes=entry['items'] + [plain_item(i) for i in preparation_items(entry['config'])],
             band=entry['band'], compliance_distance=entry['distance'], effort_class=entry['class'],
             fit_band=entry['fit_band'], author_moved=bool(entry.get('author_moved')))
         previous_entry = entry
@@ -505,6 +507,8 @@ def _abandon(plan, *, note='', actor='author'):
     plan.status = 'abandoned'
     plan.position = None
     plan.save(update_fields=['status', 'position', 'updated_at'])
+    # An ended plan has no venue in progress: the step that was "current" goes back to the queue.
+    plan.steps.filter(state='current').update(state='queued', updated_at=timezone.now())
     _log(plan, 'abandoned', actor=actor, note=note)
 
 
@@ -512,6 +516,12 @@ def _abandon(plan, *, note='', actor='author'):
 def abandon(plan_id, *, note=''):
     plan, _ = _lock(plan_id)
     _require_status(plan, 'draft', 'active', 'paused')
+    deciding = plan.steps.filter(state='submitted').select_related('venue').first()
+    if deciding is not None:
+        # Audit item 10: ending the plan now would allow a second live submission, and the venue's
+        # decision would arrive at a plan that no longer exists.
+        raise PlanError(f'{deciding.venue.name} is still deciding. Record its decision, or say you withdrew '
+                        'the manuscript, before ending the plan.', 'venue_deciding', 409)
     _abandon(plan, note=note)
     return plan
 
@@ -553,8 +563,18 @@ def _open_calls(step):
 def _change_payload(change):
     cls = change.get('class')
     kind = 'prepare' if cls == 'prepare' else CLASS_KIND.get(cls, 'medium')
-    return {'message': change.get('message'), 'kind': kind, 'kind_label': KIND_LABEL[kind],
+    # Checked again on the way out, so plans saved before this guard existed are clean too.
+    message = plain_words(change.get('message'), cls or 'section', change.get('quantity'), change.get('unit') or '')
+    return {'message': message, 'kind': kind, 'kind_label': KIND_LABEL[kind],
             'amount': change.get('quantity'), 'unit': change.get('unit'), 'source': change.get('source_locator')}
+
+
+RATIONALE_FALLBACK = ('Placed by how much this venue needs the manuscript to change, and then by how close '
+                      'its scope is.')
+
+
+def _plain_rationale(text):
+    return text if plain_words(text) == text else RATIONALE_FALLBACK
 
 
 def step_payload(step):
@@ -567,7 +587,7 @@ def step_payload(step):
         'state_label': step.get_state_display(),
         'venue': {'id': str(venue.id), 'name': venue.name, 'slug': venue.slug, 'trust': _venue_trust_payload(venue)},
         'open_calls': _open_calls(step),
-        'rationale': step.rationale,
+        'rationale': _plain_rationale(step.rationale),
         'band': step.band,
         'band_label': BAND_TEXT.get(step.band, ''),
         'effort': CLASS_LABEL.get(step.effort_class, step.effort_class),
@@ -602,7 +622,8 @@ def plan_payload(plan):
         'waiting_for_author': waiting is not None,
         'waiting_step_id': str(waiting.id) if waiting else None,
         'steps': [step_payload(s) for s in steps],
-        'not_included': plan.not_included,
+        'not_included': [dict(n, reason=plain_words(n.get('reason'), 'out')) if isinstance(n, dict) else n
+                         for n in plan.not_included or []],
         'events': [{'action': e.action, 'actor': e.actor, 'from': e.from_state, 'to': e.to_state, 'note': e.note,
                     'venue': e.venue_name, 'at': e.created_at.isoformat()} for e in plan.events.order_by('created_at')],
         'how_ordered': 'Venues are grouped: first those that take the manuscript with no changes, then those that '

@@ -8,6 +8,8 @@ Every gap gets a class:
            the venue's rules are not configured): the venue is left out of the plan, with the reason
 Unknown gaps are 'section' and marked unclassified, so they are never treated as cheap.
 """
+import re
+
 
 CLASS_RANK = {'ready': 0, 'edit': 1, 'section': 2, 'study': 3}
 CLASS_LABEL = {'ready': 'Ready', 'edit': 'Edits', 'section': 'New section', 'study': 'New study'}
@@ -17,6 +19,37 @@ CLASS_LABEL = {'ready': 'Ready', 'edit': 'Edits', 'section': 'New section', 'stu
 # methodological or scope change is heavy. Tune these from evidence, here and nowhere else.
 CLASS_KIND = {'edit': 'light', 'section': 'medium', 'study': 'heavy'}
 COMPLIANCE_WEIGHTS = {'light': 1, 'medium': 3, 'heavy': 9}
+
+
+# Spec 2.4: the plan never speaks of odds, ratings or rankings. Venue rule text is copied from the
+# venue's own pages and can say "likely desk rejected (90% odds)": such text is replaced at runtime.
+BANNED_WORDS = re.compile(r'probab|likel|chance|odds|%|top tier|\bA\*|ranked|rating', re.I)
+NEUTRAL_MESSAGE = {
+    'edit': 'Edit the manuscript to meet a venue rule.',
+    'section': 'Add or restructure a section to meet a venue rule.',
+    'study': 'New data or a new method is needed for this venue.',
+    'out': 'This venue does not take this manuscript as it is.',
+    'prepare': 'Prepare an item the venue asks for.',
+}
+
+
+def plain_words(text, cls='section', quantity=None, unit=''):
+    """The text as it is, or a neutral sentence when it uses odds or rating language."""
+    text = str(text or '')
+    if not BANNED_WORDS.search(text):
+        return text
+    if quantity and unit:
+        verb = 'Cut' if cls == 'edit' else 'Add'
+        return f'{verb} about {int(quantity):,} {unit} to meet a venue rule.'
+    return NEUTRAL_MESSAGE.get(cls, NEUTRAL_MESSAGE['section'])
+
+
+def plain_item(change):
+    """A gap item with its message in plain words (no odds, no ratings)."""
+    out = dict(change)
+    out['message'] = plain_words(change.get('message'), change.get('class') or 'section',
+                                 change.get('quantity'), change.get('unit') or '')
+    return out
 
 
 def _int(value):

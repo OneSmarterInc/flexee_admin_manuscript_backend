@@ -62,6 +62,11 @@ def version_locked(manuscript):
         return manuscript.venue_submissions.exclude(status__in=EDITABLE_SUBMISSION_STATUSES).exists()
     if locked_submissions(manuscript.current_version_id).exists():
         return True
+    # Audit item 9: a version the author sent to a venue outside Flexee stays as it was sent, in any
+    # plan and after the plan ends (the venue holds that text).
+    from .models import SubmissionPlanStep
+    if SubmissionPlanStep.objects.filter(submitted_version_id=manuscript.current_version_id).exists():
+        return True
     # A live plan was built against this text: a change is a new version, not an overwrite.
     from .models import SubmissionPlan
     return SubmissionPlan.objects.filter(manuscript_version_id=manuscript.current_version_id,

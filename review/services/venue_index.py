@@ -694,8 +694,20 @@ def close_stale_runs(now=None):
 
 
 def start_index_run(*, mode='full', trigger='schedule', requested_by=''):
-    """Create a run unless one is already queued or processing."""
+    """Create a run unless one is already queued or processing.
+
+    Audit item 38: the check and the create happen under one lock, so two starts at the same moment
+    (the schedule and a button press) cannot both create a run."""
+    from django.db import transaction
+    from ..models import StorageQuotaState
     close_stale_runs()
+    with transaction.atomic():
+        StorageQuotaState.objects.get_or_create(key='venue_index_run')
+        StorageQuotaState.objects.select_for_update().get(key='venue_index_run')
+        return _start_index_run_locked(mode, trigger, requested_by)
+
+
+def _start_index_run_locked(mode, trigger, requested_by):
     active = VenueIndexRun.objects.filter(status__in=['queued', 'processing']).first()
     if active:
         return active, False
@@ -906,6 +918,9 @@ def _enrichment_pass(run, config, http, now, budget, say=lambda m: None):
             return record, fetch_enrichment(record, http, timezone.now()), None
         except IndexSourceError as exc:
             return record, None, exc
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            # Audit item 38: one odd value in a catalogue answer fails that journal, not the whole run.
+            return record, None, IndexSourceError(f'Unexpected catalogue data: {exc}')
 
     failures_in_a_row = 0
     batch_size = max(1, config.workers) * 8

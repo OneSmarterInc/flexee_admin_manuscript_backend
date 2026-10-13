@@ -122,6 +122,8 @@ class Migration(migrations.Migration):
         migrations.AlterField(model_name='submissionplanstep', name='venue_submission',
                               field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL,
                                                       related_name='plan_steps', to='review.venuesubmission')),
+        # Audit item 19: the state mapping is one-way. Rolling back keeps the mapped states (no-op), which
+        # the old code reads safely; tests/test_plan_spec_migration.py rolls back through this migration.
         migrations.RunPython(forwards, migrations.RunPython.noop),
         migrations.RemoveField(model_name='submissionplanstep', name='outcome'),
         migrations.RemoveField(model_name='submissionplanstep', name='unchanged_reason'),

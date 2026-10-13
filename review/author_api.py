@@ -1956,6 +1956,13 @@ def author_manuscript_versions(request, manuscript_id):
     try:
         with storage_quota_guard(author=manuscript.author_account, incoming_bytes=len(content)):
             manuscript = Manuscript.objects.select_for_update().get(id=manuscript.id)
+            # Audit item 20: two uploads at once both passed the checks above; check again under the lock.
+            if manuscript.versions.count() >= versions.max_versions():
+                return JsonResponse({'detail': f'A manuscript can have at most {versions.max_versions()} versions.',
+                                     'code': 'too_many_versions'}, status=409)
+            if digest == manuscript.manuscript_sha256:
+                return JsonResponse({'detail': 'This file is identical to the current version.',
+                                     'code': 'unchanged_file'}, status=409)
             submission_ids = [str(pk) for pk in manuscript.venue_submissions.values_list('id', flat=True)]
             if ReviewJob.objects.filter(status__in=['queued', 'processing'],
                                         reference_id__in=[str(manuscript.id), *submission_ids]).exists():

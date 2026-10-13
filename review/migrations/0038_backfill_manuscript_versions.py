@@ -28,8 +28,15 @@ def forwards(apps, schema_editor):
 
 
 def backwards(apps, schema_editor):
+    """Undo the backfill completely, so running it forward again does not make a second version 1
+    (audit item 19). Only the rows this migration made (source='migration') are removed."""
     Manuscript = apps.get_model('review', 'Manuscript')
-    Manuscript.objects.update(current_version=None)
+    ManuscriptVersion = apps.get_model('review', 'ManuscriptVersion')
+    made = ManuscriptVersion.objects.filter(source='migration')
+    for name in ('ReadinessAssessment', 'VenueMatch', 'VenueSubmission'):
+        apps.get_model('review', name).objects.filter(version__in=made).update(version=None)
+    Manuscript.objects.filter(current_version__in=made).update(current_version=None)
+    made.delete()
 
 
 class Migration(migrations.Migration):

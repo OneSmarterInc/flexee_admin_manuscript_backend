@@ -641,7 +641,12 @@ class SafeFetcher:
                     if declared and declared.isdigit() and int(declared) > max_bytes:
                         raise DiscoveryFetchError('Page is larger than the configured limit.')
                     chunks, size = [], 0
+                    # Audit item 38: a server that drips a page slowly cannot hold the run; the whole page
+                    # must arrive within this many seconds.
+                    read_deadline = time.monotonic() + _env_int('VENUE_DISCOVERY_PAGE_TOTAL_SECONDS', 60, 5, 600)
                     for chunk in response.iter_bytes():
+                        if time.monotonic() > read_deadline:
+                            raise DiscoveryFetchError(f'Timed out reading {current}.')
                         size += len(chunk)
                         if size > max_bytes:
                             raise DiscoveryFetchError('Page is larger than the configured limit.')

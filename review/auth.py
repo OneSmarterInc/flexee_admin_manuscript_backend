@@ -211,12 +211,18 @@ def clear_session_cookie(response):
     response.delete_cookie(COOKIE_NAME, path='/', samesite=cookie_samesite(_secure_cookie_required()))
 
 
+def _test_origin_bypass():
+    """Tests may skip the Origin check. Production never does, whatever the environment says (audit 32)."""
+    production = os.getenv('DJANGO_ENV', '').strip().lower() == 'production'
+    return os.getenv('TEST_BYPASS_ORIGIN') == '1' and not production
+
+
 def require_admin(view):
     @wraps(view)
     def wrapped(request, *args, **kwargs):
         if request.method in UNSAFE_METHODS:
             origin = request.headers.get('Origin')
-            if origin not in allowed_frontend_origins() and os.getenv('TEST_BYPASS_ORIGIN') != '1':
+            if origin not in allowed_frontend_origins() and not _test_origin_bypass():
                 return JsonResponse({'detail': 'Untrusted Origin'}, status=403)
 
         session = read_session(request)

@@ -104,6 +104,21 @@ def create_new_version(manuscript, *, upload, content_bytes, sha256, change_note
         manuscript_type=fields.get('manuscript_type') or manuscript.manuscript_type,
     )
     version.file.save(upload.name, upload, save=False)
+    saved_name, storage = version.file.name, version.file.storage
+    # Audit item 20: the file is written before the transaction commits. If anything after this fails,
+    # the rows roll back; remove the file too, so no orphan file is left in storage.
+    try:
+        _attach_new_version(manuscript, version)
+    except Exception:
+        try:
+            storage.delete(saved_name)
+        except OSError:
+            pass
+        raise
+    return version, _reset_draft_packets(manuscript, version)
+
+
+def _attach_new_version(manuscript, version):
     version.save()
 
     manuscript.manuscript_file = version.file.name
@@ -119,6 +134,8 @@ def create_new_version(manuscript, *, upload, content_bytes, sha256, change_note
     manuscript.current_version = version
     manuscript.save()
 
+
+def _reset_draft_packets(manuscript, version):
     # Draft packets were never sent: they move to the new version and are rebuilt from it.
     from .models import EvidenceFinding
     reset = 0
@@ -134,7 +151,7 @@ def create_new_version(manuscript, *, upload, content_bytes, sha256, change_note
                              'manuscript_type': version.manuscript_type}
         submission.save(update_fields=['version', 'status', 'editorial_brief', 'packet', 'updated_at'])
         reset += 1
-    return version, reset
+    return reset
 
 
 def version_payload(version, *, current_id=None):
@@ -168,6 +185,17 @@ def purge_version_file(version, now):
     with transaction.atomic():
         ManuscriptVersion.objects.filter(id=version.id).update(file='', bytes=0, abstract='', parsed_profile={},
                                                                content_purged_at=now)
-    if name and storage is not None and not file_in_use(name):
-        storage.delete(name)
+    if name and storage is not None:
+        # Audit item 21: delete only after the database change is committed; a rollback must never
+        # leave a row pointing at a file that is gone.
+        transaction.on_commit(lambda: None if file_in_use(name) else storage.delete(name))
     return True
+
+
+def delete_file_after_commit(field_file):
+    """Delete a stored file once the current transaction commits (at once outside a transaction)."""
+    name = field_file.name if field_file else ''
+    if not name:
+        return
+    storage = field_file.storage
+    transaction.on_commit(lambda: storage.delete(name))

@@ -200,7 +200,7 @@ def test_editor_gets_the_version_they_received(monkeypatch):
 
 
 @pytest.mark.django_db
-def test_retention_purges_an_old_version_once_its_submissions_expire():
+def test_retention_purges_an_old_version_once_its_submissions_expire(django_capture_on_commit_callbacks):
     from review.tasks import sweep_retention_task
     client, author = author_client()
     m = make_manuscript(author)
@@ -211,7 +211,8 @@ def test_retention_purges_an_old_version_once_its_submissions_expire():
     old_name = v1.file.name
     storage = v1.file.storage
     VenueSubmission.objects.filter(id=old.id).update(retention_expires_at=timezone.now() - timedelta(days=1))
-    sweep_retention_task()
+    with django_capture_on_commit_callbacks(execute=True):  # files are deleted after commit
+        sweep_retention_task()
     v1.refresh_from_db()
     m.refresh_from_db()
     assert v1.content_purged_at and not v1.file and not storage.exists(old_name)

@@ -142,7 +142,7 @@ def test_formal_submission_snapshots_configured_retention_expiry():
 
 
 @pytest.mark.django_db
-def test_expired_venue_copy_is_purged_without_deleting_another_retained_copy():
+def test_expired_venue_copy_is_purged_without_deleting_another_retained_copy(django_capture_on_commit_callbacks):
     author = Author.objects.create(email='shared-retention@example.com', name='Shared Author', password_hash='x')
     manuscript = make_manuscript(author, suffix='-shared')
     org = Organization.objects.create(name='Shared Retention Org')
@@ -208,7 +208,8 @@ def test_expired_venue_copy_is_purged_without_deleting_another_retained_copy():
     )
     requirement_name = requirement.file.name
 
-    result = sweep_retention_task()
+    with django_capture_on_commit_callbacks(execute=True):  # files are deleted after commit
+        result = sweep_retention_task()
 
     assert 'Purged 1 expired venue submission' in result
     expired.refresh_from_db()
@@ -238,7 +239,7 @@ def test_expired_venue_copy_is_purged_without_deleting_another_retained_copy():
 
 
 @pytest.mark.django_db
-def test_last_expired_venue_copy_purges_shared_manuscript_and_derived_artifacts():
+def test_last_expired_venue_copy_purges_shared_manuscript_and_derived_artifacts(django_capture_on_commit_callbacks):
     author = Author.objects.create(email='final-retention@example.com', name='Final Author', password_hash='x')
     manuscript = make_manuscript(author, suffix='-final')
     org = Organization.objects.create(name='Final Retention Org')
@@ -284,7 +285,8 @@ def test_last_expired_venue_copy_purges_shared_manuscript_and_derived_artifacts(
     stored_name = manuscript.manuscript_file.name
     storage = manuscript.manuscript_file.storage
 
-    sweep_retention_task()
+    with django_capture_on_commit_callbacks(execute=True):  # files are deleted after commit
+        sweep_retention_task()
 
     submission.refresh_from_db()
     manuscript.refresh_from_db()

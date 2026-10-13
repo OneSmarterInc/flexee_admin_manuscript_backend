@@ -2080,6 +2080,14 @@ def author_run_venue_assessment(request, submission_id):
     except Exception:
         pass
 
+    semantic = (submission.manuscript.parsed_profile or {}).get('semantic')
+    if not isinstance(semantic, dict) or not semantic:
+        # The assessment needs the AI's reading of the manuscript (semantic readiness). Say so now,
+        # instead of queueing a job that can only fail with a generic message.
+        return JsonResponse({'detail': 'The AI is still reading your manuscript. Open the Readiness step, wait '
+                                       'until its check has finished, then choose this venue again.',
+                             'code': 'readiness_needed'}, status=409)
+
     job, _ = _queue_unique_job(
         'venue_assessment',
         submission.id,
@@ -2862,9 +2870,11 @@ def author_job_status(request, job_id):
     if job.status == 'failed' and job.job_type == 'submission_plan':
         public_error = job.error_message or 'The plan could not be generated. Please try again.'  # author-facing
     elif job.status == 'failed':
+        raw_error = str(job.error_message or '').lower()
         public_error = (
-            'Background processing timed out. Please try again.'
-            if 'timed out' in str(job.error_message or '').lower()
+            'Background processing timed out. Please try again.' if 'timed out' in raw_error
+            else 'Finish the readiness check first: open the Readiness step and wait until the AI has read '
+                 'your manuscript, then try again.' if 'semantic readiness' in raw_error
             else 'The background job could not be completed. Please try again.'
         )
 

@@ -76,6 +76,14 @@ def _earlier_version_usage(author=None):
     return int(versions.aggregate(total=Sum('bytes'))['total'] or 0)
 
 
+def _public_submission_usage():
+    """Files sent through the public submit page (no author account): they count toward the
+    service-wide limit (audit item 25)."""
+    from .models import Submission
+    files = Submission.objects.exclude(manuscript_file='').exclude(manuscript_file__isnull=True)
+    return int(files.aggregate(total=Sum('manuscript_bytes'))['total'] or 0)
+
+
 def storage_usage(*, author=None):
     manuscripts = Manuscript.objects.filter(content_purged_at__isnull=True)
     requirements = SubmissionRequirementFile.objects.filter(
@@ -88,7 +96,9 @@ def storage_usage(*, author=None):
             venue_submission__manuscript__author_account=author,
         )
 
-    return _manuscript_usage(manuscripts) + _requirement_usage(requirements) + _earlier_version_usage(author)
+    public = _public_submission_usage() if author is None else 0
+    return (_manuscript_usage(manuscripts) + _requirement_usage(requirements) + _earlier_version_usage(author)
+            + public)
 
 
 @contextmanager

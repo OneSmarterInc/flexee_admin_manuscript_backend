@@ -257,13 +257,20 @@ def submit(request):
         except UploadSecurityError as exc:
             return JsonResponse({'detail': str(exc), 'errors': [str(exc)]}, status=400)
 
-    submission = Submission.objects.create(
-        status='processing', kind=kind, author_name=author, author_email=author_email,
-        coauthors=coauthors, title=title, declared_sim=declared_sim, disclosure=disclosure,
-        notes=notes, attestation=True, manuscript_filename=safe_upload_name,
-        manuscript_file=upload,
-        manuscript_bytes=len(content), manuscript_sha256=digest,
-    )
+    from .storage_quota import StorageQuotaExceeded, storage_quota_guard
+    try:
+        # Audit item 25: the public page uses the same service-wide storage limit as author uploads.
+        with storage_quota_guard(incoming_bytes=len(content)):
+            submission = Submission.objects.create(
+                status='processing', kind=kind, author_name=author, author_email=author_email,
+                coauthors=coauthors, title=title, declared_sim=declared_sim, disclosure=disclosure,
+                notes=notes, attestation=True, manuscript_filename=safe_upload_name,
+                manuscript_file=upload,
+                manuscript_bytes=len(content), manuscript_sha256=digest,
+            )
+    except StorageQuotaExceeded as exc:
+        payload = exc.payload()
+        return JsonResponse({**payload, 'errors': [payload['detail']]}, status=413)
     ReviewEvent.objects.create(submission=submission, event_type='accepted', detail={'filename': safe_upload_name, 'bytes': len(content)})
 
     from .models import ReviewJob
@@ -391,6 +398,24 @@ def admin_verify_password(request):
     return JsonResponse(resp)
 
 
+def _fresh_totp(user, code):
+    """Audit item 26: a valid authenticator code works once. The time step it came from is stored, and
+    the same or an older step is refused, so a code seen over someone's shoulder cannot be reused."""
+    from .auth import totp_step
+    from .models import EditorUser
+    if not verify_totp(user.totp_secret, code):
+        return False
+    step = totp_step(user.totp_secret, code)
+    if step is None:  # verify_totp and totp_step agree on a real secret; nothing to record otherwise
+        return True
+    # Compare and store in one statement, so two logins racing with the same code cannot both pass.
+    from django.db.models import Q
+    updated = (EditorUser.objects.filter(id=user.id)
+               .filter(Q(totp_last_step__isnull=True) | Q(totp_last_step__lt=step))
+               .update(totp_last_step=step))
+    return updated == 1
+
+
 @require_POST
 def admin_login(request):
     data = _json_body(request)
@@ -422,10 +447,10 @@ def admin_login(request):
         if requires_totp:
             if not user.totp_secret:
                 totp_missing_error = True
-            elif verify_totp(user.totp_secret, code):
+            elif _fresh_totp(user, code):
                 ok = True
         else:
-            if not user.totp_secret or verify_totp(user.totp_secret, code):
+            if not user.totp_secret or _fresh_totp(user, code):
                 ok = True
                 
     if totp_missing_error:

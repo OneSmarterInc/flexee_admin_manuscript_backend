@@ -345,10 +345,20 @@ def _unanswered(plan):
             .order_by('-order').first())
 
 
+def _require_current_version(plan):
+    """Audit item 15: a plan is for one version. After a newer upload it cannot be started or used to
+    send, because the venue would get a text the plan was not made for."""
+    current = plan.manuscript.current_version
+    if current is not None and plan.manuscript_version_id != current.id:
+        raise PlanError(f'This plan was made for version {plan.manuscript_version.number}, and version '
+                        f'{current.number} is now the current one. Generate a new plan for it.', 'stale_plan')
+
+
 @transaction.atomic
 def activate(plan_id):
     plan, _ = _lock(plan_id)
     _require_status(plan, 'draft')
+    _require_current_version(plan)
     plan.status = 'active'
     _log(plan, 'activated')
     _advance(plan)
@@ -425,6 +435,8 @@ def mark_submitted(plan_id, step_id, *, venue_submission=None, actor='author'):
     plan, step = _lock(plan_id, step_id)
     _require_status(plan, 'active')
     _require(step, 'current')
+    if venue_submission is None:
+        _require_current_version(plan)  # a Flexee submission records the version it actually carries
     step.submitted_version_id = (venue_submission.version_id if venue_submission and venue_submission.version_id
                                  else plan.manuscript.current_version_id)
     step.venue_submission = venue_submission
@@ -440,6 +452,10 @@ def report_outcome(plan_id, step_id, outcome, *, actor='author', note=''):
     if outcome not in {'accepted', 'declined', 'withdrawn'}:
         raise PlanError('outcome must be accepted, declined or withdrawn.', 'bad_outcome', 400)
     _require(step, 'submitted')
+    if step.venue_submission_id and actor != 'venue':
+        # Audit item 14: a venue on Flexee records its own decision; the author cannot overrule the editor.
+        raise PlanError(f'{step.venue.name} is on Flexee: its editor records the decision here. To withdraw, '
+                        'withdraw the submission itself.', 'venue_decides', 409)
     step.outcome_note = (note or '').strip()[:4000]
     step.outcome_reported_by, step.outcome_at = actor, timezone.now()
     fields = ('outcome_note', 'outcome_reported_by', 'outcome_at')
@@ -524,6 +540,25 @@ def abandon(plan_id, *, note=''):
                         'the manuscript, before ending the plan.', 'venue_deciding', 409)
     _abandon(plan, note=note)
     return plan
+
+
+def reopen_revision_answer(manuscript, reason=''):
+    """Audit item 17: the author said "revised" and the new plan could not be generated. The answer is
+    taken back, so the paused plan asks again instead of waiting for ever. Returns the step or None."""
+    with transaction.atomic():
+        plan = (SubmissionPlan.objects.select_for_update()
+                .filter(manuscript=manuscript, status='paused').order_by('-created_at').first())
+        if plan is None:
+            return None
+        step = (plan.steps.filter(state__in={'declined', 'withdrawn'}, revision_answer='revised')
+                .order_by('-order').first())
+        if step is None:
+            return None
+        step.revision_answer, step.revision_version = '', None
+        step.save(update_fields=['revision_answer', 'revision_version', 'updated_at'])
+        _log(plan, 'revision_reopened', step=step, actor='system',
+             note=('The new plan could not be generated: ' + reason).strip()[:2000])
+        return step
 
 
 def sync_from_submission(submission):

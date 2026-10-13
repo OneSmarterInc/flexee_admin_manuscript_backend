@@ -2265,6 +2265,53 @@ def author_upload_submission_requirement(request, submission_id, requirement_key
     })
 
 
+LIVE_SUBMISSION_STATUSES = ('submitted', 'under_review', 'revision_requested')
+
+
+def _live_venue_elsewhere(item):
+    """Audit item 13: the name of another venue that holds this manuscript now, or ''.
+
+    A Flexee submission under review, or a plan step sent to a venue outside Flexee, both count."""
+    other = (VenueSubmission.objects.filter(manuscript_id=item.manuscript_id, status__in=LIVE_SUBMISSION_STATUSES)
+             .exclude(id=item.id).select_related('venue').first())
+    if other is not None:
+        return other.venue.name
+    from .models import SubmissionPlanStep
+    step = (SubmissionPlanStep.objects.filter(plan__manuscript_id=item.manuscript_id, state='submitted')
+            .exclude(venue_id=item.venue_id).select_related('venue').first())
+    return step.venue.name if step is not None else ''
+
+
+@require_POST
+def author_withdraw_submission(request, submission_id):
+    """The author withdraws a manuscript a Flexee venue is still deciding on (audit items 13 and 14).
+
+    A planned Flexee venue records its own decision, so this is how an author who no longer wants to
+    wait frees the manuscript for the next venue. A decided submission cannot be withdrawn."""
+    try:
+        item = VenueSubmission.objects.select_related('manuscript', 'venue').get(id=submission_id)
+    except VenueSubmission.DoesNotExist:
+        return JsonResponse({'detail': 'Venue submission not found'}, status=404)
+    access_error = _author_access_error(request, item.manuscript)
+    if access_error:
+        return access_error
+    if item.status not in LIVE_SUBMISSION_STATUSES:
+        return JsonResponse({'detail': 'Only a submission the venue is still deciding on can be withdrawn.',
+                             'code': 'not_live'}, status=409)
+    data = _json_body(request) if request.body else {}
+    reason = str((data or {}).get('reason', '')).strip()[:2000]
+    previous = item.status
+    item.status = 'withdrawn'
+    item.save(update_fields=['status', 'updated_at'])
+    record_audit_event(request, 'venue_submission.withdrawn_by_author', resource_type='venue_submission',
+                       resource_id=item.id, venue_id=item.venue_id,
+                       organization_id=item.venue.organization_id if item.venue_id else None,
+                       detail={'from_status': previous, 'reason': reason})
+    from .submission_plan import sync_from_submission
+    sync_from_submission(item)  # the planned step becomes 'withdrawn' and the plan asks about a revision
+    return JsonResponse({'submission': {'id': str(item.id), 'status': item.status}})
+
+
 @require_POST
 def author_submit_packet(request, submission_id):
     try:
@@ -2292,6 +2339,12 @@ def author_submit_packet(request, submission_id):
             },
             status=409,
         )
+
+    live_elsewhere = _live_venue_elsewhere(item)
+    if live_elsewhere:
+        return JsonResponse({'detail': f'{live_elsewhere} is still deciding on this manuscript. One venue at a '
+                                       'time: wait for its decision, or withdraw, before sending it here.',
+                             'code': 'one_venue_at_a_time'}, status=409)
 
     submitted_at = timezone.now()
     item.status = 'submitted'

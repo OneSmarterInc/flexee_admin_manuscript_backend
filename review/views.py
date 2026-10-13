@@ -381,15 +381,10 @@ def admin_verify_password(request):
     totp_setup_uri = None
 
     if requires_totp and not user.totp_secret:
-        import base64
-        import secrets
-        from urllib.parse import quote
-        user.totp_secret = base64.b32encode(secrets.token_bytes(20)).decode('ascii').rstrip('=')
-        user.save(update_fields=['totp_secret'])
-        
-        label = quote(f'Flexee Admin:{user.email}')
-        issuer = quote('Flexee Manuscript Admin')
-        totp_setup_uri = f'otpauth://totp/{label}?secret={user.totp_secret}&issuer={issuer}&algorithm=SHA1&digits=6&period=30'
+        # Accounts made before the invite flow set up 2FA (audit item 26): first sign-in still sets it up.
+        # Invited editors set it up on the emailed set-password page instead.
+        from .auth import start_totp_setup
+        totp_setup_uri = start_totp_setup(user)
 
     # Audit item 27: the browser keeps this short-lived ticket for the second step, not the password.
     resp = {'ok': True, 'login_ticket': _login_ticket(user)}

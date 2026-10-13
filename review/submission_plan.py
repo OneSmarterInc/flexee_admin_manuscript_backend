@@ -640,8 +640,12 @@ def step_payload(step):
 
 
 def plan_payload(plan):
-    steps = list(plan.steps.select_related('venue', 'venue__organization', 'venue_config', 'submitted_version',
-                                           'revision_version').order_by('order'))
+    cached = getattr(plan, '_prefetched_objects_cache', {})
+    if 'steps' in cached:  # audit item 22: the admin list prefetches, so 50 plans are not 50 x N queries
+        steps = sorted(cached['steps'], key=lambda s: s.order)
+    else:
+        steps = list(plan.steps.select_related('venue', 'venue__organization', 'venue_config', 'submitted_version',
+                                               'revision_version').order_by('order'))
     current = next((s for s in steps if s.state in {'current', 'submitted'}), None)
     waiting = _unanswered(plan) if plan.status == 'paused' else None
     return {
@@ -660,7 +664,9 @@ def plan_payload(plan):
         'not_included': [dict(n, reason=plain_words(n.get('reason'), 'out')) if isinstance(n, dict) else n
                          for n in plan.not_included or []],
         'events': [{'action': e.action, 'actor': e.actor, 'from': e.from_state, 'to': e.to_state, 'note': e.note,
-                    'venue': e.venue_name, 'at': e.created_at.isoformat()} for e in plan.events.order_by('created_at')],
+                    'venue': e.venue_name, 'at': e.created_at.isoformat()}
+                   for e in (sorted(cached['events'], key=lambda e: e.created_at) if 'events' in cached
+                             else plan.events.order_by('created_at'))],
         'how_ordered': 'Venues are grouped: first those that take the manuscript with no changes, then those that '
                        'take it with changes, then those that need changes. Inside each group, the venue needing '
                        'the least change comes first, and then the one whose scope is closest. Nothing else '

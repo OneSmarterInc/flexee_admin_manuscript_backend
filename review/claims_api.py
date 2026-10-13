@@ -435,4 +435,10 @@ def editor_set_password(request):
     from .models import AuditEvent
     AuditEvent.objects.create(actor_email=user.email, actor_role='editor', action='admin.password_set_from_invite',
                               resource_type='admin_session', resource_id=str(user.id))
-    return JsonResponse({'ok': True, 'email': user.email})
+    response = {'ok': True, 'email': user.email}
+    if not user.totp_secret:
+        # Audit item 26: two-step sign-in is set up here, in the one-time emailed link, not by whoever
+        # first reaches the sign-in page with the password.
+        from .auth import start_totp_setup
+        response['totp_setup_uri'] = start_totp_setup(user)
+    return JsonResponse(response)

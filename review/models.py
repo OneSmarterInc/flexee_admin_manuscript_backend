@@ -23,6 +23,8 @@ class EditorUser(models.Model):
     email = models.EmailField(unique=True, db_index=True)
     password_hash = models.CharField(max_length=200)
     totp_secret = models.CharField(max_length=64, blank=True)
+    # The time step of the last authenticator code accepted; a code is never accepted twice.
+    totp_last_step = models.BigIntegerField(null=True, blank=True)
     platform_superuser = models.BooleanField(default=False)
     # Sessions issued before this moment are rejected (set when the password changes).
     password_changed_at = models.DateTimeField(null=True, blank=True)

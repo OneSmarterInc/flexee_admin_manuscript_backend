@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
+import httpcore
 import httpx
 from django.db import transaction
 from django.utils import timezone
@@ -540,12 +541,48 @@ def is_blocked_failure(exc):
     return any(re.search(pattern, str(exc)) for pattern in BLOCKED_FAILURE_PATTERNS)
 
 
+class _PublicOnlyBackend(httpcore.SyncBackend):
+    """Audit item 24 (DNS rebinding): the address checked is the address connected to.
+
+    validate_public_url() resolves a host and checks it, but the HTTP client used to resolve it again
+    when connecting, so a host could answer "public" first and "169.254.169.254" second. Here every
+    connection resolves once, refuses any private or internal address, and connects to that same
+    address. TLS still uses the host name (httpcore passes it separately for SNI and certificates)."""
+
+    def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        try:
+            addresses = [host.strip('[]')] if _looks_like_ip(host) else sorted(_resolve(host))
+        except socket.gaierror as exc:
+            raise httpcore.ConnectError(f'Could not resolve {host}.') from exc
+        if not addresses or not all(_ip_is_public(address) for address in addresses):
+            raise httpcore.ConnectError(f'Blocked private or internal address for {host}.')
+        last_error = None
+        for address in addresses:
+            try:
+                return super().connect_tcp(address, port, timeout=timeout, local_address=local_address,
+                                           socket_options=socket_options)
+            except httpcore.ConnectError as exc:
+                last_error = exc
+        raise last_error
+
+
+def public_only_transport():
+    """An httpx transport whose connections only ever reach public addresses."""
+    transport = httpx.HTTPTransport()
+    pool = getattr(transport, '_pool', None)
+    if pool is None or not hasattr(pool, '_network_backend'):
+        raise RuntimeError('httpx/httpcore changed: the public-only connection guard cannot be installed.')
+    pool._network_backend = _PublicOnlyBackend()
+    return transport
+
+
 class SafeFetcher:
     """Fetches public pages with redirect re-validation, size/time limits and robots.txt."""
 
     def __init__(self, config, client=None):
         self.config = config
         self.client = client or httpx.Client(
+            transport=public_only_transport(),
             follow_redirects=False,
             timeout=httpx.Timeout(config.http_timeout, connect=min(config.http_timeout, 10.0)),
             headers={'User-Agent': config.user_agent, 'Accept': 'text/html,application/xhtml+xml,text/plain;q=0.9'},

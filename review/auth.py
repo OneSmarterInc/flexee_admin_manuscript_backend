@@ -95,15 +95,25 @@ def totp_code(secret, timestamp=None, step=30, digits=6):
     return str(binary % (10 ** digits)).zfill(digits)
 
 
-def verify_totp(secret, code, timestamp=None, window=1):
+def totp_step(secret, code, timestamp=None, window=1):
+    """The 30-second time step a valid code belongs to, or None."""
     code = ''.join(str(code or '').split())
     if len(code) != 6 or not code.isdigit() or not secret:
-        return False
+        return None
     now = int(time.time() if timestamp is None else timestamp)
     for delta in range(-window, window + 1):
-        if hmac.compare_digest(totp_code(secret, now + delta * 30), code):
-            return True
-    return False
+        moment = now + delta * 30
+        try:
+            expected = totp_code(secret, moment)
+        except (ValueError, TypeError):  # a malformed stored secret never verifies
+            return None
+        if hmac.compare_digest(expected, code):
+            return moment // 30
+    return None
+
+
+def verify_totp(secret, code, timestamp=None, window=1):
+    return totp_step(secret, code, timestamp=timestamp, window=window) is not None
 
 
 def client_address(request):

@@ -1,3 +1,4 @@
+import uuid
 
 from django.db import transaction
 from django.db.models import Q
@@ -25,6 +26,14 @@ EDITOR_STATUSES = {
     'transferred',
 }
 DECISION_STATUSES = {'revision_requested', 'accepted', 'rejected'}
+
+
+def _is_uuid(value):
+    try:
+        uuid.UUID(str(value))
+    except ValueError:
+        return False
+    return True
 
 
 def _editor_submissions():
@@ -237,6 +246,8 @@ def admin_venue_submissions(request):
     query = str(request.GET.get('q', '')).strip()
 
     if venue_id:
+        if not _is_uuid(venue_id):  # review 2, A10: a bad id is a bad request, not a 500
+            return JsonResponse({'detail': 'venue_id must be a venue id'}, status=400)
         queryset = queryset.filter(venue_id=venue_id)
     if status:
         queryset = queryset.filter(status=status)
@@ -545,6 +556,9 @@ def admin_audit_events(request):
     organization_id = str(request.GET.get('organization_id', '')).strip()
     venue_id = str(request.GET.get('venue_id', '')).strip()
     submission_id = str(request.GET.get('submission_id', '')).strip()
+    for name, value in (('organization_id', organization_id), ('venue_id', venue_id), ('submission_id', submission_id)):
+        if value and not _is_uuid(value):  # review 2, A10
+            return JsonResponse({'detail': f'{name} must be an id'}, status=400)
     action = str(request.GET.get('action', '')).strip()
     actor = str(request.GET.get('actor', '')).strip()
     query = str(request.GET.get('q', '')).strip()

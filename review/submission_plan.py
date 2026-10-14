@@ -295,6 +295,13 @@ def generate_plan(manuscript, *, generated_by=''):
     check_can_generate(manuscript)
     previous = SubmissionPlan.objects.select_for_update().filter(manuscript=manuscript,
                                                                  status__in=LIVE_STATUSES).first()
+    if previous is not None:
+        # Review 2, P7: checked again under the lock, so a venue marked "sent" between the first check and
+        # the lock is never left deciding inside an abandoned plan.
+        if previous.steps.filter(state='submitted').exists():
+            raise PlanError('A venue in the current plan is still deciding; record its outcome first.', 'plan_live')
+        if previous.status == 'paused' and _unanswered(previous) is not None:
+            raise PlanError('A venue declined: first say whether you revised the manuscript.', 'answer_needed')
     if previous is None:
         previous = SubmissionPlan.objects.filter(manuscript=manuscript).order_by('-created_at').first()
     elif previous:
@@ -568,8 +575,11 @@ OUTSIDE_PACKET_STATUS = {'accepted': 'accepted', 'declined': 'rejected', 'withdr
 def _close_outside_packet(step, outcome, note):
     from .models import VenueSubmission
     packet = VenueSubmission.objects.select_for_update(of=('self',)).filter(id=step.venue_submission_id).first()
-    if packet is None or packet.status not in LIVE_SUBMISSION_STATUSES:
+    if packet is None:
         return
+    if packet.status not in LIVE_SUBMISSION_STATUSES:
+        # Review 2, P9: already decided (two answers at the same moment): the first one stands.
+        raise PlanError('An answer for this venue was already recorded. Reload the plan.', 'already_decided', 409)
     packet.status = OUTSIDE_PACKET_STATUS[outcome]
     packet.decision = {'decision': packet.status, 'note': (note or '').strip()[:2000],
                        'decided_at': timezone.now().isoformat(), 'recorded_by': 'author',
@@ -717,6 +727,10 @@ def sync_from_submission(submission):
                                                   venue_id=submission.venue_id, state__in={'current', 'submitted'})
                 .select_related('plan').first())
         if step is None:
+            return None
+        if step.venue_submission_id and step.venue_submission_id != submission.id:
+            # Review 2, P8: the step follows the packet it is linked to; another packet at the same venue (an
+            # older one, replaced) does not decide it.
             return None
         # A transfer moves the manuscript away from this venue: for the plan that is a withdrawal (bug H1).
         outcome = {'accepted': 'accepted', 'rejected': 'declined', 'withdrawn': 'withdrawn',

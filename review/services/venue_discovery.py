@@ -1577,7 +1577,9 @@ def _deadline_dates(window, today):
 
 def detect_calls_for_papers(pages, today=None):
     """Open special issues / calls for papers with a future deadline, read straight from official pages."""
-    today = today or timezone.localdate()
+    if today is None:
+        from .freshness import deadline_today  # review 2, X12: open until the day ends everywhere (audit #38)
+        today = deadline_today()
     calls, seen = [], set()
     for page in pages:
         page_is_cfp = bool(CFP_LINE.search(f'{page.url} {page.title}'))

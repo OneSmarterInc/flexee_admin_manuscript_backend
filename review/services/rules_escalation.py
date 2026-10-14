@@ -282,7 +282,8 @@ def escalation_stats(days=30, now=None):
                'rate': round(count / total, 3) if total else 0.0,
                'move_to_cloud': bool(total) and count / total > MOVE_TO_CLOUD_RATE}
               for name, count in sorted(field_counts.items(), key=lambda kv: -kv[1])]
-    cloud = AIUsageEvent.objects.filter(operation=OPERATIONS['cloud'], created_at__gte=since)
+    # Review 2, X13: calls that were made (completed), not ones the budget blocked or that failed before sending.
+    cloud = AIUsageEvent.objects.filter(operation=OPERATIONS['cloud'], created_at__gte=since, status='completed')
     return {
         'days': days,
         'reads': total,

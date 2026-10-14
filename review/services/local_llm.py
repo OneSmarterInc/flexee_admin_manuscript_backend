@@ -11,15 +11,18 @@ DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_OLLAMA_MODEL = "qwen2.5:0.5b-instruct"
 DEFAULT_OLLAMA_NUM_CTX = 4096
 DEFAULT_OLLAMA_NUM_PREDICT = 2000
-SHARED_QWEN_QUEUE_ENABLED = os.getenv("SHARED_QWEN_QUEUE_ENABLED", "false").strip().lower() in {
-    "1", "true", "yes", "on"
-}
-SHARED_QWEN_REDIS_URL = os.getenv("SHARED_QWEN_REDIS_URL", os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0"))
-SHARED_QWEN_QUEUE = os.getenv("SHARED_QWEN_QUEUE", "ai_queue:flexee")
-SHARED_QWEN_RESULT_PREFIX = os.getenv("SHARED_QWEN_RESULT_PREFIX", "ai_result:")
-SHARED_QWEN_JOB_TTL = int(os.getenv("SHARED_QWEN_JOB_TTL", "3600"))
-SHARED_QWEN_WAIT_TIMEOUT = float(os.getenv("SHARED_QWEN_WAIT_TIMEOUT", "900"))
-SHARED_QWEN_POLL_INTERVAL = float(os.getenv("SHARED_QWEN_POLL_INTERVAL", "0.5"))
+def _shared_qwen_settings():
+    """Bug L6: read the shared-Qwen settings when they are used, not once at import, so the worker, the
+    readiness check and the tests all see the same environment."""
+    return {
+        'enabled': os.getenv("SHARED_QWEN_QUEUE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
+        'redis_url': os.getenv("SHARED_QWEN_REDIS_URL", os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")),
+        'queue': os.getenv("SHARED_QWEN_QUEUE", "ai_queue:flexee"),
+        'result_prefix': os.getenv("SHARED_QWEN_RESULT_PREFIX", "ai_result:"),
+        'job_ttl': int(os.getenv("SHARED_QWEN_JOB_TTL", "3600")),
+        'wait_timeout': float(os.getenv("SHARED_QWEN_WAIT_TIMEOUT", "900")),
+        'poll_interval': float(os.getenv("SHARED_QWEN_POLL_INTERVAL", "0.5")),
+    }
 
 
 def _strip_thinking(text):
@@ -78,7 +81,8 @@ def assert_prompt_fits_context(prompt, *, num_ctx, num_predict):
 
 
 def _wait_for_shared_result(client, job_id, timeout):
-    result_key = f"{SHARED_QWEN_RESULT_PREFIX}{job_id}"
+    settings = _shared_qwen_settings()
+    result_key = f"{settings['result_prefix']}{job_id}"
     deadline = time.monotonic() + timeout
 
     while time.monotonic() < deadline:
@@ -94,7 +98,7 @@ def _wait_for_shared_result(client, job_id, timeout):
 
             return payload.get("result") or {}
 
-        time.sleep(SHARED_QWEN_POLL_INTERVAL)
+        time.sleep(settings['poll_interval'])
 
     raise TimeoutError(
         f"Shared Qwen worker did not return job {job_id} within {timeout:.0f} seconds."
@@ -109,7 +113,8 @@ def shared_qwen_chat_json(
     num_ctx=None,
     return_usage=False,
 ):
-    if not SHARED_QWEN_QUEUE_ENABLED:
+    settings = _shared_qwen_settings()
+    if not settings['enabled']:
         raise RuntimeError("Shared Qwen queue is disabled.")
 
     max_tokens = min(
@@ -131,12 +136,12 @@ def shared_qwen_chat_json(
             8192,
         ),
     )
-    request_timeout = float(timeout if timeout is not None else SHARED_QWEN_WAIT_TIMEOUT)
+    request_timeout = float(timeout if timeout is not None else settings['wait_timeout'])
     assert_prompt_fits_context(prompt, num_ctx=num_ctx, num_predict=max_tokens)
 
     # Audit item 38: a Redis that stops answering must fail fast, not hang the worker. Results are
     # polled with short GETs, so a 10-second socket timeout never cuts a normal wait short.
-    client = redis.from_url(SHARED_QWEN_REDIS_URL, decode_responses=True, socket_connect_timeout=5,
+    client = redis.from_url(settings['redis_url'], decode_responses=True, socket_connect_timeout=5,
                             socket_timeout=10)
     client.ping()
 
@@ -151,10 +156,10 @@ def shared_qwen_chat_json(
         "temperature": float(os.getenv("OLLAMA_TEMPERATURE", "0.2")),
     }
 
-    client.rpush(SHARED_QWEN_QUEUE, json.dumps(job))
+    client.rpush(settings['queue'], json.dumps(job))
 
     result = _wait_for_shared_result(client, job_id, request_timeout)
-    client.delete(f"{SHARED_QWEN_RESULT_PREFIX}{job_id}")
+    client.delete(f"{settings['result_prefix']}{job_id}")
 
     model = str(result.get("model") or "qwen2.5-shared")
     content = _json_payload(_strip_thinking(result.get("content", "")))
@@ -179,7 +184,7 @@ def ollama_chat_json(
     num_ctx=None,
     return_usage=False,
 ):
-    if SHARED_QWEN_QUEUE_ENABLED:
+    if _shared_qwen_settings()['enabled']:
         return shared_qwen_chat_json(
             prompt,
             max_tokens=max_tokens,

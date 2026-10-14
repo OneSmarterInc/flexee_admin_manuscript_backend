@@ -5,6 +5,7 @@ from django.db.models import Q
 from django.http import JsonResponse
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
+from .json_object import json_object
 from .audit import record_audit_event
 from .auth import require_platform_superuser
 from .index_schedule import get_index_schedule, set_index_schedule
@@ -224,7 +225,7 @@ def index_detail(request, record_id):
 @require_platform_superuser
 def index_run_now(request):
     try:
-        data = json.loads(request.body or b'{}')
+        data = json_object(request.body or b'{}')
     except ValueError:
         data = {}
     mode = data.get('mode') if data.get('mode') in {'enrich', 'screen', 'rules', 'calls'} else 'full'
@@ -243,7 +244,7 @@ def index_schedule(request):
     if request.method == 'GET':
         return JsonResponse({'schedule': get_index_schedule()})
     try:
-        data = json.loads(request.body or b'{}')
+        data = json_object(request.body or b'{}')
     except ValueError:
         return JsonResponse({'detail': 'Invalid JSON'}, status=400)
     try:
@@ -263,7 +264,7 @@ def index_decision(request, record_id):
     if not item:
         return JsonResponse({'detail': 'Index record not found'}, status=404)
     try:
-        data = json.loads(request.body or b'{}')
+        data = json_object(request.body or b'{}')
     except ValueError:
         return JsonResponse({'detail': 'Invalid JSON'}, status=400)
     try:

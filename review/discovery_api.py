@@ -12,6 +12,7 @@ from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
+from .json_object import json_object
 from .audit import record_audit_event
 from .auth import require_platform_superuser
 from .models import DiscoveredVenue, Organization, Venue, VenueAgentConfig, VenueDiscoveryRun
@@ -211,7 +212,7 @@ def discovery_schedule(request):
     if request.method == 'GET':
         return JsonResponse({'schedule': get_schedule()})
     try:
-        data = json.loads(request.body or b'{}')
+        data = json_object(request.body or b'{}')
     except json.JSONDecodeError:
         return JsonResponse({'detail': 'Invalid JSON'}, status=400)
     enabled = bool(data.get('enabled'))

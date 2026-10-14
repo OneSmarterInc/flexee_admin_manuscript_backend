@@ -20,10 +20,12 @@ DEFAULT_API_MODEL = DEFAULT_ANTHROPIC_MODEL
 
 
 def _json_body(request):
+    """The request's JSON object, or {} (bug L2: a JSON array or number used to reach .get() and give 500)."""
     try:
-        return json.loads(request.body.decode('utf-8') or '{}')
-    except Exception:
+        data = json.loads(request.body.decode('utf-8') or '{}')
+    except (UnicodeDecodeError, ValueError):
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _extract_submission_text(submission):

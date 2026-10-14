@@ -8,6 +8,7 @@ from django.db.models import Q, Count
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
+from .json_object import json_object
 from .auth import (
     clear_session_cookie, issue_session, read_session, remote_hash, require_admin,
     set_session_cookie, verify_password, verify_totp, require_platform_superuser,
@@ -146,10 +147,12 @@ def _generate_chapter_summary(text, filename='', word_count=0):
 
 
 def _json_body(request):
+    """The request's JSON object, or {} (bug L2: a JSON array or number used to reach .get() and give 500)."""
     try:
-        return json.loads(request.body.decode('utf-8') or '{}')
-    except Exception:
+        data = json.loads(request.body.decode('utf-8') or '{}')
+    except (UnicodeDecodeError, ValueError):
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _submission_summary(item):
@@ -529,7 +532,7 @@ def admin_change_password(request):
     from .models import AuditEvent
     user = request.editor_user
     try:
-        data = json.loads(request.body or b'{}')
+        data = json_object(request.body or b'{}')
     except json.JSONDecodeError:
         return JsonResponse({'detail': 'Invalid JSON'}, status=400)
     current = str(data.get('current_password', ''))
@@ -623,7 +626,10 @@ def admin_submissions(request):
         qs = qs.filter(decision=decision)
     elif decision in {'ACCEPTED', 'REJECTED'}:
         qs = qs.filter(admin_decision=decision)
-    limit = min(max(int(request.GET.get('limit', '100') or 100), 1), 200)
+    try:
+        limit = min(max(int(request.GET.get('limit', '100') or 100), 1), 200)
+    except ValueError:  # bug L5: ?limit=abc gave 500
+        limit = 100
     items = list(qs[:limit])
     counts = Submission.objects.aggregate(
         total=Count('id'),
@@ -879,7 +885,10 @@ def admin_submission_download(request, submission_id):
         elif submission.manuscript_filename.lower().endswith('.zip'):
             content_type = 'application/zip'
 
-        file_handle = submission.manuscript_file.open('rb')
+        try:
+            file_handle = submission.manuscript_file.open('rb')
+        except (FileNotFoundError, ValueError):  # bug L4: the file is gone (purged, or never stored)
+            return JsonResponse({'detail': 'The manuscript file is no longer stored.'}, status=404)
         record_audit_event(
             request,
             'legacy_submission.manuscript_downloaded',

@@ -19,5 +19,5 @@ class CorsMiddleware:
             response['Vary'] = 'Origin'
             response['Access-Control-Allow-Credentials'] = 'true'
             response['Access-Control-Allow-Headers'] = 'Content-Type, X-Requested-With, X-Manuscript-Token, X-CSRFToken'
-            response['Access-Control-Allow-Methods'] = 'GET, POST, PATCH, OPTIONS'
+            response['Access-Control-Allow-Methods'] = 'GET, POST, PATCH, DELETE, OPTIONS'  # review 2, A8: blocklist remove uses DELETE
         return response

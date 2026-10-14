@@ -1608,7 +1608,9 @@ def author_run_readiness(request, manuscript_id):
         assessment.completed_at = timezone.now()
         assessment.error = {'detail': str(exc)}
         assessment.save(update_fields=['status', 'completed_at', 'error'])
-        return JsonResponse({'readiness': _readiness_payload(assessment)}, status=422)
+        # Review 2, F7: say why, so the screen shows the reason and not "Request failed (422)".
+        return JsonResponse({'detail': f'The readiness check could not read the manuscript file: {str(exc)[:200]}',
+                             'readiness': _readiness_payload(assessment)}, status=422)
 
     return JsonResponse({'readiness': _readiness_payload(assessment)}, status=201)
 
@@ -2774,9 +2776,11 @@ def admin_editor_feedback(request, venue_id):
     submission_id = data.get('venue_submission_id')
     if submission_id:
         try:
+            from .editor_api import EDITOR_STATUSES  # review 2, A9: only packets editors can see, never a draft
             submission = VenueSubmission.objects.select_related('venue_config').get(
                 id=submission_id,
                 venue=venue,
+                status__in=EDITOR_STATUSES,
             )
         except (VenueSubmission.DoesNotExist, ValueError, ValidationError):  # bug L1: bad UUID
             return JsonResponse({'detail': 'Venue submission not found for this venue'}, status=404)

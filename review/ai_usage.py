@@ -459,7 +459,7 @@ def ai_usage_snapshot(*, now=None) -> dict:
         'blocked_calls_total': AIUsageEvent.objects.filter(status='blocked').count(),
         'failed_calls_total': AIUsageEvent.objects.filter(status='failed').count(),
         'unpriced_cloud_calls_total': completed.exclude(
-            provider__in=['ollama', 'mock']
+            provider__in=LOCAL_PROVIDERS  # review 2, X14: shared Qwen is local, not an unpriced cloud call
         ).filter(priced=False).count(),
         'by_provider_model': provider_rows,
         'by_operation': operation_rows,

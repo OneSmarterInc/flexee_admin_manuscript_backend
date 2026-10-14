@@ -36,7 +36,8 @@ def _primary_source(item):
 
 
 def _open_calls(item):
-    today = timezone.localdate().isoformat()
+    from .services.freshness import deadline_today
+    today = deadline_today().isoformat()  # review 2, X12: same "still open somewhere" day as authors see
     calls = (item.current_demand or {}).get('calls_for_papers') or []
     return [c for c in calls if isinstance(c, dict) and str(c.get('deadline', '')) >= today][:10]
 

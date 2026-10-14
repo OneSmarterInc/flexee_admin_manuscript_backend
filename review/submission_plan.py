@@ -532,6 +532,10 @@ def mark_submitted(plan_id, step_id, *, venue_submission=None, actor='author'):
         # "I have sent it" would skip the editor: the step must come from a real Flexee packet.
         raise PlanError(f'{step.venue.name} is on Flexee: send the packet from its venue page, and this plan '
                         'updates by itself.', 'send_packet', 409)
+    accepted_by = _accepted(plan.manuscript_id)
+    if accepted_by:
+        raise PlanError(f'{accepted_by} accepted this manuscript, so it is not sent anywhere else.',
+                        'already_accepted', 409)
     if venue_submission is None:
         # Bug H3: one venue at a time also holds against a Flexee packet sent outside the plan. The
         # manuscript lock is the one a packet submit takes, so the two cannot pass at the same moment.
@@ -625,6 +629,8 @@ def answer_revision(plan_id, *, answer, version_number=None, note=''):
         plan.status = 'active'
         plan.save(update_fields=['status', 'updated_at'])
         _advance(plan)
+        # A packet the author sent while the plan was paused belongs to the plan from now on.
+        _adopt_live_submission(plan)
         return plan, None
     if answer != 'revised':
         raise PlanError('answer must be revised or unchanged.', 'bad_answer', 400)

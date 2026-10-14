@@ -17,6 +17,7 @@ Beyond the spec's list, needed by the same state machine:
 
 Generation goes through the existing job queue and the same author access rules. No new auth path.
 """
+from django.core.exceptions import ValidationError
 from django.http import JsonResponse
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 

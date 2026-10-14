@@ -305,15 +305,20 @@ def admin_start_venue_review(request, submission_id):
     if not check_org_access(request.editor_user, item.venue.organization_id, ['owner', 'editor']):
         return JsonResponse({'detail': 'Forbidden'}, status=403)
 
-    if item.status not in {'submitted', 'revision_requested', 'under_review'}:
-        return JsonResponse(
-            {'detail': f'Cannot start editorial review from status {item.status}'},
-            status=409,
-        )
-    previous_status = item.status
-    if item.status != 'under_review':
-        item.status = 'under_review'
-        item.save(update_fields=['status', 'updated_at'])
+    with transaction.atomic():
+        # Lock the row, so the author's withdraw and this start cannot overwrite each other.
+        item = (VenueSubmission.objects.select_for_update(of=('self',))
+                .select_related('venue').get(id=item.id))
+        if item.status not in {'submitted', 'revision_requested', 'under_review'}:
+            return JsonResponse(
+                {'detail': f'Cannot start editorial review from status {item.status}'},
+                status=409,
+            )
+        previous_status = item.status
+        if item.status != 'under_review':
+            item.status = 'under_review'
+            item.save(update_fields=['status', 'updated_at'])
+    if previous_status != 'under_review':
         from .submission_plan import sync_from_submission
         sync_from_submission(item)
     record_audit_event(

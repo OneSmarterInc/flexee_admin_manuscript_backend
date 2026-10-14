@@ -668,6 +668,9 @@ def _match_payload(item):
         # An AI outage result does not count as checked (review 2, F3), so the screen tries again later.
         'semantic_checked': item.fit_summary not in (GATE_SUMMARY_ELIGIBLE, GATE_SUMMARY_OTHER,
                                                      'Semantic analysis unavailable'),
+        # Review 3, F2: a venue with no active configuration cannot be matched semantically, so the screen does
+        # not queue a semantic job for it on every visit.
+        'semantic_possible': bool(item.venue_config_id) or item.venue.agent_configs.filter(active=True).exists(),
         'reasons': item.reasons,
         'gaps': item.gaps,
         'evidence': item.evidence,
@@ -2161,19 +2164,28 @@ def author_run_venue_assessment(request, submission_id):
     if access_error:
         return access_error
 
+    if submission.status not in EDITABLE_SUBMISSION_STATUSES:
+        # Review 3, P5: a packet already sent (or closed) is what the editor has; it is not reassessed or changed.
+        return JsonResponse({'detail': 'This packet was already sent, so its assessment cannot be run again. '
+                                       'Prepare a new packet for the venue instead.', 'code': 'not_editable'},
+                            status=409)
+
     try:
-        import json
+        data = json.loads(request.body or b'{}')
+    except ValueError:
+        data = {}
+    if isinstance(data, dict) and data.get('override_anonymization', False):
         from django.utils import timezone
-        data = json.loads(request.body)
-        override = data.get('override_anonymization', False)
-        if override:
-            packet = dict(submission.packet or {})
+        with transaction.atomic():
+            locked = VenueSubmission.objects.select_for_update().get(id=submission.id)
+            if locked.status not in EDITABLE_SUBMISSION_STATUSES:
+                return JsonResponse({'detail': 'This packet was already sent, so it cannot be changed.',
+                                     'code': 'not_editable'}, status=409)
+            packet = dict(locked.packet or {})
             packet['anonymization_override'] = True
             packet['anonymization_override_time'] = timezone.now().isoformat()
-            submission.packet = packet
-            submission.save(update_fields=['packet'])
-    except Exception:
-        pass
+            locked.packet = packet
+            locked.save(update_fields=['packet', 'updated_at'])
 
     semantic = (submission.manuscript.parsed_profile or {}).get('semantic')
     if not isinstance(semantic, dict) or not semantic:

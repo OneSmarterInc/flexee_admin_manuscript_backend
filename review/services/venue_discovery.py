@@ -2112,7 +2112,7 @@ def _run_claude_agent(run, config, *, create_message=None):
             return reason
         try:
             final_text, pages, stats = run_agent(discovery_prompt(category, settings, known), settings,
-                                                 create_message=create_message)
+                                                 create_message=create_message, should_stop=lambda: _should_stop(run))
         except AIBudgetExceeded as exc:
             _record_error(run, category, 'budget', exc)
             return  # stop spending for this run
@@ -2138,7 +2138,8 @@ def _run_claude_agent(run, config, *, create_message=None):
         batch = due[start:start + size]
         try:
             final_text, pages, stats = run_agent(recheck_prompt(batch), settings, create_message=create_message,
-                                                 operation='venue_discovery_recheck')
+                                                 operation='venue_discovery_recheck',
+                                                 should_stop=lambda: _should_stop(run))
         except AIBudgetExceeded as exc:
             _record_error(run, '', 'budget', exc)
             return

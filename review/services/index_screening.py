@@ -387,13 +387,18 @@ def gather_page_evidence(run, profile, budget, *, fetcher=None, say=lambda m: No
                 break
             finished, in_flight = wait(in_flight, return_when=FIRST_COMPLETED)
             for future in finished:
-                record, flags, problem = future.result()
-                record.page_flags = flags
-                record.pages_checked_at = timezone.now()
-                if problem and not flags:
-                    record.last_error = f'Pages not read: {problem}'[:300]
-                record.save(update_fields=['page_flags', 'pages_checked_at', 'last_error', 'updated_at'])
-                screen_record(record, blocked)
+                loaded, flags, problem = future.result()
+                # Review 3, Y3: a reviewer may have decided this record while its pages were read. The page
+                # result is applied to a fresh, locked copy, so that decision (keep, exclude) is not undone.
+                with transaction.atomic():
+                    record = IndexedVenue.objects.select_for_update().filter(id=loaded.id).first()
+                    if record is not None:
+                        record.page_flags = flags
+                        record.pages_checked_at = timezone.now()
+                        if problem and not flags:
+                            record.last_error = f'Pages not read: {problem}'[:300]
+                        record.save(update_fields=['page_flags', 'pages_checked_at', 'last_error', 'updated_at'])
+                        screen_record(record, blocked)
                 run.pages_checked += 1
                 done_count += 1
                 if done_count % 10 == 0 or done_count == len(due):

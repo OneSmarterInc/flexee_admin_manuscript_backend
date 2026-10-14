@@ -155,7 +155,7 @@ def _estimated_input_tokens(settings, prompt):
     return (len(prompt) // 3) + search_tokens + fetch_tokens
 
 
-def run_agent(prompt, settings, *, create_message=None, operation='venue_discovery_agent'):
+def run_agent(prompt, settings, *, create_message=None, operation='venue_discovery_agent', should_stop=None):
     """Run Claude with web search/fetch until it finishes. Returns (final_text, pages, stats)."""
     if not settings['api_key']:
         raise DiscoveryConfigError('ANTHROPIC_API_KEY is not set, so the Claude discovery agent cannot run.')
@@ -173,6 +173,13 @@ def run_agent(prompt, settings, *, create_message=None, operation='venue_discove
     try:
         last_input = 0
         for turn in range(settings['max_continuations'] + 1):
+            if turn and should_stop is not None:
+                reason = should_stop()
+                if reason:
+                    # Review 3, Y4: the run time limit (or Stop) is checked before every paid turn, not only
+                    # between categories, so one long category cannot run into the worker's 30-minute kill.
+                    stats['tool_errors'].append(f'stopped before another turn ({reason})')
+                    break
             if turn:
                 # Review 2, X3: each continuation resends the whole conversation, so it costs at least the last
                 # turn's input again. Keep the reservation ahead of the real spend; stop at the ceiling.

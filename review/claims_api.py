@@ -176,6 +176,11 @@ def claim_create(request):
     message = str(data.get('message') or '').strip()[:2000]
     if not name or not role_title:
         return JsonResponse({'detail': 'Enter your name and your role at the journal.'}, status=400)
+    from .author_api import _looks_like_link
+    if _looks_like_link(name) or _looks_like_link(role_title):
+        # Review 3, C2: the name goes into an email Flexee sends to the address given, so it cannot carry a link.
+        return JsonResponse({'detail': 'Enter your name and role without web addresses or email addresses.',
+                             'field': 'name'}, status=400)
     if not EMAIL_RE.match(email):
         return JsonResponse({'detail': 'Enter a valid email address.', 'field': 'email'}, status=400)
     if evidence_url and not re.match(r'^https?://', evidence_url, re.I):

@@ -95,10 +95,13 @@ def test_claiming_again_answers_the_same_and_resends_only_spaced_and_capped(outb
 
 @pytest.mark.django_db
 def test_names_go_into_emails_on_one_line(outbox):
-    claim(listed(), name='Asha\n\nURGENT: verify at https://evil.example', role_title='Editor\r\nX')
+    record = listed()
+    claim(record, name='Asha\n\nURGENT: call the office', role_title='Editor\r\nX')
     item = VenueClaim.objects.get()
     assert '\n' not in item.name and '\r' not in item.role_title
     assert 'Hello Asha URGENT' in outbox[0]['body']
+    # Review 3, C2: a web address in the name is refused outright.
+    assert claim(record, email='b@jisp.example.org', name='Asha, verify at https://evil.example').status_code == 400
 
 
 @pytest.mark.django_db

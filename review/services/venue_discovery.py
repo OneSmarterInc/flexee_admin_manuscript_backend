@@ -1811,7 +1811,8 @@ def run_discovery(run, *, config=None, provider=None, fetcher=None, extractor=No
             raise DiscoveryConfigError('Venue discovery is disabled (VENUE_DISCOVERY_ENABLED is not true).')
         if config.mode == 'claude_agent' and provider is None and fetcher is None:
             # Bug H8: Stop is checked before every paid call, and a stopped run is not marked completed.
-            stopped = _run_claude_agent(run, config, create_message=create_message) == 'stopped'
+            ended = _run_claude_agent(run, config, create_message=create_message)
+            stopped = ended == 'stopped'
             if stopped or _should_stop(run) == 'stopped':
                 run.refresh_from_db(fields=['summary'])
                 run.status = 'failed'
@@ -1823,6 +1824,8 @@ def run_discovery(run, *, config=None, provider=None, fetcher=None, extractor=No
             run.status = 'completed'
             run.summary = (f'{run.candidates_created} new · {run.candidates_updated} updated · '
                            f'{run.candidates_changed} changed · {len(run.errors or [])} skipped')
+            if ended == 'time_limit':
+                run.summary += f' · stopped at the {max_run_minutes()}-minute limit; the next run continues'
             run.completed_at = timezone.now()
             run.save()
             return run
@@ -2102,8 +2105,9 @@ def _run_claude_agent(run, config, *, create_message=None):
 
     known = list(DiscoveredVenue.objects.order_by('-last_checked_at').values_list('name', flat=True)[:200])
     for category in settings['categories']:
-        if _should_stop(run) == 'stopped':
-            return 'stopped'
+        reason = _should_stop(run)
+        if reason:  # review 2, X1: the run time limit too, not only the admin's Stop
+            return reason
         try:
             final_text, pages, stats = run_agent(discovery_prompt(category, settings, known), settings,
                                                  create_message=create_message)
@@ -2126,8 +2130,9 @@ def _run_claude_agent(run, config, *, create_message=None):
                .order_by('last_checked_at')[: config.max_rechecks_per_run])
     size = settings['recheck_batch_size']
     for start in range(0, len(due), size):
-        if _should_stop(run) == 'stopped':
-            return 'stopped'
+        reason = _should_stop(run)
+        if reason:  # review 2, X1: the run time limit too, not only the admin's Stop
+            return reason
         batch = due[start:start + size]
         try:
             final_text, pages, stats = run_agent(recheck_prompt(batch), settings, create_message=create_message,

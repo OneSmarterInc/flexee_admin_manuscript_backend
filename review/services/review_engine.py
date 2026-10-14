@@ -572,7 +572,12 @@ def _repair_missing_outputs(parsed, decision, measured, judgments, kind):
 
 def _judge_chunked(text, declared_sim, rubric_items, kind, disclosure, measured, num_ctx, max_tokens):
     available_tokens = num_ctx - max_tokens - 1000
-    max_chars = max(1000, available_tokens * 4)
+    # Bug H10: the author's AI-use disclosure is about the whole manuscript, so every chunk is shown it.
+    # Otherwise only the last chunk sees it, the others fail it, and the worst verdict wins.
+    disclosure_block = f"\n\nAI-Use Disclosure (submitted with the manuscript):\n{disclosure}"
+    if text.endswith(disclosure_block):
+        text = text[:-len(disclosure_block)]
+    max_chars = max(1000, available_tokens * 4 - len(disclosure_block))
     chunks = []
     current = 0
     while current < len(text):
@@ -587,7 +592,7 @@ def _judge_chunked(text, declared_sim, rubric_items, kind, disclosure, measured,
     all_judgments = []
     models_used = set()
     for chunk in chunks:
-        chunk_prompt = _build_prompt(chunk, declared_sim, rubric_items, kind, measured)
+        chunk_prompt = _build_prompt(chunk + disclosure_block, declared_sim, rubric_items, kind, measured)
         model, output = ai_chat_json(
             chunk_prompt,
             max_tokens=max_tokens,

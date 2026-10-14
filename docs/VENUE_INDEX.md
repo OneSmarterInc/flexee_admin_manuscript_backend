@@ -194,6 +194,17 @@ its own AI usage operation (`index_rules_local`, `index_rules_retry`, `index_rul
 cost of escalation is visible. Venue Index shows the escalation rate per field over 30 days: under
 20 percent the local model pays for itself; above it, that field should move to the cloud.
 
+### The three numbers (report of 8 October, section 4)
+
+`python manage.py index_report` (read-only; `--days 30`, `--json`) prints:
+
+1. Escalation rate: rule reads the first local attempt could not settle, overall and per field,
+   against the 20 percent threshold. A field above it should move to the cloud.
+2. Screening overturned by a person: of the records decided (first keep/exclude per record), those
+   flagged by screening but kept, plus those with no concern but excluded.
+3. Rule-read attempts failing validation: attempts the page validator rejected, per stage, and the
+   reads that ended with no adequate result.
+
 ## Freshness: cadence and stale-call suppression (build plan step 7)
 
 | What | Re-checked | On failure |

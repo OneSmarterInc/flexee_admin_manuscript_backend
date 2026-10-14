@@ -647,9 +647,15 @@ def doaj_facts(http, issns, now):
     return {'listed': False, 'checked_at': now.isoformat()}
 
 
+# The fields enrichment fills in. Only these are written back (review 2, X4): the record was loaded before
+# the network calls, and saving the whole row would undo a reviewer's decision made in the meantime.
+ENRICHMENT_FIELDS = ['issn_checks', 'crossref', 'doaj', 'doaj_listed', 'source_ids', 'checked', 'enriched_at',
+                     'last_error', 'updated_at']
+
+
 def enrich_record(record, http, now):
     fetch_enrichment(record, http, now)
-    record.save()
+    record.save(update_fields=ENRICHMENT_FIELDS)
 
 
 def fetch_enrichment(record, http, now):
@@ -940,7 +946,7 @@ def _enrichment_pass(run, config, http, now, budget, say=lambda m: None):
             stop = False
             for record, done, exc in executor.map(fetch, records):
                 if done is not None:
-                    done.save()
+                    done.save(update_fields=ENRICHMENT_FIELDS)
                     run.enriched_count += 1
                     failures_in_a_row = 0
                     continue

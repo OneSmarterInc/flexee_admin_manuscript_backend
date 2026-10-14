@@ -423,6 +423,15 @@ def _accepted(manuscript_id):
     return item.venue.name if item is not None else ''
 
 
+def _refuse_after_acceptance(manuscript_id):
+    """Review 2, P3: once a venue accepted the manuscript it is finished: no plan starts or moves on,
+    and nothing is sent anywhere else."""
+    accepted_by = _accepted(manuscript_id)
+    if accepted_by:
+        raise PlanError(f'{accepted_by} accepted this manuscript, so it is not sent anywhere else.',
+                        'already_accepted', 409)
+
+
 def _unanswered(plan):
     return (plan.steps.filter(state__in={'declined', 'withdrawn'}, revision_answer='')
             .order_by('-order').first())
@@ -442,6 +451,7 @@ def activate(plan_id):
     plan, _ = _lock(plan_id)
     _require_status(plan, 'draft')
     _require_current_version(plan)
+    _refuse_after_acceptance(plan.manuscript_id)
     live = _live_submission(plan.manuscript_id)
     if live is not None and not plan.steps.filter(venue_id=live.venue_id, state__in={'queued', 'current'}).exists():
         raise PlanError(f'{live.venue.name} is still deciding on this manuscript. One venue at a time: wait for '
@@ -532,10 +542,7 @@ def mark_submitted(plan_id, step_id, *, venue_submission=None, actor='author'):
         # "I have sent it" would skip the editor: the step must come from a real Flexee packet.
         raise PlanError(f'{step.venue.name} is on Flexee: send the packet from its venue page, and this plan '
                         'updates by itself.', 'send_packet', 409)
-    accepted_by = _accepted(plan.manuscript_id)
-    if accepted_by:
-        raise PlanError(f'{accepted_by} accepted this manuscript, so it is not sent anywhere else.',
-                        'already_accepted', 409)
+    _refuse_after_acceptance(plan.manuscript_id)
     if venue_submission is None:
         # Bug H3: one venue at a time also holds against a Flexee packet sent outside the plan. The
         # manuscript lock is the one a packet submit takes, so the two cannot pass at the same moment.
@@ -617,6 +624,7 @@ def answer_revision(plan_id, *, answer, version_number=None, note=''):
     and the caller queues a regenerated plan against it (spec 6)."""
     plan, _ = _lock(plan_id)
     _require_status(plan, 'paused')
+    _refuse_after_acceptance(plan.manuscript_id)
     step = _unanswered(plan)
     if step is None:
         raise PlanError('There is no declined venue waiting for an answer.', 'bad_state')

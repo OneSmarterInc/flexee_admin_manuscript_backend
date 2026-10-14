@@ -111,6 +111,13 @@ def _queue_unique_job(job_type, reference_id, task_path, *task_args):
     return job, True
 
 
+def _revoke_manuscript_tokens(author):
+    """Password change, reset and "sign out other devices" end the author's sessions; the per-manuscript
+    access tokens are bearer secrets too, so they end with them. The signed-in author keeps working
+    through the new session cookie."""
+    Manuscript.objects.filter(author_account=author).exclude(access_token_hash='').update(access_token_hash='')
+
+
 def _hash_author_token(token):
     return hashlib.sha256(str(token or '').encode('utf-8')).hexdigest()
 
@@ -1133,6 +1140,7 @@ def author_change_password(request):
     author.password_hash = hash_password(new)
     author.password_changed_at = timezone.now()
     author.save(update_fields=['password_hash', 'password_changed_at', 'updated_at'])
+    _revoke_manuscript_tokens(author)  # review 2, A1: copied manuscript tokens stop working too
     audit('author.password_changed')
 
     token, max_age = issue_author_session(author.id)
@@ -1152,6 +1160,7 @@ def author_sign_out_other_devices(request):
         return JsonResponse({'detail': 'Author not found'}, status=401)
     author.password_changed_at = timezone.now()  # sessions are checked against this time
     author.save(update_fields=['password_changed_at', 'updated_at'])
+    _revoke_manuscript_tokens(author)  # review 2, A1: copied manuscript tokens stop working too
     AuditEvent.objects.create(actor_email=author.email, actor_role='author', action='author.signed_out_other_devices',
                               resource_type='author_account', resource_id=str(author.id),
                               remote_hash=remote_hash(request), detail={})
@@ -1228,6 +1237,7 @@ def author_change_password_direct(request):
     author.password_hash = hash_password(new)
     author.password_changed_at = timezone.now()
     author.save(update_fields=['password_hash', 'password_changed_at', 'updated_at'])
+    _revoke_manuscript_tokens(author)  # review 2, A1: copied manuscript tokens stop working too
     AuthorAuthEvent.objects.create(remote_hash=rh, success=True,
                                    detail={'action': 'direct_password_change', 'email': email, 'reason': 'ok'})
     AuditEvent.objects.create(
@@ -1353,6 +1363,7 @@ def author_password_reset_confirm(request):
     # Opening the emailed link proves the author controls this address.
     author.email_verified = True
     author.save(update_fields=['password_hash', 'password_changed_at', 'email_verified', 'updated_at'])
+    _revoke_manuscript_tokens(author)  # review 2, A1: copied manuscript tokens stop working too
     AuditEvent.objects.create(
         actor_email=author.email, actor_role='author', action='author.password_reset_completed',
         resource_type='author_account', resource_id=str(author.id), remote_hash=remote_hash(request), detail={},
@@ -2413,6 +2424,11 @@ def author_submit_packet(request, submission_id):
                 status=409,
             )
 
+        from .submission_plan import _accepted
+        accepted_by = _accepted(item.manuscript_id)
+        if accepted_by:  # review 2, P3: an accepted manuscript is finished
+            return JsonResponse({'detail': f'{accepted_by} accepted this manuscript, so it is not sent anywhere '
+                                           'else.', 'code': 'already_accepted'}, status=409)
         live_elsewhere = _live_venue_elsewhere(item)
         if live_elsewhere:
             return JsonResponse({'detail': f'{live_elsewhere} is still deciding on this manuscript. One venue at a '

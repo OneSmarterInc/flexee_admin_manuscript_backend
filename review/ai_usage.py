@@ -250,6 +250,34 @@ def reserve_ai_call(
     return event
 
 
+def extend_ai_reservation(event, *, provider: str, model: str, needed_cost: Decimal) -> bool:
+    """Review 2, X3: raise a live reservation to `needed_cost` if the budget allows it. A multi-turn call
+    (an agent that continues after pause_turn) resends the conversation each turn, so its real cost can
+    pass what was reserved up front. Returns False when the ceiling would be passed; the caller stops."""
+    if event is None or needed_cost <= (event.estimated_max_cost_usd or ZERO):
+        return True
+    limits = budget_limits()
+    if not limits['enabled']:
+        return True
+    now = timezone.now()
+    day_start, month_start = _period_starts(now)
+    reservation_cutoff = now - timedelta(minutes=limits['reservation_ttl_minutes'])
+    with transaction.atomic():
+        AIBudgetState.objects.get_or_create(key='global')
+        AIBudgetState.objects.select_for_update().get(key='global')
+        current = event.estimated_max_cost_usd or ZERO
+        extra = _money(Decimal(needed_cost) - Decimal(current))
+        daily_used = _committed_cost_since(day_start, reservation_cutoff)   # includes this reservation
+        monthly_used = _committed_cost_since(month_start, reservation_cutoff)
+        if limits['daily_cost_limit_usd'] > 0 and daily_used + extra > limits['daily_cost_limit_usd']:
+            return False
+        if limits['monthly_cost_limit_usd'] > 0 and monthly_used + extra > limits['monthly_cost_limit_usd']:
+            return False
+        event.estimated_max_cost_usd = _money(Decimal(needed_cost))
+        event.save(update_fields=['estimated_max_cost_usd', 'updated_at'])
+    return True
+
+
 def complete_ai_call(
     event,
     *,

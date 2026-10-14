@@ -1,4 +1,6 @@
 from django.db import transaction
+import logging
+
 from django.utils import timezone
 from datetime import timedelta
 import os
@@ -17,12 +19,27 @@ from .views import _generate_chapter_summary, _format_chapter_editor_summary, _c
 from .monitoring import capture_exception, capture_message, monitor_background_task
 from .storage_security import validate_manuscript_zip
 
+logger = logging.getLogger(__name__)
+
+
+def _claim_job(job_id):
+    """Review 2, X6: start a job only once. The queue re-delivers a task the worker killed at its timeout;
+    by then the job is still 'processing' or already marked failed, and running it again would repeat
+    every AI call (for ever, for a job that always needs longer). Only a queued job moves to processing."""
+    claimed = ReviewJob.objects.filter(id=job_id, status='queued').update(status='processing',
+                                                                         updated_at=timezone.now())
+    if not claimed:
+        logger.warning('Job %s was delivered again after it had started; not running it twice.', job_id)
+        return None
+    return ReviewJob.objects.get(id=job_id)
+
+
 @monitor_background_task('e2e_worker_probe')
 def run_e2e_worker_probe_task(job_id):
     """Small queued task used by the production E2E harness to prove qcluster is alive."""
-    job = ReviewJob.objects.get(id=job_id)
-    job.status = 'processing'
-    job.save(update_fields=['status', 'updated_at'])
+    job = _claim_job(job_id)
+    if job is None:
+        return
     job.status = 'completed'
     job.progress = 100
     job.completed_at = timezone.now()
@@ -31,9 +48,9 @@ def run_e2e_worker_probe_task(job_id):
 
 @monitor_background_task('public_review')
 def run_public_review_task(job_id, submission_id):
-    job = ReviewJob.objects.get(id=job_id)
-    job.status = 'processing'
-    job.save(update_fields=['status', 'updated_at'])
+    job = _claim_job(job_id)
+    if job is None:
+        return
     
     try:
         submission = Submission.objects.get(id=submission_id)
@@ -192,9 +209,9 @@ def run_public_review_task(job_id, submission_id):
 
 @monitor_background_task('semantic_readiness')
 def run_semantic_readiness_task(job_id, manuscript_id):
-    job = ReviewJob.objects.get(id=job_id)
-    job.status = 'processing'
-    job.save(update_fields=['status', 'updated_at'])
+    job = _claim_job(job_id)
+    if job is None:
+        return
     
     try:
         manuscript = Manuscript.objects.get(id=manuscript_id)
@@ -218,9 +235,9 @@ def run_semantic_readiness_task(job_id, manuscript_id):
 
 @monitor_background_task('semantic_matching')
 def run_semantic_matching_task(job_id, manuscript_id, venue_ids=None):
-    job = ReviewJob.objects.get(id=job_id)
-    job.status = 'processing'
-    job.save(update_fields=['status', 'updated_at'])
+    job = _claim_job(job_id)
+    if job is None:
+        return
     
     try:
         manuscript = Manuscript.objects.get(id=manuscript_id)
@@ -246,9 +263,9 @@ def run_semantic_matching_task(job_id, manuscript_id, venue_ids=None):
 def run_submission_plan_task(job_id, manuscript_id):
     """Generate a submission plan (spec 7). A PlanError is author-facing and stored as the job's error."""
     from .submission_plan import PlanError, generate_plan
-    job = ReviewJob.objects.get(id=job_id)
-    job.status = 'processing'
-    job.save(update_fields=['status', 'updated_at'])
+    job = _claim_job(job_id)
+    if job is None:
+        return
     try:
         generate_plan(Manuscript.objects.get(id=manuscript_id))
         job.status = 'completed'
@@ -283,9 +300,9 @@ def _reopen_after_failed_plan(manuscript_id, reason):
 
 @monitor_background_task('venue_assessment')
 def run_venue_assessment_task(job_id, submission_id):
-    job = ReviewJob.objects.get(id=job_id)
-    job.status = 'processing'
-    job.save(update_fields=['status', 'updated_at'])
+    job = _claim_job(job_id)
+    if job is None:
+        return
     
     try:
         submission = VenueSubmission.objects.select_related(

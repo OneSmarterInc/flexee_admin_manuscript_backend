@@ -161,7 +161,7 @@ def run_agent(prompt, settings, *, create_message=None, operation='venue_discove
         raise DiscoveryConfigError('ANTHROPIC_API_KEY is not set, so the Claude discovery agent cannot run.')
     create_message = create_message or _create_message
 
-    from ..ai_usage import complete_ai_call, fail_ai_call, reserve_ai_call
+    from ..ai_usage import complete_ai_call, estimate_cost, extend_ai_reservation, fail_ai_call, reserve_ai_call
     estimated = _estimated_input_tokens(settings, prompt)
     reservation = reserve_ai_call(provider='anthropic', model=settings['model'], operation=operation,
                                   estimated_input_tokens=estimated,
@@ -171,10 +171,24 @@ def run_agent(prompt, settings, *, create_message=None, operation='venue_discove
     stats = {'searches': 0, 'fetches': 0, 'input_tokens': 0, 'output_tokens': 0, 'tool_errors': []}
     pages, final_text = {}, ''
     try:
-        for _turn in range(settings['max_continuations'] + 1):
+        last_input = 0
+        for turn in range(settings['max_continuations'] + 1):
+            if turn:
+                # Review 2, X3: each continuation resends the whole conversation, so it costs at least the last
+                # turn's input again. Keep the reservation ahead of the real spend; stop at the ceiling.
+                spent, _priced = estimate_cost('anthropic', settings['model'], stats['input_tokens'],
+                                               stats['output_tokens'])
+                next_turn, _priced = estimate_cost('anthropic', settings['model'],
+                                                   int(last_input * 1.25) + estimated // 2,
+                                                   settings['max_output_tokens'])
+                if not extend_ai_reservation(reservation, provider='anthropic', model=settings['model'],
+                                             needed_cost=spent + next_turn):
+                    stats['tool_errors'].append('budget: stopped before the AI cost ceiling')
+                    break
             response = create_message(settings, messages)
             usage = response.get('usage') or {}
-            stats['input_tokens'] += int(usage.get('input_tokens') or 0) + int(usage.get('cache_read_input_tokens') or 0)
+            last_input = int(usage.get('input_tokens') or 0) + int(usage.get('cache_read_input_tokens') or 0)
+            stats['input_tokens'] += last_input
             stats['output_tokens'] += int(usage.get('output_tokens') or 0)
             server_use = usage.get('server_tool_use') or {}
             stats['searches'] += int(server_use.get('web_search_requests') or 0)

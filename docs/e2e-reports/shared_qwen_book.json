@@ -1,0 +1,160 @@
+{
+  "started_at": "2026-10-12T10:20:29.519091+00:00",
+  "status": "passed",
+  "provider": "shared_qwen",
+  "ollama_model": "qwen2.5:0.5b-instruct",
+  "anthropic_model": "claude-sonnet-5-5",
+  "base_url": "https://manuscriptbackend.flexee.org",
+  "venue_slug": "field-notes-journal",
+  "manuscript_type": "book",
+  "stages_seconds": {
+    "api_health": 0.101,
+    "qcluster_probe": 1.01,
+    "smtp_probe": 0.586,
+    "author_csrf_bootstrap": 0.009,
+    "admin_csrf_bootstrap": 0.008,
+    "author_registration": 0.653,
+    "author_email_verification": 0.008,
+    "manuscript_upload": 0.04,
+    "mechanical_readiness": 0.045,
+    "semantic_readiness_enqueue": 0.01,
+    "semantic_readiness_worker": 110.226,
+    "deterministic_matching": 4.39,
+    "semantic_matching_enqueue": 0.012,
+    "semantic_matching_worker": 45.083,
+    "venue_submission_create": 0.019,
+    "venue_assessment_enqueue": 0.011,
+    "venue_assessment_worker": 85.156,
+    "packet_submission": 0.619,
+    "editor_login": 0.08,
+    "editor_start_review": 0.017,
+    "editor_feedback": 0.013,
+    "human_editor_decision": 0.591
+  },
+  "ids": {
+    "author_id": "d7dd3e1f-7d01-41cb-91f6-8a48100bc992",
+    "manuscript_id": "2e90248b-e672-456e-8169-d850b1174f35",
+    "submission_id": "fbcee466-c34a-4b9d-8c0c-8bce6af1e5eb",
+    "editor_id": "cbd81e13-6f57-4004-8163-58cf75d02162"
+  },
+  "email": {
+    "smtp_probe": {
+      "recipient": "audinthor077+e2e15@gmail.com",
+      "sent": true
+    },
+    "verification_email_requested": true,
+    "submission_confirmation_requested": true,
+    "editor_decision_notification_requested": true
+  },
+  "models_observed": {
+    "semantic_readiness": "qwen2.5-shared",
+    "venue_assessment": "qwen2.5-shared"
+  },
+  "cost": {
+    "status": "instrumented",
+    "window_started_at": "2026-10-12T10:20:29.519091+00:00",
+    "completed_calls": 4,
+    "input_tokens": 4542,
+    "output_tokens": 519,
+    "total_tokens": 5061,
+    "cost_usd": "0.000000",
+    "failed_calls": 0,
+    "blocked_calls": 0,
+    "unpriced_cloud_calls": 4,
+    "by_operation": [
+      {
+        "operation": "semantic_matching",
+        "calls": 1,
+        "total_tokens": 925,
+        "cost_usd": "0.000000"
+      },
+      {
+        "operation": "semantic_readiness",
+        "calls": 2,
+        "total_tokens": 2553,
+        "cost_usd": "0.000000"
+      },
+      {
+        "operation": "venue_assessment",
+        "calls": 1,
+        "total_tokens": 1583,
+        "cost_usd": "0.000000"
+      }
+    ],
+    "note": "This window is exact for a dedicated E2E environment. Concurrent application AI calls during the same time window are included."
+  },
+  "frontend_origin": "https://flexee-admin-manuscript-frontend.vercel.app",
+  "match_after_semantic": {
+    "match_score": {
+      "score": 81,
+      "label": "Strong fit",
+      "breakdown": {
+        "scope": 31,
+        "type": 25,
+        "requirements": 20,
+        "methods": 5
+      },
+      "matched_terms": [
+        "information"
+      ]
+    },
+    "id": "d3b2a97c-7cea-478e-b662-2028983920a0",
+    "manuscript_id": "2e90248b-e672-456e-8169-d850b1174f35",
+    "venue": {
+      "id": "daa43c09-1787-4b73-aa9f-3eab284bc47e",
+      "name": "Field Notes Journal",
+      "slug": "field-notes-journal",
+      "venue_type": "journal",
+      "description": "A practitioner-facing scholarly journal focused on real-world implementation stories, field reports, organizational learning, operational change, applied research, and lessons learned from technology, management, education, healthcare, public-sector, and business transformation projects.",
+      "active": true,
+      "trust": {
+        "tier": "claimed",
+        "label": "Claimed by the editor",
+        "last_verified_at": "2026-10-09T08:00:15.440720+00:00",
+        "source_urls": []
+      },
+      "organization": {
+        "id": "28bb6f28-6958-4a90-bba9-87eec9549b00",
+        "name": "Flexee Publishing",
+        "organization_type": "publisher"
+      }
+    },
+    "venue_config_version": 2,
+    "eligibility": "eligible",
+    "fit_summary": "The Manuscript Type is Acceptable by the Venue.",
+    "reasons": [
+      "The manuscript type is accepted by this venue.",
+      "Aims and scope are configured and ready for semantic fit analysis.",
+      "The Manuscript Type is Configured and Ready for Semantic Fit Analysis."
+    ],
+    "gaps": [],
+    "evidence": [
+      {
+        "claim": "The Manuscript Type is Accepted by this venue.",
+        "excerpt": "\"Field Notes Journal publishes research and practice-grounded writing on information systems, digital transformation, supply chain and operations management, analytics, and the use of AI in organizations. We welcome empirical studies, case studies, practitioner reports and reflective field notes that connect evidence from real organizations to theory or to practical lessons. Work should be clearly written for both academic and practitioner readers. Purely technical computer science papers without an organizational angle, and work outside business and management, are out of scope.\"",
+        "finding": "reason",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 aims_scope"
+      }
+    ],
+    "topic_similarity": 0.6299,
+    "shortlist_rank": 4,
+    "created_at": "2026-10-12T10:22:26.668491+00:00",
+    "is_new": false
+  },
+  "final_submission_status": "revision_requested",
+  "human_decision": {
+    "note": "Production E2E test: human editor recorded this decision after reviewing the venue-specific brief.",
+    "decision": "revision_requested",
+    "decided_at": "2026-10-12T10:24:37.845516+00:00",
+    "decided_by": "flexee-e2e-editor-8dc66db254ec@example.invalid",
+    "human_decision": true
+  },
+  "evidence_count": 2,
+  "feedback_count": 1,
+  "decision_authority": "This brief is advisory. The agent does not accept, reject, or desk-reject a manuscript. Every editorial decision is made by a human editor at the venue.",
+  "total_seconds": 248.933,
+  "finished_at": "2026-10-12T10:24:38.452330+00:00",
+  "ai_fallback_stages": [],
+  "ai_used": true
+}

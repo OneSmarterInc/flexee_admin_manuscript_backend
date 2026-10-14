@@ -1,0 +1,184 @@
+{
+  "started_at": "2026-10-09T17:42:58.764458+00:00",
+  "status": "passed",
+  "provider": "shared_qwen",
+  "ollama_model": "qwen2.5:0.5b-instruct",
+  "anthropic_model": "claude-sonnet-5-5",
+  "base_url": "https://manuscriptbackend.flexee.org",
+  "venue_slug": "field-notes-journal",
+  "manuscript_type": "research_article",
+  "stages_seconds": {
+    "api_health": 0.374,
+    "qcluster_probe": 1.013,
+    "smtp_probe": 0.628,
+    "author_csrf_bootstrap": 0.01,
+    "admin_csrf_bootstrap": 0.008,
+    "author_registration": 0.623,
+    "author_email_verification": 0.01,
+    "manuscript_upload": 0.037,
+    "mechanical_readiness": 0.028,
+    "semantic_readiness_enqueue": 0.015,
+    "semantic_readiness_worker": 236.468,
+    "deterministic_matching": 2.621,
+    "semantic_matching_enqueue": 0.015,
+    "semantic_matching_worker": 68.135,
+    "venue_submission_create": 0.017,
+    "venue_assessment_enqueue": 0.013,
+    "venue_assessment_worker": 92.173,
+    "packet_submission": 0.588,
+    "editor_login": 0.085,
+    "editor_start_review": 0.019,
+    "editor_feedback": 0.013,
+    "human_editor_decision": 0.555
+  },
+  "ids": {
+    "author_id": "df9dae24-8838-44c7-8301-b7b398cd0529",
+    "manuscript_id": "52a03d34-8dd9-468b-a134-1e88c2c344c3",
+    "submission_id": "f54b4fe1-c5fe-463a-83d2-0395094f8de9",
+    "editor_id": "555483e2-3d82-4cae-a088-d6abc5febb3e"
+  },
+  "email": {
+    "smtp_probe": {
+      "recipient": "audinthor077+e2e9@gmail.com",
+      "sent": true
+    },
+    "verification_email_requested": true,
+    "submission_confirmation_requested": true,
+    "editor_decision_notification_requested": true
+  },
+  "models_observed": {
+    "semantic_readiness": "qwen2.5-shared",
+    "venue_assessment": "qwen2.5-shared"
+  },
+  "cost": {
+    "status": "instrumented",
+    "window_started_at": "2026-10-09T17:42:58.764458+00:00",
+    "completed_calls": 4,
+    "input_tokens": 5432,
+    "output_tokens": 1258,
+    "total_tokens": 6690,
+    "cost_usd": "0.000000",
+    "failed_calls": 0,
+    "blocked_calls": 0,
+    "unpriced_cloud_calls": 4,
+    "by_operation": [
+      {
+        "operation": "semantic_matching",
+        "calls": 1,
+        "total_tokens": 1157,
+        "cost_usd": "0.000000"
+      },
+      {
+        "operation": "semantic_readiness",
+        "calls": 2,
+        "total_tokens": 3810,
+        "cost_usd": "0.000000"
+      },
+      {
+        "operation": "venue_assessment",
+        "calls": 1,
+        "total_tokens": 1723,
+        "cost_usd": "0.000000"
+      }
+    ],
+    "note": "This window is exact for a dedicated E2E environment. Concurrent application AI calls during the same time window are included."
+  },
+  "frontend_origin": "https://flexee-admin-manuscript-frontend.vercel.app",
+  "match_after_semantic": {
+    "match_score": {
+      "score": 82,
+      "label": "Strong fit",
+      "breakdown": {
+        "scope": 32,
+        "type": 25,
+        "requirements": 20,
+        "methods": 5
+      },
+      "matched_terms": [
+        "practice"
+      ]
+    },
+    "id": "6ee1d4ae-697f-4e07-b94b-9ab4704546c2",
+    "manuscript_id": "52a03d34-8dd9-468b-a134-1e88c2c344c3",
+    "venue": {
+      "id": "daa43c09-1787-4b73-aa9f-3eab284bc47e",
+      "name": "Field Notes Journal",
+      "slug": "field-notes-journal",
+      "venue_type": "journal",
+      "description": "A practitioner-facing scholarly journal focused on real-world implementation stories, field reports, organizational learning, operational change, applied research, and lessons learned from technology, management, education, healthcare, public-sector, and business transformation projects.",
+      "active": true,
+      "trust": {
+        "tier": "claimed",
+        "label": "Claimed by the editor",
+        "last_verified_at": "2026-10-09T08:00:15.440720+00:00",
+        "source_urls": []
+      },
+      "organization": {
+        "id": "28bb6f28-6958-4a90-bba9-87eec9549b00",
+        "name": "Flexee Publishing",
+        "organization_type": "publisher"
+      }
+    },
+    "venue_config_version": 2,
+    "eligibility": "eligible",
+    "fit_summary": "The Manuscript Aligns with the Venue's Aim and Scope",
+    "reasons": [
+      "The manuscript type is accepted by this venue.",
+      "Aims and scope are configured and ready for semantic fit analysis.",
+      "The Manuscript Type Matches the Venue\u2019s Aims and Scope",
+      "The Manuscript Covers the Venue\u2019s Article Types"
+    ],
+    "gaps": [],
+    "evidence": [
+      {
+        "claim": "The Manuscript Type Matches the Venue\u2019s Aims and Scope",
+        "excerpt": "\"Field Notes Journal publishes research and practice-grounded writing on information systems, digital transformation, supply chain and operations management, analytics, and the use of AI in organizations. We welcome empirical studies, case studies, practitioner reports and reflective field notes that connect evidence from real organizations to theory or to practical lessons. Work should be clearly written for both academic and practitioner readers. Purely technical computer science papers without an organizational angle, and work outside business and management, are out of scope.\"",
+        "finding": "reason",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 aims_scope"
+      },
+      {
+        "claim": "The Manuscript Type Matches the Venue\u2019s Aims and Scope",
+        "excerpt": "Firms A and B kept one familiar spreadsheet report, rebuilt from system data, for the first quarter. Staff could compare old and new numbers side by side and raise questions early. Firm C switched off every spreadsheet on go-live day. Staff reported that they had no way to check whether the system was right, so they built private copies, which then drifted away from the shared record. What did not matter as much as expected Training hours were similar across the three firms, and differences in the vendor's support were small. Feature gaps were mentioned often but rarely caused lasting problems; staff found simple workarounds. The decisive issues were about who owned the data and how people could check it. Discussion Our findings place information quality at the centre of small-firm ERP adoption, in line with DeLone and McLean (2003), and locate the critical moment in the shakedown phase\u2026",
+        "finding": "reason",
+        "source_type": "manuscript",
+        "source_locator": "lines 24-43",
+        "manuscript_evidence_id": "M001"
+      },
+      {
+        "claim": "The Manuscript Covers the Venue\u2019s Article Types",
+        "excerpt": "[\"Research article\", \"Practitioner article\", \"Review article\", \"Case study\", \"Book manuscript\"]",
+        "finding": "reason",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 article_types"
+      },
+      {
+        "claim": "The Manuscript Covers the Venue\u2019s Article Types",
+        "excerpt": "Firms A and B kept one familiar spreadsheet report, rebuilt from system data, for the first quarter. Staff could compare old and new numbers side by side and raise questions early. Firm C switched off every spreadsheet on go-live day. Staff reported that they had no way to check whether the system was right, so they built private copies, which then drifted away from the shared record. What did not matter as much as expected Training hours were similar across the three firms, and differences in the vendor's support were small. Feature gaps were mentioned often but rarely caused lasting problems; staff found simple workarounds. The decisive issues were about who owned the data and how people could check it. Discussion Our findings place information quality at the centre of small-firm ERP adoption, in line with DeLone and McLean (2003), and locate the critical moment in the shakedown phase\u2026",
+        "finding": "reason",
+        "source_type": "manuscript",
+        "source_locator": "lines 24-43",
+        "manuscript_evidence_id": "M001"
+      }
+    ],
+    "topic_similarity": 0.6413,
+    "shortlist_rank": 1,
+    "created_at": "2026-10-09T17:47:00.646603+00:00",
+    "is_new": false
+  },
+  "final_submission_status": "revision_requested",
+  "human_decision": {
+    "note": "Production E2E test: human editor recorded this decision after reviewing the venue-specific brief.",
+    "decision": "revision_requested",
+    "decided_at": "2026-10-09T17:49:41.881366+00:00",
+    "decided_by": "flexee-e2e-editor-a666aa85b4ba@example.invalid",
+    "human_decision": true
+  },
+  "evidence_count": 6,
+  "feedback_count": 1,
+  "decision_authority": "This brief is advisory. The agent does not accept, reject, or desk-reject a manuscript. Every editorial decision is made by a human editor at the venue.",
+  "total_seconds": 403.685,
+  "finished_at": "2026-10-09T17:49:42.449472+00:00",
+  "ai_fallback_stages": [],
+  "ai_used": true
+}

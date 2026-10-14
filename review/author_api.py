@@ -1,16 +1,19 @@
 import hashlib
 import hmac
 import json
+import uuid
 import os
 import re
 import secrets
 from datetime import timedelta
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.http import JsonResponse
 from django.utils import timezone
 from django.utils.text import slugify
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
+from .json_object import json_object
 from .auth import (
     require_admin,
     require_author,
@@ -133,10 +136,12 @@ def _author_access_error(request, manuscript):
 
 
 def _json_body(request):
+    """The request's JSON object, or {} (bug L2: a JSON array or number used to reach .get() and give 500)."""
     try:
-        return json.loads(request.body.decode('utf-8') or '{}')
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        data = json.loads(request.body.decode('utf-8') or '{}')
+    except (UnicodeDecodeError, ValueError):
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _json_list(value):
@@ -1096,7 +1101,7 @@ def author_change_password(request):
     except Author.DoesNotExist:
         return JsonResponse({'detail': 'Author not found'}, status=401)
     try:
-        data = json.loads(request.body or b'{}')
+        data = json_object(request.body or b'{}')
     except json.JSONDecodeError:
         return JsonResponse({'detail': 'Invalid JSON'}, status=400)
     current = str(data.get('current_password', ''))
@@ -2050,7 +2055,7 @@ def author_create_submission(request, manuscript_id):
         return JsonResponse({'detail': 'venue_id is required'}, status=400)
     try:
         venue = Venue.objects.matchable().get(id=venue_id)
-    except (Venue.DoesNotExist, ValueError):
+    except (Venue.DoesNotExist, ValueError, ValidationError):  # bug L1: bad UUID
         return JsonResponse({'detail': 'Active venue not found'}, status=404)
 
     match = manuscript.current_matches().filter(venue=venue).first()
@@ -2474,7 +2479,7 @@ def author_transfer_submission(request, submission_id):
         return JsonResponse({'detail': 'venue_id is required'}, status=400)
     try:
         target_venue = Venue.objects.matchable().get(id=venue_id)
-    except (Venue.DoesNotExist, ValueError):
+    except (Venue.DoesNotExist, ValueError, ValidationError):  # bug L1: bad UUID
         return JsonResponse({'detail': 'Active venue not found'}, status=404)
     if target_venue.id == source.venue_id:
         return JsonResponse({'detail': 'Transfer destination must be a different venue'}, status=400)
@@ -2555,7 +2560,7 @@ def admin_venues(request):
     if organization_id:
         try:
             organization = Organization.objects.get(id=organization_id)
-        except (Organization.DoesNotExist, ValueError):
+        except (Organization.DoesNotExist, ValueError, ValidationError):  # bug L1: bad UUID
             return JsonResponse({'detail': 'Organization not found'}, status=404)
         if not check_org_access(request.editor_user, organization.id, ['owner']):
             return JsonResponse({'detail': 'Forbidden'}, status=403)
@@ -2707,7 +2712,7 @@ def admin_editor_feedback(request, venue_id):
                 id=submission_id,
                 venue=venue,
             )
-        except (VenueSubmission.DoesNotExist, ValueError):
+        except (VenueSubmission.DoesNotExist, ValueError, ValidationError):  # bug L1: bad UUID
             return JsonResponse({'detail': 'Venue submission not found for this venue'}, status=404)
 
     feedback = EditorFeedback.objects.create(
@@ -2811,6 +2816,10 @@ def admin_feedback_draft_config(request, venue_id):
     feedback_ids = data.get('feedback_ids')
     if not isinstance(feedback_ids, list) or not feedback_ids:
         return JsonResponse({'detail': 'feedback_ids must be a non-empty list'}, status=400)
+    try:
+        feedback_ids = [str(uuid.UUID(str(item))) for item in feedback_ids]
+    except ValueError:  # bug L1: a malformed id gave 500
+        return JsonResponse({'detail': 'feedback_ids must be feedback ids'}, status=400)
 
     active = venue.agent_configs.filter(active=True).order_by('-version').first()
     if not active:

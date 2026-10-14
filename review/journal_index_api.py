@@ -120,7 +120,8 @@ def journal_search(request):
         if tier != Venue.TIER_LISTED:
             listed = listed.none()
     if open_access:
-        live = live.filter(index_records__open_access=True)
+        # Bug L3: a venue with two open-access index records matched twice through the join.
+        live = live.filter(index_records__open_access=True).distinct()
         listed = listed.filter(open_access=True)
 
     # Live venues first (editor-confirmed, then checked from official pages), then listed journals.

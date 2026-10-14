@@ -24,7 +24,7 @@ def test_json_payload_leaves_non_json_unchanged():
 
 def test_shared_qwen_reply_in_a_code_fence_parses(monkeypatch):
     # The exact reply the production worker gave on 9 Oct.
-    monkeypatch.setattr(local_llm, 'SHARED_QWEN_QUEUE_ENABLED', True)
+    monkeypatch.setenv('SHARED_QWEN_QUEUE_ENABLED', 'true')
 
     class FakeRedis:
         def ping(self):

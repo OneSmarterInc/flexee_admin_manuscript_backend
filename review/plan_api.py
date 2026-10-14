@@ -54,7 +54,7 @@ def _manuscript_for(request, manuscript_id):
 def _plan_for(request, plan_id):
     try:
         plan = SubmissionPlan.objects.select_related('manuscript').get(id=plan_id)
-    except (SubmissionPlan.DoesNotExist, ValueError):
+    except (SubmissionPlan.DoesNotExist, ValueError, ValidationError):  # bug L1: bad UUID
         return None, JsonResponse({'detail': 'Plan not found'}, status=404)
     access_error = _author_access_error(request, plan.manuscript)
     if access_error:
@@ -149,9 +149,12 @@ def step_action(request, plan_id, step_id, action):
             submission = None
             if data.get('venue_submission_id'):
                 # Bug M1: only a packet the venue is still deciding on; a decided or withdrawn one froze the plan.
-                submission = VenueSubmission.objects.filter(
-                    id=data['venue_submission_id'], manuscript=plan.manuscript,
-                    venue__plan_steps__id=step_id, status__in=plans.LIVE_SUBMISSION_STATUSES).first()
+                try:
+                    submission = VenueSubmission.objects.filter(
+                        id=data['venue_submission_id'], manuscript=plan.manuscript,
+                        venue__plan_steps__id=step_id, status__in=plans.LIVE_SUBMISSION_STATUSES).first()
+                except (ValueError, ValidationError):  # bug L1: a malformed id
+                    submission = None
                 if submission is None:
                     return JsonResponse({'detail': 'That is not a submission this venue is still deciding on.'},
                                         status=400)

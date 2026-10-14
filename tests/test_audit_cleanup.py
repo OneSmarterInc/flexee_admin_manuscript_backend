@@ -152,7 +152,7 @@ def test_the_shared_qwen_redis_client_has_timeouts(monkeypatch):
     def fake_from_url(url, **kwargs):
         seen.update(kwargs)
         raise Stop()
-    monkeypatch.setattr(local_llm, 'SHARED_QWEN_QUEUE_ENABLED', True)
+    monkeypatch.setenv('SHARED_QWEN_QUEUE_ENABLED', 'true')
     monkeypatch.setattr(local_llm.redis, 'from_url', fake_from_url)
     with pytest.raises(Stop):
         local_llm.shared_qwen_chat_json('short prompt', max_tokens=50)

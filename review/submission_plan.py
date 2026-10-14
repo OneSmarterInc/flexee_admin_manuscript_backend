@@ -717,6 +717,31 @@ def reopen_revision_answer(manuscript, reason=''):
         return step
 
 
+def _accept_outside_the_plan(submission):
+    """Review 3, P2: a planned venue accepted a packet sent while the plan was paused (or a draft). The
+    manuscript is finished, so the plan completes; otherwise it waits for an answer every route refuses."""
+    with transaction.atomic():
+        plan = (SubmissionPlan.objects.select_for_update()
+                .filter(manuscript_id=submission.manuscript_id, status__in={'draft', 'active', 'paused'})
+                .order_by('-created_at').first())
+        if plan is None:
+            return None
+        step = (plan.steps.select_for_update().filter(venue_id=submission.venue_id, state__in={'queued', 'current'})
+                .select_related('venue').first())
+        if step is None:
+            return None
+        plan.steps.filter(state='current').exclude(id=step.id).update(state='queued', updated_at=timezone.now())
+        step.venue_submission = submission
+        step.submitted_version_id = submission.version_id or step.submitted_version_id
+        step.outcome_reported_by, step.outcome_at = 'venue', timezone.now()
+        _move(step, 'accepted', 'accepted', actor='venue',
+              fields=('venue_submission', 'submitted_version', 'outcome_reported_by', 'outcome_at'))
+        plan.status = 'completed'
+        _set_position(plan, None)
+        _log(plan, 'completed', actor='venue', note=f'Accepted by {step.venue.name}.')
+        return step
+
+
 def sync_from_submission(submission):
     """Keep a plan in step with a Flexee venue's own workflow (submitted, decision).
     Never raises: plan problems must not break the editorial flow."""
@@ -733,6 +758,8 @@ def sync_from_submission(submission):
                                                   venue_id=submission.venue_id, state__in={'current', 'submitted'})
                 .select_related('plan').first())
         if step is None:
+            if status == 'accepted':
+                return _accept_outside_the_plan(submission)
             return None
         if step.venue_submission_id and step.venue_submission_id != submission.id:
             # Review 2, P8: the step follows the packet it is linked to; another packet at the same venue (an

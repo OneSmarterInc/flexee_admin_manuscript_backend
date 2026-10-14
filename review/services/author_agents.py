@@ -1369,6 +1369,28 @@ MANUSCRIPT TEXT:
 """
 
 
+def _save_anonymization(submission_id, result, started_version_id, *, blocked):
+    """Review 3, P3/P4: the anonymization result is written on a fresh, locked copy of the packet, so
+    answers the author saved during the model call are kept, and a packet already sent is never changed.
+    A blocked check takes a ready packet back to draft: it cannot be sent until the names are removed
+    or the author overrides. Returns the saved submission, or None when the packet changed meanwhile."""
+    with transaction.atomic():
+        current = VenueSubmission.objects.select_for_update().get(id=submission_id)
+        if current.status not in {'draft', 'packet_ready'} or current.version_id != started_version_id:
+            return None
+        packet = dict(current.packet or {})
+        packet['anonymization'] = result
+        fields = ['packet', 'updated_at']
+        if blocked:
+            packet['editorial_brief_ready'] = False
+            if current.status == 'packet_ready':
+                current.status = 'draft'
+                fields.append('status')
+        current.packet = packet
+        current.save(update_fields=fields)
+        return current
+
+
 def run_venue_assessment(submission):
     if submission.status not in {'draft', 'packet_ready'}:
         raise AgentInputError(f'Venue assessment cannot run from status {submission.status}.')
@@ -1391,19 +1413,15 @@ def run_venue_assessment(submission):
                 timeout=120,
                 operation='anonymization_check',
             )
-            status_anon = data_anon.get('status', 'passed')
-            if status_anon == 'blocked':
-                packet = dict(submission.packet or {})
-                packet['anonymization'] = data_anon
-                packet['editorial_brief_ready'] = False
-                submission.packet = packet
-                submission.save(update_fields=['packet'])
+            blocked = data_anon.get('status', 'passed') == 'blocked'
+            saved = _save_anonymization(submission.id, data_anon if blocked else {'status': 'passed', 'issues': []},
+                                        started_version_id, blocked=blocked)
+            if saved is None:
+                logger.info('Assessment for submission %s stopped: the packet changed meanwhile.', submission.id)
+                return VenueSubmission.objects.get(id=submission.id)
+            submission = saved
+            if blocked:
                 return submission
-            else:
-                packet = dict(submission.packet or {})
-                packet['anonymization'] = {"status": "passed", "issues": []}
-                submission.packet = packet
-                submission.save(update_fields=['packet'])
 
     # Reuse the citation result produced during semantic readiness. This avoids
     # repeating external Crossref calls after the author chooses a venue. Older

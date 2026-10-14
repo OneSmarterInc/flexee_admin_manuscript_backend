@@ -483,6 +483,13 @@ def sweep_retention_task():
 
     for submission_id in candidate_ids:
         with transaction.atomic():
+            # Review 3, P6: the manuscript row is locked first, then the submission, the same order as sending a
+            # packet (author_submit_packet). The reverse order could deadlock with a revised packet being sent.
+            manuscript_id = (VenueSubmission.objects.filter(id=submission_id)
+                             .values_list('manuscript_id', flat=True).first())
+            if manuscript_id is None:
+                continue
+            Manuscript.objects.select_for_update().filter(id=manuscript_id).first()
             try:
                 submission = (
                     # Lock only the submission row: PostgreSQL refuses FOR UPDATE on the nullable side of the

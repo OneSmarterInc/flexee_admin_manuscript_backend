@@ -576,13 +576,15 @@ WHOLE_DOCUMENT_CRITERIA = {'teaches_claim', 'sim_fit', 'journal_fit'}
 
 
 def _judge_chunked(text, declared_sim, rubric_items, kind, disclosure, measured, num_ctx, max_tokens):
-    available_tokens = num_ctx - max_tokens - 1000
     # Bug H10: the author's AI-use disclosure is about the whole manuscript, so every chunk is shown it.
     # Otherwise only the last chunk sees it, the others fail it, and the worst verdict wins.
     disclosure_block = f"\n\nAI-Use Disclosure (submitted with the manuscript):\n{disclosure}"
     if text.endswith(disclosure_block):
         text = text[:-len(disclosure_block)]
-    max_chars = max(1000, available_tokens * 4 - len(disclosure_block))
+    # Review 3, Y2: the prompt around each chunk (rubric, structural checks, disclosure) is measured, not taken
+    # as a fixed 1,000 tokens: a book with long failed-check details has a bigger wrapper. 5% margin.
+    wrapper_chars = len(_build_prompt(disclosure_block, declared_sim, rubric_items, kind, measured))
+    max_chars = max(1000, int(((num_ctx - max_tokens) * 4 - wrapper_chars) * 0.95))
     chunks = []
     current = 0
     while current < len(text):

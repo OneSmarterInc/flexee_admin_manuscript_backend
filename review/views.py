@@ -223,6 +223,10 @@ def submit(request):
         errors.append('author is required')
     if not title:
         errors.append('title is required')
+    from .author_api import _looks_like_link
+    if (author and _looks_like_link(author)) or '://' in title:
+        # Review 3, C2: these go into the emails Flexee sends, so they cannot carry a web address.
+        errors.append('author name and title cannot contain web addresses')
     if not disclosure:
         errors.append('disclosure is required')
     if attestation != 'human-authored-with-ai-assistance':

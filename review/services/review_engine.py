@@ -601,7 +601,7 @@ def _judge_chunked(text, declared_sim, rubric_items, kind, disclosure, measured,
         models_used.add(model)
         parsed = _parse_model_json(output)
         if isinstance(parsed, dict):
-            by_id = {item.get('id'): item for item in parsed.get('items', []) if isinstance(item, dict)}
+            by_id = {item.get('id'): item for item in (parsed.get('items') or []) if isinstance(item, dict)}
             allowed = {'pass', 'needs_work', 'fail'}
             items = []
             for rubric in rubric_items:
@@ -618,6 +618,10 @@ def _judge_chunked(text, declared_sim, rubric_items, kind, disclosure, measured,
                 })
             all_judgments.append(items)
             
+    if not all_judgments:
+        # Bug M4: no chunk gave a usable answer. Merging nothing used to default every criterion to "pass",
+        # sending the paper on with no model judgment at all. Fail the job instead, as the one-call path does.
+        raise RuntimeError('Local AI returned JSON, but no review chunk payload was an object.')
     verdict_rank = {'pass': 0, 'needs_work': 1, 'fail': 2}
     final_items = []
     for rubric in rubric_items:
@@ -682,7 +686,7 @@ def judge_with_local_model(text, declared_sim, rubric_items, kind, disclosure, m
     if not isinstance(parsed, dict):
         raise RuntimeError("Local AI returned JSON, but the review payload was not an object.")
 
-    by_id = {item.get('id'): item for item in parsed.get('items', []) if isinstance(item, dict)}
+    by_id = {item.get('id'): item for item in (parsed.get('items') or []) if isinstance(item, dict)}
     allowed = {'pass', 'needs_work', 'fail'}
     items = []
     for rubric in rubric_items:

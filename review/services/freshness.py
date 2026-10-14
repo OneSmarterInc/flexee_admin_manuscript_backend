@@ -197,7 +197,8 @@ def check_calls(venue, fetcher, config, now=None):
                 pass
     official = [p for p in pages if not vd.is_third_party(p.url)]
     stamp = now.isoformat()
-    calls = [dict(c, confirmed_at=stamp) for c in vd.detect_calls_for_papers(official, today=timezone.localdate(now))]
+    # Bug M8: "today" is the deadline day that is still open somewhere (audit #38), as visible_calls uses.
+    calls = [dict(c, confirmed_at=stamp) for c in vd.detect_calls_for_papers(official, today=deadline_today(now))]
     venue.open_calls = calls
     venue.calls_checked_at = now
     venue.calls_error = ''

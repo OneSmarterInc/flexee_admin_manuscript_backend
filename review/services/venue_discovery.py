@@ -2120,6 +2120,7 @@ def _run_claude_agent(run, config, *, create_message=None):
         return
     stale_before = timezone.now() - timedelta(hours=config.recheck_after_hours)
     due = list(DiscoveredVenue.objects.exclude(discovery_status='ignored')
+               .exclude(origin='index')  # bug M7: Venue Index journals are checked by the index, not by Claude
                .filter(last_checked_at__lt=stale_before)
                .exclude(website_url='', submission_url='')
                .order_by('last_checked_at')[: config.max_rechecks_per_run])

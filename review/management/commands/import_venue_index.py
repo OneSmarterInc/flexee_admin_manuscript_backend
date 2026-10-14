@@ -5,8 +5,8 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from review.models import VenueIndexRun
-from review.services.venue_index import (IndexConfig, coverage_counts, force_close_runs, read_issn_worklist, run_index,
-                                         start_index_run)
+from review.services.venue_index import (MAX_RUN_MINUTES, IndexConfig, coverage_counts, force_close_runs,
+                                         read_issn_worklist, run_index, start_index_run)
 
 
 class Command(BaseCommand):
@@ -38,10 +38,14 @@ class Command(BaseCommand):
         parser.add_argument('--force', action='store_true',
                             help='Close a run left "processing" by a restart (only when nothing else is running).')
         parser.add_argument('--minutes', type=int, default=0,
-                            help='Stop after this many minutes (default VENUE_INDEX_TIME_LIMIT_MINUTES, 25). '
-                                 'Unfinished checks continue next time.')
+                            help=f'Stop after this many minutes, at most {MAX_RUN_MINUTES} (default '
+                                 'VENUE_INDEX_TIME_LIMIT_MINUTES, 25). Unfinished checks continue next time.')
 
     def handle(self, *args, **options):
+        if options['minutes'] > MAX_RUN_MINUTES:
+            # Bug M6: a longer run would be closed as stale under the worker's feet, and a second run start.
+            raise CommandError(f'--minutes can be at most {MAX_RUN_MINUTES}. Run the command again for more; '
+                               'unfinished checks continue where the last run stopped.')
         mode = ('calls' if options['calls_only'] else 'rules' if options['rules_only'] else 'screen' if options['screen_only']
                 else 'enrich' if options['enrich_only'] else 'full')
         worklist, worklist_stats, issn_path = None, None, None

@@ -69,6 +69,11 @@ class IndexSourceError(Exception):
     """A catalogue could not be reached or answered with an error."""
 
 
+# The longest any index run may work, from the schedule or from `import_venue_index --minutes` (bug M6).
+# --force and the stale check both rely on it: no run can still be working after this plus a margin.
+MAX_RUN_MINUTES = 28
+
+
 def _env_int(name, default, low, high):
     try:
         return max(low, min(int(os.getenv(name, str(default))), high))
@@ -97,7 +102,7 @@ class IndexConfig:
         self.min_core_share = _env_float('VENUE_INDEX_MIN_CORE_SHARE', 0.10, 0.0, 1.0)
         self.max_inactive_years = _env_int('VENUE_INDEX_MAX_INACTIVE_YEARS', 3, 0, 50)
         self.enrich_days = _env_int('VENUE_INDEX_ENRICH_DAYS', 30, 1, 365)
-        self.time_limit_seconds = _env_int('VENUE_INDEX_TIME_LIMIT_MINUTES', 25, 1, 28) * 60
+        self.time_limit_seconds = _env_int('VENUE_INDEX_TIME_LIMIT_MINUTES', 25, 1, MAX_RUN_MINUTES) * 60
         self.http_timeout = _env_float('VENUE_INDEX_HTTP_TIMEOUT_SECONDS', 20, 2, 120)
         self.delay_scale = _env_float('VENUE_INDEX_POLITE_DELAY', 1.0, 0.0, 10.0)
         self.openalex_api_key = os.getenv('OPENALEX_API_KEY', '').strip()
@@ -681,7 +686,9 @@ def force_close_runs(now=None):
     """--force: close runs left over from a restart, never a run that may still be working (audit item
     37). A run older than the run time limit (plus a margin) cannot still be inside its own limit."""
     now = now or timezone.now()
-    cutoff = now - timedelta(seconds=IndexConfig().time_limit_seconds + 300)
+    # Bug M6: the longest limit any run can have, not this terminal's own setting (another terminal may
+    # have started its run with a longer --minutes).
+    cutoff = now - timedelta(minutes=MAX_RUN_MINUTES + 5)
     return VenueIndexRun.objects.filter(status__in=['queued', 'processing'], created_at__lt=cutoff).update(
         status='failed', completed_at=now, summary='Closed with --force (left over from a restart).')
 

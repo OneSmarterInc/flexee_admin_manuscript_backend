@@ -1,0 +1,241 @@
+{
+  "started_at": "2026-10-12T13:06:08.692564+00:00",
+  "status": "passed",
+  "provider": "anthropic",
+  "ollama_model": "qwen2.5:0.5b-instruct",
+  "anthropic_model": "claude-haiku-5-5",
+  "base_url": "https://manuscriptbackend.flexee.org",
+  "venue_slug": "field-notes-journal",
+  "manuscript_type": "research_article",
+  "stages_seconds": {
+    "api_health": 0.332,
+    "qcluster_probe": 1.013,
+    "smtp_probe": 0.568,
+    "author_csrf_bootstrap": 0.01,
+    "admin_csrf_bootstrap": 0.008,
+    "author_registration": 0.634,
+    "author_email_verification": 0.007,
+    "manuscript_upload": 0.033,
+    "mechanical_readiness": 0.026,
+    "semantic_readiness_enqueue": 0.011,
+    "semantic_readiness_worker": 14.024,
+    "deterministic_matching": 4.58,
+    "semantic_matching_enqueue": 0.018,
+    "semantic_matching_worker": 6.01,
+    "venue_submission_create": 0.016,
+    "venue_assessment_enqueue": 0.013,
+    "venue_assessment_worker": 7.012,
+    "packet_submission": 0.634,
+    "editor_login": 0.145,
+    "editor_start_review": 0.028,
+    "editor_feedback": 0.018,
+    "human_editor_decision": 0.58
+  },
+  "ids": {
+    "author_id": "2b28558d-9223-4785-a1a0-23d4774e8888",
+    "manuscript_id": "01a04600-c628-42d9-b280-57144d250693",
+    "submission_id": "6f02007b-2089-495f-aeb9-54746c4264c7",
+    "editor_id": "bb31bd81-8c3f-43e7-85bd-a0b736fa8191"
+  },
+  "email": {
+    "smtp_probe": {
+      "recipient": "audinthor077+e2e19@gmail.com",
+      "sent": true
+    },
+    "verification_email_requested": true,
+    "submission_confirmation_requested": true,
+    "editor_decision_notification_requested": true
+  },
+  "models_observed": {
+    "semantic_readiness": "claude-haiku-5-5",
+    "venue_assessment": "claude-haiku-5-5"
+  },
+  "cost": {
+    "status": "instrumented",
+    "window_started_at": "2026-10-12T13:06:08.692564+00:00",
+    "completed_calls": 4,
+    "input_tokens": 10002,
+    "output_tokens": 4874,
+    "total_tokens": 14876,
+    "cost_usd": "0.003437",
+    "failed_calls": 0,
+    "blocked_calls": 0,
+    "unpriced_cloud_calls": 0,
+    "by_operation": [
+      {
+        "operation": "semantic_matching",
+        "calls": 1,
+        "total_tokens": 3015,
+        "cost_usd": "0.000676"
+      },
+      {
+        "operation": "semantic_readiness",
+        "calls": 2,
+        "total_tokens": 7049,
+        "cost_usd": "0.001713"
+      },
+      {
+        "operation": "venue_assessment",
+        "calls": 1,
+        "total_tokens": 4812,
+        "cost_usd": "0.001048"
+      }
+    ],
+    "note": "This window is exact for a dedicated E2E environment. Concurrent application AI calls during the same time window are included."
+  },
+  "frontend_origin": "https://flexee-admin-manuscript-frontend.vercel.app",
+  "match_after_semantic": {
+    "match_score": {
+      "score": 93,
+      "label": "Strong fit",
+      "breakdown": {
+        "scope": 33,
+        "type": 25,
+        "requirements": 20,
+        "methods": 15
+      },
+      "matched_terms": [
+        "information",
+        "practical",
+        "practice",
+        "report",
+        "system"
+      ]
+    },
+    "id": "f3f666d5-72fa-43ae-8e42-71ab0859dddb",
+    "manuscript_id": "01a04600-c628-42d9-b280-57144d250693",
+    "venue": {
+      "id": "daa43c09-1787-4b73-aa9f-3eab284bc47e",
+      "name": "Field Notes Journal",
+      "slug": "field-notes-journal",
+      "venue_type": "journal",
+      "description": "A practitioner-facing scholarly journal focused on real-world implementation stories, field reports, organizational learning, operational change, applied research, and lessons learned from technology, management, education, healthcare, public-sector, and business transformation projects.",
+      "active": true,
+      "trust": {
+        "tier": "claimed",
+        "label": "Claimed by the editor",
+        "last_verified_at": "2026-10-09T08:00:15.440720+00:00",
+        "source_urls": []
+      },
+      "organization": {
+        "id": "28bb6f28-6958-4a90-bba9-87eec9549b00",
+        "name": "Flexee Publishing",
+        "organization_type": "publisher"
+      }
+    },
+    "venue_config_version": 2,
+    "eligibility": "eligible",
+    "fit_summary": "The manuscript is a research article reporting a multiple case study of three small manufacturers adopting cloud ERP, which sits squarely within Field Notes Journal's stated scope of information systems and practice-grounded organizational research. Its methods (case study, interviews, document review) match the venue's accepted methods, and it offers an explicit practical contribution in the form of a checklist and two low-cost practices. The deterministic gate already marks the venue as eligible; this explanation covers semantic fit only. The manuscript also contains a limitation that the venue's quality threshold and disclosure expectations would need the author to address.",
+    "reasons": [
+      "The manuscript type is accepted by this venue.",
+      "Aims and scope are configured and ready for semantic fit analysis.",
+      "The topic of small manufacturer adoption of cloud ERP, with a focus on shared master data and information quality, falls within the venue's information systems and digital transformation scope and is grounded in real organizations.",
+      "The study uses a multiple case study design with semi-structured interviews and document review, which aligns with the venue's accepted methods of case study and interviews.",
+      "The manuscript states an explicit practice-level contribution, including a short checklist for managers and two low-cost practices, which matches the venue's requirement of an explicit contribution to theory or practice.",
+      "The research article type is accepted by the venue, and the framing for both academic and practitioner readers fits the venue's stated audience."
+    ],
+    "gaps": [
+      "The manuscript's limitations section states that the firms and figures are illustrative and do not describe real companies, which conflicts with the reported interview-based case evidence. This must be clarified because the venue requires evidence drawn from real organizations.",
+      "The venue lists AI-assistance disclosure and conflict of interest as disclosures, and the manuscript profile does not confirm that these statements are present in the reviewed content.",
+      "The manuscript acknowledges that three cases cannot establish generalisability and that interview transcripts are not shared; the venue's quality threshold expects a clear evidential basis, so the author should be prepared to justify the claims made relative to the evidence."
+    ],
+    "evidence": [
+      {
+        "claim": "The topic of small manufacturer adoption of cloud ERP, with a focus on shared master data and information quality, falls within the venue's information systems and digital transformation scope and is grounded in real organizations.",
+        "excerpt": "\"Field Notes Journal publishes research and practice-grounded writing on information systems, digital transformation, supply chain and operations management, analytics, and the use of AI in organizations. We welcome empirical studies, case studies, practitioner reports and reflective field notes that connect evidence from real organizations to theory or to practical lessons. Work should be clearly written for both academic and practitioner readers. Purely technical computer science papers without an organizational angle, and work outside business and management, are out of scope.\"",
+        "finding": "reason",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 aims_scope"
+      },
+      {
+        "claim": "The topic of small manufacturer adoption of cloud ERP, with a focus on shared master data and information quality, falls within the venue's information systems and digital transformation scope and is grounded in real organizations.",
+        "excerpt": "[\"Information systems\", \"Supply chain and operations\", \"Digital transformation\", \"Management practice\"]",
+        "finding": "reason",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 reviewer_criteria"
+      },
+      {
+        "claim": "The study uses a multiple case study design with semi-structured interviews and document review, which aligns with the venue's accepted methods of case study and interviews.",
+        "excerpt": "[\"Case study\", \"Survey\", \"Interviews\", \"Mixed methods\", \"Design science\", \"Conceptual\"]",
+        "finding": "reason",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 accepted_methods"
+      },
+      {
+        "claim": "The manuscript states an explicit practice-level contribution, including a short checklist for managers and two low-cost practices, which matches the venue's requirement of an explicit contribution to theory or practice.",
+        "excerpt": "\"Clear research question or practical problem, evidence drawn from real organizations or data, and an explicit contribution to theory or practice.\"",
+        "finding": "reason",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 quality_threshold"
+      },
+      {
+        "claim": "The manuscript states an explicit practice-level contribution, including a short checklist for managers and two low-cost practices, which matches the venue's requirement of an explicit contribution to theory or practice.",
+        "excerpt": "\"Field Notes Journal publishes research and practice-grounded writing on information systems, digital transformation, supply chain and operations management, analytics, and the use of AI in organizations. We welcome empirical studies, case studies, practitioner reports and reflective field notes that connect evidence from real organizations to theory or to practical lessons. Work should be clearly written for both academic and practitioner readers. Purely technical computer science papers without an organizational angle, and work outside business and management, are out of scope.\"",
+        "finding": "reason",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 aims_scope"
+      },
+      {
+        "claim": "The research article type is accepted by the venue, and the framing for both academic and practitioner readers fits the venue's stated audience.",
+        "excerpt": "[\"Research article\", \"Practitioner article\", \"Review article\", \"Case study\", \"Book manuscript\"]",
+        "finding": "reason",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 article_types"
+      },
+      {
+        "claim": "The research article type is accepted by the venue, and the framing for both academic and practitioner readers fits the venue's stated audience.",
+        "excerpt": "\"Field Notes Journal publishes research and practice-grounded writing on information systems, digital transformation, supply chain and operations management, analytics, and the use of AI in organizations. We welcome empirical studies, case studies, practitioner reports and reflective field notes that connect evidence from real organizations to theory or to practical lessons. Work should be clearly written for both academic and practitioner readers. Purely technical computer science papers without an organizational angle, and work outside business and management, are out of scope.\"",
+        "finding": "reason",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 aims_scope"
+      },
+      {
+        "claim": "The manuscript's limitations section states that the firms and figures are illustrative and do not describe real companies, which conflicts with the reported interview-based case evidence. This must be clarified because the venue requires evidence drawn from real organizations.",
+        "excerpt": "\"Clear research question or practical problem, evidence drawn from real organizations or data, and an explicit contribution to theory or practice.\"",
+        "finding": "gap",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 quality_threshold"
+      },
+      {
+        "claim": "The manuscript's limitations section states that the firms and figures are illustrative and do not describe real companies, which conflicts with the reported interview-based case evidence. This must be clarified because the venue requires evidence drawn from real organizations.",
+        "excerpt": "\"Field Notes Journal publishes research and practice-grounded writing on information systems, digital transformation, supply chain and operations management, analytics, and the use of AI in organizations. We welcome empirical studies, case studies, practitioner reports and reflective field notes that connect evidence from real organizations to theory or to practical lessons. Work should be clearly written for both academic and practitioner readers. Purely technical computer science papers without an organizational angle, and work outside business and management, are out of scope.\"",
+        "finding": "gap",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 aims_scope"
+      },
+      {
+        "claim": "The venue lists AI-assistance disclosure and conflict of interest as disclosures, and the manuscript profile does not confirm that these statements are present in the reviewed content.",
+        "excerpt": "[\"AI-assistance disclosure\", \"Conflict of interest\"]",
+        "finding": "gap",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 disclosures"
+      },
+      {
+        "claim": "The manuscript acknowledges that three cases cannot establish generalisability and that interview transcripts are not shared; the venue's quality threshold expects a clear evidential basis, so the author should be prepared to justify the claims made relative to the evidence.",
+        "excerpt": "\"Clear research question or practical problem, evidence drawn from real organizations or data, and an explicit contribution to theory or practice.\"",
+        "finding": "gap",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 quality_threshold"
+      }
+    ],
+    "topic_similarity": 0.6439,
+    "shortlist_rank": 1,
+    "created_at": "2026-10-12T13:06:29.967093+00:00",
+    "is_new": false
+  },
+  "final_submission_status": "revision_requested",
+  "human_decision": {
+    "note": "Production E2E test: human editor recorded this decision after reviewing the venue-specific brief.",
+    "decision": "revision_requested",
+    "decided_at": "2026-10-12T13:06:44.079023+00:00",
+    "decided_by": "flexee-e2e-editor-93a09c804801@example.invalid",
+    "human_decision": true
+  },
+  "evidence_count": 12,
+  "feedback_count": 1,
+  "decision_authority": "This brief is advisory. The agent does not accept, reject, or desk-reject a manuscript. Every editorial decision is made by a human editor at the venue.",
+  "total_seconds": 35.986,
+  "finished_at": "2026-10-12T13:06:44.678323+00:00",
+  "ai_fallback_stages": [],
+  "ai_used": true
+}

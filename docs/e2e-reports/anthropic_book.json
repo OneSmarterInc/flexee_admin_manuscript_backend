@@ -1,0 +1,241 @@
+{
+  "started_at": "2026-10-12T13:08:23.171139+00:00",
+  "status": "passed",
+  "provider": "anthropic",
+  "ollama_model": "qwen2.5:0.5b-instruct",
+  "anthropic_model": "claude-haiku-5-5",
+  "base_url": "https://manuscriptbackend.flexee.org",
+  "venue_slug": "field-notes-journal",
+  "manuscript_type": "book",
+  "stages_seconds": {
+    "api_health": 0.054,
+    "qcluster_probe": 1.013,
+    "smtp_probe": 0.539,
+    "author_csrf_bootstrap": 0.008,
+    "admin_csrf_bootstrap": 0.008,
+    "author_registration": 0.641,
+    "author_email_verification": 0.006,
+    "manuscript_upload": 0.029,
+    "mechanical_readiness": 0.02,
+    "semantic_readiness_enqueue": 0.009,
+    "semantic_readiness_worker": 9.013,
+    "deterministic_matching": 0.965,
+    "semantic_matching_enqueue": 0.009,
+    "semantic_matching_worker": 5.008,
+    "venue_submission_create": 0.016,
+    "venue_assessment_enqueue": 0.011,
+    "venue_assessment_worker": 8.011,
+    "packet_submission": 0.584,
+    "editor_login": 0.073,
+    "editor_start_review": 0.018,
+    "editor_feedback": 0.013,
+    "human_editor_decision": 0.549
+  },
+  "ids": {
+    "author_id": "d47b5d31-b80b-4704-8870-ead22517000e",
+    "manuscript_id": "3dfbde2f-f2fc-410d-8365-a6e8064441ea",
+    "submission_id": "61b72fc4-6b24-459a-b12f-9b51a0f472c6",
+    "editor_id": "c3b13aa2-7766-477e-90ea-ea06e18f6233"
+  },
+  "email": {
+    "smtp_probe": {
+      "recipient": "audinthor077+e2e20@gmail.com",
+      "sent": true
+    },
+    "verification_email_requested": true,
+    "submission_confirmation_requested": true,
+    "editor_decision_notification_requested": true
+  },
+  "models_observed": {
+    "semantic_readiness": "claude-haiku-5-5",
+    "venue_assessment": "claude-haiku-5-5"
+  },
+  "cost": {
+    "status": "instrumented",
+    "window_started_at": "2026-10-12T13:08:23.171139+00:00",
+    "completed_calls": 4,
+    "input_tokens": 8687,
+    "output_tokens": 4355,
+    "total_tokens": 13042,
+    "cost_usd": "0.003045",
+    "failed_calls": 0,
+    "blocked_calls": 0,
+    "unpriced_cloud_calls": 0,
+    "by_operation": [
+      {
+        "operation": "semantic_matching",
+        "calls": 1,
+        "total_tokens": 2850,
+        "cost_usd": "0.000681"
+      },
+      {
+        "operation": "semantic_readiness",
+        "calls": 2,
+        "total_tokens": 5132,
+        "cost_usd": "0.001124"
+      },
+      {
+        "operation": "venue_assessment",
+        "calls": 1,
+        "total_tokens": 5060,
+        "cost_usd": "0.001240"
+      }
+    ],
+    "note": "This window is exact for a dedicated E2E environment. Concurrent application AI calls during the same time window are included."
+  },
+  "frontend_origin": "https://flexee-admin-manuscript-frontend.vercel.app",
+  "match_after_semantic": {
+    "match_score": {
+      "score": 93,
+      "label": "Strong fit",
+      "breakdown": {
+        "scope": 33,
+        "type": 25,
+        "requirements": 20,
+        "methods": 15
+      },
+      "matched_terms": [
+        "busines",
+        "drawn",
+        "management",
+        "practical",
+        "system"
+      ]
+    },
+    "id": "99b94cf3-378f-4486-ba33-ef29517302e1",
+    "manuscript_id": "3dfbde2f-f2fc-410d-8365-a6e8064441ea",
+    "venue": {
+      "id": "daa43c09-1787-4b73-aa9f-3eab284bc47e",
+      "name": "Field Notes Journal",
+      "slug": "field-notes-journal",
+      "venue_type": "journal",
+      "description": "A practitioner-facing scholarly journal focused on real-world implementation stories, field reports, organizational learning, operational change, applied research, and lessons learned from technology, management, education, healthcare, public-sector, and business transformation projects.",
+      "active": true,
+      "trust": {
+        "tier": "claimed",
+        "label": "Claimed by the editor",
+        "last_verified_at": "2026-10-09T08:00:15.440720+00:00",
+        "source_urls": []
+      },
+      "organization": {
+        "id": "28bb6f28-6958-4a90-bba9-87eec9549b00",
+        "name": "Flexee Publishing",
+        "organization_type": "publisher"
+      }
+    },
+    "venue_config_version": 2,
+    "eligibility": "eligible",
+    "fit_summary": "The manuscript is a practice-oriented book on enterprise system adoption in small manufacturers, centred on data ownership, shared master data, and post-go-live trust. It aligns reasonably well with the venue's information systems and management-practice scope and its interest in practitioner-accessible writing. Fit is partial rather than strong: the chunk supplied for review contains only three of nine chapters, no analysed evidence, and the methods are described as experience-based advice rather than a systematic design, so the quality threshold of evidence from real organizations and an explicit contribution cannot be confirmed from this profile alone.",
+    "reasons": [
+      "The manuscript type is accepted by this venue.",
+      "Aims and scope are configured and ready for semantic fit analysis.",
+      "The topic of enterprise system adoption, shared master data, and record ownership in small manufacturers falls within the venue's information systems and operations scope.",
+      "The manuscript is framed for both managers and academic readers, with a stated contribution reframing adoption as a problem of data ownership and agreement, which matches the venue's call for work written for academic and practitioner audiences.",
+      "The manuscript type is a book, which the venue lists among its accepted article types, and the venue accepts case study and interview-based methods that resemble the interview protocol described in the manuscript."
+    ],
+    "gaps": [
+      "The venue's quality threshold requires evidence drawn from real organizations or data. The manuscript describes an interview protocol and coded summary tables, but their analysis is not presented in the reviewed chunk, so the evidence base cannot be confirmed.",
+      "The methods are characterised as practical guidance and experience-based advice with no systematic design described in the reviewed chunk, which does not clearly satisfy the venue's accepted methods of case study, survey, interviews, mixed methods, design science, or conceptual work as an explicit approach.",
+      "Only three of nine planned chapters were available for review, so the complete manuscript's contribution and evidence cannot be assessed against the venue's explicit contribution requirement.",
+      "The stated audience of firms with 20 to 250 employees is narrow, and generalisability beyond that range is not discussed in the reviewed chunk, which may weaken the case for the venue's management-practice reviewer criteria."
+    ],
+    "evidence": [
+      {
+        "claim": "The topic of enterprise system adoption, shared master data, and record ownership in small manufacturers falls within the venue's information systems and operations scope.",
+        "excerpt": "\"Field Notes Journal publishes research and practice-grounded writing on information systems, digital transformation, supply chain and operations management, analytics, and the use of AI in organizations. We welcome empirical studies, case studies, practitioner reports and reflective field notes that connect evidence from real organizations to theory or to practical lessons. Work should be clearly written for both academic and practitioner readers. Purely technical computer science papers without an organizational angle, and work outside business and management, are out of scope.\"",
+        "finding": "reason",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 aims_scope"
+      },
+      {
+        "claim": "The topic of enterprise system adoption, shared master data, and record ownership in small manufacturers falls within the venue's information systems and operations scope.",
+        "excerpt": "[\"Information systems\", \"Supply chain and operations\", \"Digital transformation\", \"Management practice\"]",
+        "finding": "reason",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 reviewer_criteria"
+      },
+      {
+        "claim": "The manuscript is framed for both managers and academic readers, with a stated contribution reframing adoption as a problem of data ownership and agreement, which matches the venue's call for work written for academic and practitioner audiences.",
+        "excerpt": "\"Field Notes Journal publishes research and practice-grounded writing on information systems, digital transformation, supply chain and operations management, analytics, and the use of AI in organizations. We welcome empirical studies, case studies, practitioner reports and reflective field notes that connect evidence from real organizations to theory or to practical lessons. Work should be clearly written for both academic and practitioner readers. Purely technical computer science papers without an organizational angle, and work outside business and management, are out of scope.\"",
+        "finding": "reason",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 aims_scope"
+      },
+      {
+        "claim": "The manuscript is framed for both managers and academic readers, with a stated contribution reframing adoption as a problem of data ownership and agreement, which matches the venue's call for work written for academic and practitioner audiences.",
+        "excerpt": "\"Clear research question or practical problem, evidence drawn from real organizations or data, and an explicit contribution to theory or practice.\"",
+        "finding": "reason",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 quality_threshold"
+      },
+      {
+        "claim": "The manuscript type is a book, which the venue lists among its accepted article types, and the venue accepts case study and interview-based methods that resemble the interview protocol described in the manuscript.",
+        "excerpt": "[\"Research article\", \"Practitioner article\", \"Review article\", \"Case study\", \"Book manuscript\"]",
+        "finding": "reason",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 article_types"
+      },
+      {
+        "claim": "The manuscript type is a book, which the venue lists among its accepted article types, and the venue accepts case study and interview-based methods that resemble the interview protocol described in the manuscript.",
+        "excerpt": "[\"Case study\", \"Survey\", \"Interviews\", \"Mixed methods\", \"Design science\", \"Conceptual\"]",
+        "finding": "reason",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 accepted_methods"
+      },
+      {
+        "claim": "The venue's quality threshold requires evidence drawn from real organizations or data. The manuscript describes an interview protocol and coded summary tables, but their analysis is not presented in the reviewed chunk, so the evidence base cannot be confirmed.",
+        "excerpt": "\"Clear research question or practical problem, evidence drawn from real organizations or data, and an explicit contribution to theory or practice.\"",
+        "finding": "gap",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 quality_threshold"
+      },
+      {
+        "claim": "The venue's quality threshold requires evidence drawn from real organizations or data. The manuscript describes an interview protocol and coded summary tables, but their analysis is not presented in the reviewed chunk, so the evidence base cannot be confirmed.",
+        "excerpt": "[\"Case study\", \"Survey\", \"Interviews\", \"Mixed methods\", \"Design science\", \"Conceptual\"]",
+        "finding": "gap",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 accepted_methods"
+      },
+      {
+        "claim": "The methods are characterised as practical guidance and experience-based advice with no systematic design described in the reviewed chunk, which does not clearly satisfy the venue's accepted methods of case study, survey, interviews, mixed methods, design science, or conceptual work as an explicit approach.",
+        "excerpt": "[\"Case study\", \"Survey\", \"Interviews\", \"Mixed methods\", \"Design science\", \"Conceptual\"]",
+        "finding": "gap",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 accepted_methods"
+      },
+      {
+        "claim": "Only three of nine planned chapters were available for review, so the complete manuscript's contribution and evidence cannot be assessed against the venue's explicit contribution requirement.",
+        "excerpt": "\"Clear research question or practical problem, evidence drawn from real organizations or data, and an explicit contribution to theory or practice.\"",
+        "finding": "gap",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 quality_threshold"
+      },
+      {
+        "claim": "The stated audience of firms with 20 to 250 employees is narrow, and generalisability beyond that range is not discussed in the reviewed chunk, which may weaken the case for the venue's management-practice reviewer criteria.",
+        "excerpt": "[\"Information systems\", \"Supply chain and operations\", \"Digital transformation\", \"Management practice\"]",
+        "finding": "gap",
+        "source_type": "venue_policy",
+        "source_locator": "venue config v2 \u00b7 reviewer_criteria"
+      }
+    ],
+    "topic_similarity": 0.6468,
+    "shortlist_rank": 2,
+    "created_at": "2026-10-12T13:08:35.531226+00:00",
+    "is_new": false
+  },
+  "final_submission_status": "revision_requested",
+  "human_decision": {
+    "note": "Production E2E test: human editor recorded this decision after reviewing the venue-specific brief.",
+    "decision": "revision_requested",
+    "decided_at": "2026-10-12T13:08:49.412484+00:00",
+    "decided_by": "flexee-e2e-editor-ebc005b0c821@example.invalid",
+    "human_decision": true
+  },
+  "evidence_count": 11,
+  "feedback_count": 1,
+  "decision_authority": "This brief is advisory. The agent does not accept, reject, or desk-reject a manuscript. Every editorial decision is made by a human editor at the venue.",
+  "total_seconds": 26.798,
+  "finished_at": "2026-10-12T13:08:49.969490+00:00",
+  "ai_fallback_stages": [],
+  "ai_used": true
+}

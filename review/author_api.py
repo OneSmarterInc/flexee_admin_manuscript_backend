@@ -2079,6 +2079,12 @@ def author_create_submission(request, manuscript_id):
                 },
                 status=409,
             )
+    # Bug M11: going back to a venue reuses the packet still being prepared for it, instead of a second draft.
+    existing = (VenueSubmission.objects.filter(manuscript=manuscript, venue=venue, status__in=('draft', 'packet_ready'),
+                                               version_id=manuscript.current_version_id)
+                .order_by('-created_at').first())
+    if existing is not None:
+        return JsonResponse({'submission': _submission_payload(existing)}, status=200)
     item = VenueSubmission.objects.create(
         manuscript=manuscript,
         venue=venue,

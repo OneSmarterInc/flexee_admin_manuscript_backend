@@ -148,11 +148,12 @@ def step_action(request, plan_id, step_id, action):
         elif action == 'submitted':
             submission = None
             if data.get('venue_submission_id'):
+                # Bug M1: only a packet the venue is still deciding on; a decided or withdrawn one froze the plan.
                 submission = VenueSubmission.objects.filter(
                     id=data['venue_submission_id'], manuscript=plan.manuscript,
-                    venue__plan_steps__id=step_id).first()
+                    venue__plan_steps__id=step_id, status__in=plans.LIVE_SUBMISSION_STATUSES).first()
                 if submission is None:
-                    return JsonResponse({'detail': 'That submission is not this manuscript\'s submission to this venue.'},
+                    return JsonResponse({'detail': 'That is not a submission this venue is still deciding on.'},
                                         status=400)
             plans.mark_submitted(plan.id, step_id, venue_submission=submission)
         elif action == 'outcome':

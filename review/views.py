@@ -961,6 +961,13 @@ def admin_smtp_test(request):
 
         if password.strip() == '':
             smtp, _ = SMTPSettings.objects.get_or_create(id=1)
+            # Bug M14: the saved password is only reused for the saved server and account. Otherwise a blank
+            # password would send the stored secret to whatever host the request names.
+            same_server = (str(host).strip().lower() == (smtp.host or '').strip().lower()
+                           and str(username).strip() == (smtp.username or '').strip())
+            if not same_server:
+                return JsonResponse({'error': 'Enter the password to test a server or account other than the '
+                                              'saved one.'}, status=400)
             password = smtp.password
 
         from django.core.mail import get_connection, EmailMultiAlternatives

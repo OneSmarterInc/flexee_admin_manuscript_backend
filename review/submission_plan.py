@@ -171,6 +171,15 @@ def declined_venue_ids(manuscript):
     return set(planned.values_list('venue_id', flat=True)) | set(rejected.values_list('venue_id', flat=True))
 
 
+def withdrawn_venue_ids(manuscript):
+    """Bug M3: a venue the manuscript was withdrawn or transferred from is not proposed again by itself.
+    The author can still send to it directly."""
+    from .models import VenueSubmission
+    planned = SubmissionPlanStep.objects.filter(plan__manuscript=manuscript, state='withdrawn')
+    left = VenueSubmission.objects.filter(manuscript=manuscript, status__in=('withdrawn', 'transferred'))
+    return set(planned.values_list('venue_id', flat=True)) | set(left.values_list('venue_id', flat=True))
+
+
 def _author_exclusions(previous_plan):
     """Venues the author skipped or removed in the previous plan: {venue_id: reason}."""
     if previous_plan is None:
@@ -192,6 +201,7 @@ def rank(manuscript, version=None, *, previous_plan=None):
                .select_related('venue', 'venue__organization'))
     matchable = set(Venue.objects.matchable().values_list('id', flat=True))
     declined = declined_venue_ids(manuscript)
+    withdrawn = withdrawn_venue_ids(manuscript) - declined
     by_author = _author_exclusions(previous_plan)
     entries, not_included = [], []
     for match in matches:
@@ -201,6 +211,10 @@ def rank(manuscript, version=None, *, previous_plan=None):
         if match.venue_id in declined:
             not_included.append({'venue_id': str(match.venue_id), 'venue': name,
                                  'reason': 'This venue already declined this manuscript.'})
+            continue
+        if match.venue_id in withdrawn:
+            not_included.append({'venue_id': str(match.venue_id), 'venue': name,
+                                 'reason': 'The manuscript was withdrawn from this venue.'})
             continue
         if str(match.venue_id) in by_author:
             not_included.append({'venue_id': str(match.venue_id), 'venue': name, 'reason': by_author[str(match.venue_id)],
@@ -537,6 +551,21 @@ def mark_submitted(plan_id, step_id, *, venue_submission=None, actor='author'):
     return step
 
 
+OUTSIDE_PACKET_STATUS = {'accepted': 'accepted', 'declined': 'rejected', 'withdrawn': 'withdrawn'}
+
+
+def _close_outside_packet(step, outcome, note):
+    from .models import VenueSubmission
+    packet = VenueSubmission.objects.select_for_update(of=('self',)).filter(id=step.venue_submission_id).first()
+    if packet is None or packet.status not in LIVE_SUBMISSION_STATUSES:
+        return
+    packet.status = OUTSIDE_PACKET_STATUS[outcome]
+    packet.decision = {'decision': packet.status, 'note': (note or '').strip()[:2000],
+                       'decided_at': timezone.now().isoformat(), 'recorded_by': 'author',
+                       'human_decision': True}
+    packet.save(update_fields=['status', 'decision', 'updated_at'])
+
+
 @transaction.atomic
 def report_outcome(plan_id, step_id, outcome, *, actor='author', note=''):
     """accepted | declined | withdrawn. A decline or withdrawal pauses the plan for the author's answer."""
@@ -545,10 +574,14 @@ def report_outcome(plan_id, step_id, outcome, *, actor='author', note=''):
     if outcome not in {'accepted', 'declined', 'withdrawn'}:
         raise PlanError('outcome must be accepted, declined or withdrawn.', 'bad_outcome', 400)
     _require(step, 'submitted')
-    if step.venue_submission_id and actor != 'venue':
+    if step.venue_submission_id and actor != 'venue' and reviews_on_flexee(step.venue):
         # Audit item 14: a venue on Flexee records its own decision; the author cannot overrule the editor.
         raise PlanError(f'{step.venue.name} is on Flexee: its editor records the decision here. To withdraw, '
                         'withdraw the submission itself.', 'venue_decides', 409)
+    if step.venue_submission_id and actor != 'venue':
+        # Bug M2: an outside venue the author sent a packet to has no editor on Flexee, so the author records
+        # its answer, and the packet is closed with it (otherwise it holds the manuscript for ever).
+        _close_outside_packet(step, outcome, note)
     step.outcome_note = (note or '').strip()[:4000]
     step.outcome_reported_by, step.outcome_at = actor, timezone.now()
     fields = ('outcome_note', 'outcome_reported_by', 'outcome_at')

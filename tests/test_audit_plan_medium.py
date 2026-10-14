@@ -11,7 +11,7 @@ import pytest
 from django.utils import timezone
 
 from review import submission_plan as plans
-from review.models import ReviewJob, SubmissionPlan, SubmissionPlanStep, VenueSubmission
+from review.models import ReviewJob, SubmissionPlan, SubmissionPlanStep, Venue, VenueSubmission
 from review.tasks import run_submission_plan_task
 from tests.test_author_dashboard_actions import author_client, env  # noqa: F401
 from tests.test_submission_plan import activate, decline_first, generate, new_version, post, setup_plan, step
@@ -61,6 +61,8 @@ def _flexee_step(client, author):
     plan = activate(client, generate(client, m))
     first = plan['steps'][0]
     venue = next(v for v in vs.values() if v.name == first['venue']['name'])
+    venue.trust_tier = Venue.TIER_CLAIMED  # its editors decide on Flexee (an outside venue's author records it)
+    venue.save(update_fields=['trust_tier'])
     submission = _packet(m, venue, status='submitted')
     plans.sync_from_submission(submission)
     assert SubmissionPlanStep.objects.get(id=first['id']).state == 'submitted'

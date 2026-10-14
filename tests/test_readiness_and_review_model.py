@@ -105,7 +105,8 @@ class CloudFallbackReadinessTests(SimpleTestCase):
         out = run_checker({**SHARED_QWEN, **CLOUD})
         self.assertTrue(line_for(out, 'ANTHROPIC_API_KEY must be configured').startswith('[PASS]'))
         self.assertTrue(line_for(out, 'Anthropic input and output pricing').startswith('[PASS]'))
-        self.assertNotIn('[WARN]', out)
+        # Only the optional-Sentry note may warn here.
+        self.assertEqual([l for l in out.splitlines() if l.startswith('[WARN]') and 'SENTRY_DSN' not in l], [])
 
     def test_no_anthropic_checks_without_cloud_use(self):
         out = run_checker(SHARED_QWEN)
@@ -178,4 +179,10 @@ class UnfilledProductionTemplateTests(SimpleTestCase):
                 call_command('verify_production_readiness', stdout=out)
         text = out.getvalue()
         self.assertIn('[FAIL] DJANGO_SECRET_KEY must be a real production secret', text)
-        self.assertIn('[FAIL] SENTRY_DSN must be configured', text)
+        self.assertIn('[WARN] SENTRY_DSN is not set', text)  # Sentry is optional
+
+
+def test_readiness_does_not_require_sentry():
+    out = run_checker({'SENTRY_DSN': ''})
+    assert '[FAIL] SENTRY_DSN' not in out
+    assert '[WARN] SENTRY_DSN is not set' in out

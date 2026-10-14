@@ -223,16 +223,20 @@ def extract_with_escalation(record, pages, config, hints, *, escalation, min_con
             escalation.cloud_left -= 1
             escalation.escalated += 1
 
-        candidate, missing, reason = None, [], error
+        candidate, missing, reason, ok = None, [], error, False
         if raw is not None:
             try:
                 candidate = vd.candidate_from_raw(raw, pages, hints)
-                ok, why = rules_found(candidate, min_confidence)
-                missing = missing_fields(candidate, min_confidence)
+                # Review 2, X10: judge what will be stored. Fields without their own quote are dropped before
+                # saving, so a read is only adequate if the required fields survive that.
+                from .index_rules import keep_quoted_rules
+                judged = keep_quoted_rules(candidate)
+                ok, why = rules_found(judged, min_confidence)
+                missing = missing_fields(judged, min_confidence)
                 reason = error or why or ('Missing: ' + ', '.join(FIELD_LABELS[m] for m in missing) if missing else '')
             except vd.DiscoveryExtractionError as exc:
                 candidate, reason = None, str(exc)
-        adequate = candidate is not None and rules_found(candidate, min_confidence)[0] and not missing
+        adequate = candidate is not None and ok and not missing
         outcome = 'adequate' if adequate else ('error' if candidate is None else 'inadequate')
         attempts.append(RulesAttempt(chain=chain, record=record, run=run, attempt=number, stage=stage,
                                      provider=provider, model=model[:200], outcome=outcome, reason=reason[:300],

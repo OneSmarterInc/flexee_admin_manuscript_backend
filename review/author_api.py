@@ -118,6 +118,13 @@ def _revoke_manuscript_tokens(author):
     Manuscript.objects.filter(author_account=author).exclude(access_token_hash='').update(access_token_hash='')
 
 
+LINK_LIKE = re.compile(r'(://|www\.|\b[a-z0-9-]+\.(com|net|org|io|co|info|biz|xyz|app|link|ru|cn)\b|[<>@])', re.I)
+
+
+def _looks_like_link(text):
+    return bool(LINK_LIKE.search(str(text or '')))
+
+
 def _hash_author_token(token):
     return hashlib.sha256(str(token or '').encode('utf-8')).hexdigest()
 
@@ -658,7 +665,9 @@ def _match_payload(item):
         'venue_config_version': item.venue_config.version if item.venue_config_id else None,
         'eligibility': item.eligibility,
         'fit_summary': item.fit_summary,
-        'semantic_checked': item.fit_summary not in (GATE_SUMMARY_ELIGIBLE, GATE_SUMMARY_OTHER),
+        # An AI outage result does not count as checked (review 2, F3), so the screen tries again later.
+        'semantic_checked': item.fit_summary not in (GATE_SUMMARY_ELIGIBLE, GATE_SUMMARY_OTHER,
+                                                     'Semantic analysis unavailable'),
         'reasons': item.reasons,
         'gaps': item.gaps,
         'evidence': item.evidence,
@@ -989,6 +998,11 @@ def author_register(request):
 
     if not email or not name or not password:
         return JsonResponse({'detail': 'Email, name, and password are required'}, status=400)
+    if len(name) > 120 or _looks_like_link(name):
+        # Review 2, A6: the name goes into the verification email sent to the address given, so it must be a
+        # name, not a message with a link in it.
+        return JsonResponse({'detail': 'Enter your name only (up to 120 characters, no web addresses).',
+                             'field': 'name'}, status=400)
     
     if len(password) < 8:
         return JsonResponse({'detail': 'Password must be at least 8 characters'}, status=400)
@@ -1454,6 +1468,20 @@ def author_session(request):
         'email_verified': author.email_verified,
     })
 
+SUBMISSION_HEADLINE_ORDER = ['accepted', 'under_review', 'submitted', 'revision_requested', 'rejected',
+                             'packet_ready', 'draft', 'withdrawn', 'transferred']
+
+
+def _headline_submission(manuscript):
+    """Review 2, F4: the submission the dashboard shows for a manuscript. An acceptance, or a venue still
+    deciding, comes before a newer draft for another venue; within a status, the newest."""
+    subs = list(manuscript.venue_submissions.order_by('-created_at'))
+    if not subs:
+        return None
+    rank = {status: i for i, status in enumerate(SUBMISSION_HEADLINE_ORDER)}
+    return min(subs, key=lambda s: rank.get(s.status, len(rank)))
+
+
 @require_GET
 @require_author
 def author_manuscripts_list(request):
@@ -1462,7 +1490,7 @@ def author_manuscripts_list(request):
     
     result = []
     for m in items:
-        sub = m.venue_submissions.order_by('-created_at').first()
+        sub = _headline_submission(m)
         payload = _manuscript_payload(m)
         if sub:
             payload['latest_submission'] = _submission_payload(sub)
@@ -2341,12 +2369,33 @@ def author_upload_submission_requirement(request, submission_id, requirement_key
 LIVE_SUBMISSION_STATUSES = ('submitted', 'under_review', 'revision_requested')
 
 
+def _replace_revision_requested(item):
+    """Review 2, P6: the revised manuscript sent to the venue that asked for the revision replaces the
+    earlier packet there (recorded as a transfer to the new packet), and a plan step waiting on that venue
+    now follows the new packet."""
+    from .models import SubmissionPlanStep
+    earlier = list(VenueSubmission.objects.select_for_update(of=('self',))
+                   .filter(manuscript_id=item.manuscript_id, venue_id=item.venue_id, status='revision_requested')
+                   .exclude(id=item.id))
+    for old in earlier:
+        old.status = 'transferred'
+        old.save(update_fields=['status', 'updated_at'])
+        SubmissionTransfer.objects.create(manuscript_id=item.manuscript_id, from_submission=old, to_submission=item,
+                                          reason='Revised manuscript sent to the venue that asked for the revision.')
+    if earlier:
+        SubmissionPlanStep.objects.filter(venue_submission__in=earlier, state='submitted').update(
+            venue_submission=item, submitted_version=item.version, updated_at=timezone.now())
+
+
 def _live_venue_elsewhere(item):
     """Audit item 13: the name of another venue that holds this manuscript now, or ''.
 
     A Flexee submission under review, or a plan step sent to a venue outside Flexee, both count."""
     other = (VenueSubmission.objects.filter(manuscript_id=item.manuscript_id, status__in=LIVE_SUBMISSION_STATUSES)
-             .exclude(id=item.id).select_related('venue').first())
+             .exclude(id=item.id)
+             # Review 2, P6: the venue that asked for a revision is waiting for this very manuscript.
+             .exclude(venue_id=item.venue_id, status='revision_requested')
+             .select_related('venue').first())
     if other is not None:
         return other.venue.name
     from .models import SubmissionPlanStep
@@ -2445,6 +2494,7 @@ def author_submit_packet(request, submission_id):
             else None
         )
         item.save(update_fields=['status', 'submitted_at', 'retention_expires_at', 'updated_at'])
+        _replace_revision_requested(item)
     from .submission_plan import sync_from_submission
     sync_from_submission(item)  # a planned venue moves to 'submitted' (never raises)
 

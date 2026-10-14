@@ -20,8 +20,13 @@ def _share(part, whole):
     return round(part / whole, 3) if whole else 0.0
 
 
-def _negative_flags(snapshot):
-    return [f for f in (snapshot or []) if isinstance(f, dict) and f.get('kind', 'negative') == 'negative']
+def _screening_flagged(snapshot):
+    """Review 2, X11: what the screening decided from the flags the reviewer saw, by the screening's own rule
+    (enough points, or a flag with evidence), not "any negative flag": a weak flag alone leaves it clear."""
+    from .index_screening import EVIDENCE_CODES, FLAG_THRESHOLD
+    negative = [f for f in (snapshot or []) if isinstance(f, dict) and f.get('kind', 'negative') == 'negative']
+    points = sum(int(f.get('weight') or 0) for f in negative)
+    return points >= FLAG_THRESHOLD or bool({f.get('code') for f in negative} & set(EVIDENCE_CODES))
 
 
 def screening_overturned(days=30, now=None):
@@ -35,7 +40,7 @@ def screening_overturned(days=30, now=None):
         first.setdefault(d['record_id'], d)
     flagged_kept = clear_excluded = 0
     for d in first.values():
-        flagged = bool(_negative_flags(d['flags_snapshot']))
+        flagged = _screening_flagged(d['flags_snapshot'])
         if flagged and d['decision'] == 'keep':
             flagged_kept += 1
         elif not flagged and d['decision'] == 'exclude':

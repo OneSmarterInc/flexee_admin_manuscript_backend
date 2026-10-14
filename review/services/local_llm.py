@@ -11,6 +11,17 @@ DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_OLLAMA_MODEL = "qwen2.5:0.5b-instruct"
 DEFAULT_OLLAMA_NUM_CTX = 4096
 DEFAULT_OLLAMA_NUM_PREDICT = 2000
+SHARED_QWEN_MAX_CTX = 8192  # the most the shared worker accepts
+
+
+def effective_context(num_ctx, num_predict):
+    """Review 2, X7: the context a call will really get. With the shared Qwen queue on, the worker caps the
+    context at 8192 and the output at DEFAULT_OLLAMA_NUM_PREDICT, so prompts must be sized for that."""
+    if _shared_qwen_settings()['enabled'] and os.getenv('AI_PROVIDER', 'ollama').strip().lower() != 'anthropic':
+        return min(int(num_ctx), SHARED_QWEN_MAX_CTX), min(int(num_predict), DEFAULT_OLLAMA_NUM_PREDICT)
+    return int(num_ctx), int(num_predict)
+
+
 def _shared_qwen_settings():
     """Bug L6: read the shared-Qwen settings when they are used, not once at import, so the worker, the
     readiness check and the tests all see the same environment."""
@@ -133,7 +144,7 @@ def shared_qwen_chat_json(
                     "OLLAMA_NUM_CTX", str(DEFAULT_OLLAMA_NUM_CTX)
                 )
             ),
-            8192,
+            SHARED_QWEN_MAX_CTX,
         ),
     )
     request_timeout = float(timeout if timeout is not None else settings['wait_timeout'])

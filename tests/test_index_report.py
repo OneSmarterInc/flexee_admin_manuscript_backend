@@ -9,7 +9,7 @@ from review.models import IndexReviewDecision, RulesAttempt
 from review.services.index_report import index_report
 from tests.test_index_rules import env, journal  # noqa: F401  (env: autouse fixture)
 
-NEGATIVE = [{'code': 'fee_no_peer_review', 'kind': 'negative', 'weight': 2}]
+NEGATIVE = [{'code': 'fee_no_peer_review', 'kind': 'negative', 'weight': 3}]  # at the flag threshold
 POSITIVE = [{'code': 'doaj', 'kind': 'positive', 'weight': 0}]
 
 

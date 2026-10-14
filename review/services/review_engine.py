@@ -6,7 +6,7 @@ from docx import Document
 from pypdf import PdfReader
 
 from .ai_provider import ai_chat_json
-from .local_llm import assert_prompt_fits_context, DEFAULT_OLLAMA_NUM_CTX
+from .local_llm import assert_prompt_fits_context, effective_context, DEFAULT_OLLAMA_NUM_CTX
 
 BOOK_STRUCTURE = {
     'chapters_required': 12,
@@ -570,6 +570,11 @@ def _repair_missing_outputs(parsed, decision, measured, judgments, kind):
 
 
 
+# Criteria about the manuscript as a whole: in a chunked review the chunk that can see what they need (the
+# introduction, the table of contents, the stated simulation or scope) decides them.
+WHOLE_DOCUMENT_CRITERIA = {'teaches_claim', 'sim_fit', 'journal_fit'}
+
+
 def _judge_chunked(text, declared_sim, rubric_items, kind, disclosure, measured, num_ctx, max_tokens):
     available_tokens = num_ctx - max_tokens - 1000
     # Bug H10: the author's AI-use disclosure is about the whole manuscript, so every chunk is shown it.
@@ -625,6 +630,20 @@ def _judge_chunked(text, declared_sim, rubric_items, kind, disclosure, measured,
     verdict_rank = {'pass': 0, 'needs_work': 1, 'fail': 2}
     final_items = []
     for rubric in rubric_items:
+        if rubric['id'] in WHOLE_DOCUMENT_CRITERIA:
+            # Review 2, X8: a criterion about the whole manuscript (does it teach what its introduction
+            # promises, does it fit the simulation or journal) can only be met where the chunk shows the
+            # promise. A chunk without it cannot judge it, so the best chunk verdict counts, not the worst.
+            judged = [item for items in all_judgments for item in items if item['id'] == rubric['id']]
+            best = min(judged, key=lambda item: verdict_rank[item['verdict']]) if judged else None
+            final_items.append({
+                'id': rubric['id'],
+                'verdict': best['verdict'] if best else 'needs_work',
+                'evidence': best['evidence'] if best else '',
+                'gap': best['gap'] if best else '',
+                'advisory': bool(rubric.get('advisory', False)),
+            })
+            continue
         worst_verdict = 'pass'
         best_evidence = ''
         best_gap = ''
@@ -660,6 +679,7 @@ def judge_with_local_model(text, declared_sim, rubric_items, kind, disclosure, m
     prompt = _build_prompt(text, declared_sim, rubric_items, kind, measured)
     max_tokens = int(os.getenv('OLLAMA_NUM_PREDICT', '4000'))
     num_ctx = int(os.getenv('OLLAMA_NUM_CTX', str(DEFAULT_OLLAMA_NUM_CTX)))
+    num_ctx, max_tokens = effective_context(num_ctx, max_tokens)  # review 2, X7: what the worker accepts
     
     force_provider = None
     metadata = {"mode": "standard"}

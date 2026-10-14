@@ -688,6 +688,12 @@ def fetch_enrichment(record, http, now):
 # Runs
 # ---------------------------------------------------------------------------
 
+def _older_than(cutoff):
+    """Review 2, X5: a run's age counts from when it started working, not from when it was queued (a run
+    that waited behind another on the single worker is young when it starts)."""
+    return Q(started_at__lt=cutoff) | Q(started_at__isnull=True, created_at__lt=cutoff)
+
+
 def force_close_runs(now=None):
     """--force: close runs left over from a restart, never a run that may still be working (audit item
     37). A run older than the run time limit (plus a margin) cannot still be inside its own limit."""
@@ -695,13 +701,13 @@ def force_close_runs(now=None):
     # Bug M6: the longest limit any run can have, not this terminal's own setting (another terminal may
     # have started its run with a longer --minutes).
     cutoff = now - timedelta(minutes=MAX_RUN_MINUTES + 5)
-    return VenueIndexRun.objects.filter(status__in=['queued', 'processing'], created_at__lt=cutoff).update(
+    return VenueIndexRun.objects.filter(_older_than(cutoff), status__in=['queued', 'processing']).update(
         status='failed', completed_at=now, summary='Closed with --force (left over from a restart).')
 
 
 def close_stale_runs(now=None):
     now = now or timezone.now()
-    VenueIndexRun.objects.filter(status__in=['queued', 'processing'], created_at__lt=now - timedelta(hours=1)).update(
+    VenueIndexRun.objects.filter(_older_than(now - timedelta(hours=1)), status__in=['queued', 'processing']).update(
         status='failed', completed_at=now,
         summary='Interrupted (worker restarted or time limit reached). Records saved before that were kept.')
 

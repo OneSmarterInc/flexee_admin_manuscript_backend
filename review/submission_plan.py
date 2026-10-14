@@ -372,6 +372,12 @@ def _advance(plan, *, actor='author'):
     """Make the first queued step current (only on an active plan with no step in progress)."""
     if plan.steps.filter(state__in={'current', 'submitted'}).exists():
         return None
+    # Review 3, P1: a venue that declined (or the manuscript was withdrawn from) while the plan was a draft or
+    # paused is passed over, never made current: a declined venue is not proposed again (spec 6).
+    closed = declined_venue_ids(plan.manuscript) | withdrawn_venue_ids(plan.manuscript)
+    for queued in plan.steps.filter(state='queued', venue_id__in=closed).order_by('order'):
+        _move(queued, 'skipped', 'skipped', actor='system',
+              note=f'{queued.venue.name} already declined this manuscript, or it was withdrawn from there.')
     nxt = plan.steps.filter(state='queued').order_by('order').first()
     if nxt is None:
         plan.status = 'completed' if plan.steps.filter(state='accepted').exists() else plan.status
@@ -792,6 +798,8 @@ def step_payload(step):
         'scope': 'Strong scope match' if step.fit_band == 'strong' else 'Reasonable scope match',
         'author_moved': step.author_moved,
         'venue_submission_id': str(step.venue_submission_id) if step.venue_submission_id else None,
+        # Review 3, F1: the screen needs to know when the venue asked for a revision.
+        'venue_submission_status': step.venue_submission.status if step.venue_submission_id else None,
         'submitted_version': step.submitted_version.number if step.submitted_version_id else None,
         'outcome_note': step.outcome_note or None,
         'outcome_reported_by': step.outcome_reported_by or None,
@@ -807,7 +815,7 @@ def plan_payload(plan):
         steps = sorted(cached['steps'], key=lambda s: s.order)
     else:
         steps = list(plan.steps.select_related('venue', 'venue__organization', 'venue_config', 'submitted_version',
-                                               'revision_version').order_by('order'))
+                                               'revision_version', 'venue_submission').order_by('order'))
     current = next((s for s in steps if s.state in {'current', 'submitted'}), None)
     waiting = _unanswered(plan) if plan.status == 'paused' else None
     return {

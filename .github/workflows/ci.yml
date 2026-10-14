@@ -26,5 +26,8 @@ jobs:
       - run: python -m pip check
       - run: python -m pip_audit -r requirements.txt --strict --progress-spinner off
       - run: python manage.py check
+      # A name used but never defined or imported only fails when that line runs (a missing import in an
+      # except clause turned every "not found" into a 500). Fail the build on it; unused imports are fine.
+      - run: python -m pyflakes review config > pyflakes.txt || true; ! grep -E "undefined name|referenced before assignment" pyflakes.txt
       - run: python manage.py makemigrations --check --dry-run
       - run: pytest -q tests

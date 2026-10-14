@@ -207,7 +207,7 @@ def admin_plans(request):
     from django.db.models import Prefetch
     from .models import SubmissionPlanStep
     steps = SubmissionPlanStep.objects.select_related('venue', 'venue__organization', 'venue_config',
-                                                      'submitted_version', 'revision_version')
+                                                      'submitted_version', 'revision_version', 'venue_submission')
     items = (SubmissionPlan.objects.select_related('manuscript', 'manuscript_version').order_by('-created_at')
              .prefetch_related(Prefetch('steps', queryset=steps), 'events'))
     if request.GET.get('manuscript'):

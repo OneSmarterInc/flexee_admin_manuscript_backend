@@ -1,4 +1,4 @@
-from django.db import transaction
+from django.db import IntegrityError, transaction
 import logging
 
 from django.utils import timezone
@@ -22,12 +22,27 @@ from .storage_security import validate_manuscript_zip
 logger = logging.getLogger(__name__)
 
 
+QUEUE_TIMEOUT_MESSAGE = 'Job did not start within the'
+
+
 def _claim_job(job_id):
     """Review 2, X6: start a job only once. The queue re-delivers a task the worker killed at its timeout;
     by then the job is still 'processing' or already marked failed, and running it again would repeat
     every AI call (for ever, for a job that always needs longer). Only a queued job moves to processing."""
     claimed = ReviewJob.objects.filter(id=job_id, status='queued').update(status='processing',
                                                                          updated_at=timezone.now())
+    if not claimed:
+        # Review 3, Y1: a job the sweeper failed only because it waited too long in the queue (behind a long
+        # index or discovery run on the one worker) never started, so it still runs when the worker reaches
+        # it. Unless the author has meanwhile asked again: then that newer job does the work.
+        try:
+            with transaction.atomic():
+                claimed = (ReviewJob.objects.filter(id=job_id, status='failed',
+                                                    error_message__startswith=QUEUE_TIMEOUT_MESSAGE)
+                           .update(status='processing', error_message='', completed_at=None,
+                                   updated_at=timezone.now()))
+        except IntegrityError:
+            claimed = 0
     if not claimed:
         logger.warning('Job %s was delivered again after it had started; not running it twice.', job_id)
         return None
@@ -344,7 +359,7 @@ def sweep_stuck_jobs_task():
     for job in candidates:
         previous_status = job.status
         if previous_status == 'queued':
-            message = f'Job did not start within the {queue_timeout_minutes}-minute queue timeout.'
+            message = f'{QUEUE_TIMEOUT_MESSAGE} {queue_timeout_minutes}-minute queue timeout.'
         else:
             message = f'Job timed out after {processing_timeout_minutes} minutes.'
 

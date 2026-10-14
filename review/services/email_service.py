@@ -13,7 +13,7 @@ def build_html_email(subject, body):
 
     def linkify(value):
         return re.sub(
-            r'(https?://[^\\s<]+)',
+            r'(https?://[^\s<]+)',  # review 3, C1: was [^\\s<], which stopped every link at the letter "s"
             lambda match: (
                 f'<a href="{match.group(1)}" style="color:#b45f2f;word-break:break-all;">'
                 f'{match.group(1)}</a>'

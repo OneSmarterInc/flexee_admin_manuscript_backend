@@ -7,7 +7,23 @@ from review.models import AIUsageEvent, IndexedVenue, RulesAttempt
 from review.services import rules_escalation as esc
 from review.services import venue_discovery as vd
 from tests.test_index_rules import admin_client, env, journal, run_rules  # noqa: F401  (env: autouse fixture)
-from tests.test_venue_discovery import JOURNAL_PAGES, journal_extraction, make_fetcher
+from tests.test_venue_discovery import JOURNAL_PAGES, make_fetcher
+from tests.test_venue_discovery import journal_extraction as _unquoted_extraction
+
+
+def journal_extraction(pages=None, config=None):
+    """A good read: scope and article types are each backed by their own quote on the official pages, so
+    they survive the drop of unquoted fields (review 2, X10 judges adequacy on what is stored)."""
+    data = _unquoted_extraction(pages, config)
+    data['source_evidence'] = data['source_evidence'] + [
+        {'field': 'aims_scope', 'claim': 'Empirical research on applied AI in organizations.',
+         'url': 'https://www.meridian-academic.example/jaaio', 'source_title': 'Journal of Applied AI in Organizations',
+         'evidence_text': 'Aims and scope: empirical research on applied AI in organizations.'},
+        {'field': 'article_types', 'claim': 'Research and review articles.',
+         'url': 'https://www.meridian-academic.example/jaaio/author-guidelines', 'source_title': 'Author guidelines',
+         'evidence_text': 'We publish original research articles and review articles.'},
+    ]
+    return data
 
 NAME_ONLY = {'name': 'Journal of Applied AI in Organizations', 'venue_type': 'journal'}
 

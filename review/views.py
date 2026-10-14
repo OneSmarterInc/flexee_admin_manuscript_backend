@@ -348,6 +348,18 @@ def submission_status(request, submission_id):
         })
 
 
+def _account_locked(username):
+    """Review 2, A4: failures for one account count across every network, so guessing a password or an
+    authenticator code from many addresses still stops (authors have the same rule)."""
+    if not username:
+        return False
+    window_minutes = int(os.getenv('ADMIN_LOGIN_WINDOW_MINUTES', '15'))
+    limit = int(os.getenv('ADMIN_LOGIN_ACCOUNT_MAX_FAILURES', '20'))
+    since = timezone.now() - timedelta(minutes=window_minutes)
+    return AdminAuthEvent.objects.filter(success=False, occurred_at__gte=since,
+                                         detail__username=username).count() >= limit
+
+
 @require_POST
 def admin_verify_password(request):
     data = _json_body(request)
@@ -363,6 +375,10 @@ def admin_verify_password(request):
         record_admin_auth_event(request, 'admin.login_rate_limited', username=username, detail={'stage': 'password', 'reason': 'rate_limited'})
         return JsonResponse({'detail': 'Too many failed login attempts. Try again later.'}, status=429)
 
+    if _account_locked(username):
+        record_admin_auth_event(request, 'admin.login_rate_limited', username=username,
+                                detail={'stage': 'password', 'reason': 'account_rate_limited'})
+        return JsonResponse({'detail': 'Too many failed login attempts. Try again later.'}, status=429)
     password = str(data.get('password', ''))
 
     from .models import EditorUser
@@ -479,6 +495,11 @@ def admin_login(request):
         # Older screens still send the password again; accepted until every screen sends a ticket.
         user = EditorUser.objects.filter(email=username).first()
         credentials_ok = bool(verify_password(password, user.password_hash if user else _dummy_hash()) and user)
+
+    if _account_locked(username):
+        record_admin_auth_event(request, 'admin.login_rate_limited', username=username,
+                                detail={'stage': 'authenticator', 'reason': 'account_rate_limited'})
+        return JsonResponse({'detail': 'Too many failed login attempts. Try again later.'}, status=429)
 
     ok = False
     totp_missing_error = False
@@ -922,6 +943,8 @@ def admin_smtp_settings(request):
     elif request.method == 'POST':
         try:
             body = json.loads(request.body)
+            saved = SMTPSettings(host=smtp.host, port=smtp.port, username=smtp.username, use_tls=smtp.use_tls,
+                                 use_ssl=smtp.use_ssl)
             smtp.sender_name = body.get('sender_name', smtp.sender_name)
             smtp.sender_email = body.get('sender_email', smtp.sender_email)
             smtp.reply_to_email = body.get('reply_to_email', smtp.reply_to_email)
@@ -933,6 +956,12 @@ def admin_smtp_settings(request):
             smtp.use_tls = bool(body.get('use_tls', smtp.use_tls))
             smtp.use_ssl = bool(body.get('use_ssl', smtp.use_ssl))
             smtp.admin_notification_emails = body.get('admin_notification_emails', smtp.admin_notification_emails)
+            new_password = 'password' in body and str(body['password']).strip() != ''
+            if not new_password and smtp.password and not _same_smtp_server(saved, smtp):
+                # Review 2, A2: the saved password belongs to the saved server, account and encryption.
+                return JsonResponse(_smtp_error('Enter the password when you change the server, account, port '
+                                                'or encryption; the saved password is kept only for the saved '
+                                                'server.'), status=400)
             smtp.save()
             record_audit_event(
                 request,
@@ -948,8 +977,21 @@ def admin_smtp_settings(request):
             )
             return JsonResponse({'ok': True})
         except Exception as e:
-            return JsonResponse({'error': str(e)}, status=400)
+            return JsonResponse(_smtp_error(str(e)), status=400)
     return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+def _smtp_error(message):
+    """Review 2, F5: the admin screen reads `detail`; older callers read `error`. Send both."""
+    return {'error': message, 'detail': message}
+
+
+def _same_smtp_server(a, b):
+    """Same host, account and port, and no weaker encryption (review 2, A2/A3)."""
+    return (str(a.host or '').strip().lower() == str(b.host or '').strip().lower()
+            and str(a.username or '').strip() == str(b.username or '').strip()
+            and int(a.port or 0) == int(b.port or 0)
+            and (bool(b.use_tls) or bool(b.use_ssl) or not (a.use_tls or a.use_ssl)))
 
 @require_platform_superuser
 def admin_smtp_test(request):
@@ -972,11 +1014,10 @@ def admin_smtp_test(request):
             smtp, _ = SMTPSettings.objects.get_or_create(id=1)
             # Bug M14: the saved password is only reused for the saved server and account. Otherwise a blank
             # password would send the stored secret to whatever host the request names.
-            same_server = (str(host).strip().lower() == (smtp.host or '').strip().lower()
-                           and str(username).strip() == (smtp.username or '').strip())
-            if not same_server:
-                return JsonResponse({'error': 'Enter the password to test a server or account other than the '
-                                              'saved one.'}, status=400)
+            asked = SMTPSettings(host=host, port=port, username=username, use_tls=use_tls, use_ssl=use_ssl)
+            if not _same_smtp_server(smtp, asked):
+                return JsonResponse(_smtp_error('Enter the password to test a server, account, port or encryption '
+                                                'other than the saved one.'), status=400)
             password = smtp.password
 
         from django.core.mail import get_connection, EmailMultiAlternatives
@@ -1004,7 +1045,7 @@ def admin_smtp_test(request):
         if sent:
             return JsonResponse({'ok': True, 'message': 'Test email sent successfully!'})
         else:
-            return JsonResponse({'error': 'Failed to send test email for unknown reasons.'}, status=400)
+            return JsonResponse(_smtp_error('Failed to send test email for unknown reasons.'), status=400)
 
     except Exception as e:
         capture_exception(
@@ -1013,4 +1054,4 @@ def admin_smtp_test(request):
             operation='smtp_test',
             tags={'source': 'admin_smtp_test'},
         )
-        return JsonResponse({'error': str(e)}, status=400)
+        return JsonResponse(_smtp_error(str(e)), status=400)

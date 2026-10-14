@@ -372,9 +372,11 @@ def admin_claim_approve(request, claim_id):
                            detail={'journal': claim.journal_name, 'email': claim.email, 'new_account': new_account,
                                    'domain_matches': claim.domain_matches})
     sign_in = f'{_origin(request)}/admin'
+    # Review 2, A5: an account that never set its password gets a fresh link too (the first may have expired).
+    needs_password = new_account or user.password_hash == '!unset'
     access = (f'Set your password here (the link works for {SET_PASSWORD_DAYS} days):\n{set_password_link(request, user)}\n\n'
               f'Then sign in at {sign_in}. You will set up a sign-in code app (two-step sign-in) the first time.'
-              if new_account else f'Sign in with your existing Flexee account at {sign_in}.')
+              if needs_password else f'Sign in with your existing Flexee account at {sign_in}.')
     _send(claim.email, f'You now manage {venue.name} on Flexee',
           f'Hello {claim.name},\n\nYour claim for {venue.name} was approved.\n\n{access}\n\n'
           f'In Venue Agents, check the journal\'s rules and save them. From then on authors see the journal as '

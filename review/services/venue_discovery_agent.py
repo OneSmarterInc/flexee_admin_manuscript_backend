@@ -210,8 +210,16 @@ def run_agent(prompt, settings, *, create_message=None, operation='venue_discove
                 continue
             break
     except Exception as exc:
-        fail_ai_call(reservation, exc, provider='anthropic', model=settings['model'], operation=operation,
-                     estimated_input_tokens=estimated)
+        if stats['input_tokens'] or stats['output_tokens']:
+            # Review 2, X2: earlier turns were billed before this one failed. Record that spend, so it counts
+            # against the budget, and keep the error type for the record.
+            event = complete_ai_call(reservation, provider='anthropic', model=settings['model'], operation=operation,
+                                     input_tokens=stats['input_tokens'], output_tokens=stats['output_tokens'])
+            event.error_type = exc.__class__.__name__[:100]
+            event.save(update_fields=['error_type', 'updated_at'])
+        else:
+            fail_ai_call(reservation, exc, provider='anthropic', model=settings['model'], operation=operation,
+                         estimated_input_tokens=estimated)
         raise
     complete_ai_call(reservation, provider='anthropic', model=settings['model'], operation=operation,
                      input_tokens=stats['input_tokens'], output_tokens=stats['output_tokens'])

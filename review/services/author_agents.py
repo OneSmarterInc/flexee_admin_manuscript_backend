@@ -713,6 +713,13 @@ def _profile_context(manuscript):
         'contributions': _clean_string_list(profile.get('contributions'), limit=10, item_limit=220),
         'limitations': _clean_string_list(profile.get('limitations'), limit=10, item_limit=220),
         'coverage': profile.get('coverage') if isinstance(profile.get('coverage'), dict) else {},
+        # Review 2, X9: the match and brief prompts ask the model to cite these ids, so it must see them.
+        'evidence_points': [
+            {'id': str(point.get('id')), 'kind': _clean_text(point.get('kind'), 40),
+             'text': _clean_text(point.get('text'), 200)}
+            for point in (profile.get('evidence_points') or [])[:20]
+            if isinstance(point, dict) and point.get('id')
+        ],
     }
 
 
@@ -1372,6 +1379,7 @@ def run_venue_assessment(submission):
     if not isinstance(profile, dict) or not profile:
         raise AgentInputError('Run semantic readiness before the venue-specific assessment.')
 
+    started_version_id = submission.version_id  # review 2, P5: the text this assessment reads
     text = load_manuscript_text(submission.file_source)
 
     policies = config.policies or {}
@@ -1496,6 +1504,11 @@ def run_venue_assessment(submission):
 
     with transaction.atomic():
         submission = VenueSubmission.objects.select_for_update().get(id=submission.id)
+        if submission.status not in {'draft', 'packet_ready'} or submission.version_id != started_version_id:
+            # Review 2, P5: the author sent the packet while this ran (the editor reviews the brief they sent
+            # with), or uploaded a new version (this brief describes the old text). Keep what is there.
+            logger.info('Assessment for submission %s finished after it changed; result not saved.', submission.id)
+            return submission
         evidence = _persist_assessment_evidence(submission, config, brief, citations, model)
         brief['evidence_ids'] = [str(item.id) for item in evidence]
         submission.venue_config = config

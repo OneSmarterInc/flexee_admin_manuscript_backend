@@ -293,7 +293,7 @@ Never treat an untested backup as production-ready. Keep at least one recent res
 
 The backend supports opt-in Sentry monitoring for Django HTTP failures, handled Django-Q job failures/timeouts, email-delivery failures, and backup/restore failures.
 
-Monitoring is disabled unless `SENTRY_DSN` is configured. The integration is intentionally privacy-first for manuscript handling:
+Monitoring is optional and disabled unless `SENTRY_DSN` is configured (the readiness check only warns when it is missing). The integration is intentionally privacy-first for manuscript handling:
 
 - request bodies are never sent
 - request query strings, headers, cookies, and attached user data are removed

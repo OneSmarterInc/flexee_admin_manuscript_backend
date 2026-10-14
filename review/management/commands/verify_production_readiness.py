@@ -117,7 +117,9 @@ class Command(BaseCommand):
             'SMTP must be configured for real production email (Admin -> SMTP settings, or SMTP_HOST in .env).',
         )
         require(bool(os.getenv('NOTIFY_FROM_EMAIL', '').strip()), 'NOTIFY_FROM_EMAIL must be configured.')
-        require(configured('SENTRY_DSN'), 'SENTRY_DSN must be configured for production error reporting.')
+        if not configured('SENTRY_DSN'):
+            # Sentry is optional (decision of 14 October): without it errors are only in the server logs.
+            warn('SENTRY_DSN is not set: error reports go to the server logs only (Sentry is optional).')
         require(bool(os.getenv('BACKUP_ROOT', '').strip()), 'BACKUP_ROOT must be configured for durable backups.')
 
         provider = os.getenv('AI_PROVIDER', '').strip().lower()

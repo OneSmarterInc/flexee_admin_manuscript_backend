@@ -554,6 +554,10 @@ def sweep_retention_task():
             retention_expires_at__isnull=False,
             retention_expires_at__lte=now,
         )
+        # Review 5, R5-6: a packet a venue still has open is skipped by the loop below, but it was still
+        # taken as a candidate. Ordered oldest-first, enough of them fill the whole batch and the sweep
+        # stops purging anything else — the expired copies behind them are never reached.
+        .exclude(status__in=('under_review', 'revision_requested'))
         .order_by('retention_expires_at')
         .values_list('id', flat=True)[:batch_size]
     )

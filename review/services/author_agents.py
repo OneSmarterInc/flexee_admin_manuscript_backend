@@ -1391,9 +1391,42 @@ def _anonymization_budget_chars(wrapper_chars, *, max_tokens):
     return max(1000, int(((num_ctx - max_tokens) * 4 - wrapper_chars) * 0.95))
 
 
+def _chars_per_token(text):
+    """Review 5, R5-12: four characters per token holds for English and badly overstates CJK.
+
+    A Chinese, Japanese or Korean character is roughly one token, so a slice measured in characters at
+    4:1 is about four times the context it was meant to fit. Our own estimator counts characters too, so
+    nothing raises: the model silently drops the tail and the check is recorded as passed. Measuring the
+    sample's UTF-8 weight scales the slice to the script actually in front of us.
+    """
+    sample = str(text or '')[:4000]
+    if not sample:
+        return 4.0
+    bytes_per_char = len(sample.encode('utf-8')) / len(sample)
+    if bytes_per_char <= 1.4:
+        return 4.0                      # mostly Latin text: the usual four characters per token
+    return max(1.0, 4.0 / bytes_per_char)   # 3-byte CJK lands near 1.3 characters per token
+
+
+def _anonymization_excerpt(text, budget):
+    """The part of the manuscript the blind-review check reads.
+
+    Review 5, R5-12: it used to be the opening only. Author names and affiliations sit in the first page,
+    but acknowledgements, funding notes and author biographies — the other places a blind review is given
+    away — sit at the very end, and those were never looked at.
+    """
+    text = str(text or '')
+    if len(text) <= budget:
+        return text
+    head = budget // 2
+    tail = budget - head
+    return f'{text[:head]}\n\n[... middle of the manuscript omitted ...]\n\n{text[-tail:]}'
+
+
 def _anonymization_prompt(text, *, max_tokens=1000):
     budget = _anonymization_budget_chars(len(_anonymization_body('')), max_tokens=max_tokens)
-    return _anonymization_body(text[:budget])
+    budget = max(1000, int(budget * _chars_per_token(text) / 4.0))
+    return _anonymization_body(_anonymization_excerpt(text, budget))
 
 
 def _anonymization_body(text):

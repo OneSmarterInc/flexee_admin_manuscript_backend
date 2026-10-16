@@ -547,8 +547,11 @@ def admin_login(request):
             )
         return JsonResponse({'detail': 'Invalid username, password, or authenticator code.'}, status=401)
     record_admin_auth_event(request, 'admin.login_succeeded', user=user, username=username, detail={'stage': 'authenticator', 'method': 'password_totp' if user.totp_secret else 'password'})
-    token, max_age = issue_session(username)
-    response = JsonResponse({'ok': True, 'username': username})
+    # Review 5, R5-8: the session carries the address as stored, not as typed. require_admin looks the
+    # session user up with an exact match, so a mixed-case account signed in and was then refused on every
+    # request with a 401.
+    token, max_age = issue_session(user.email)
+    response = JsonResponse({'ok': True, 'username': user.email})
     set_session_cookie(response, token, max_age)
     response['Cache-Control'] = 'no-store'
     return response

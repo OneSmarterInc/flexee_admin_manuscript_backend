@@ -249,7 +249,9 @@ def require_admin(view):
             return JsonResponse({'detail': 'Admin authentication required'}, status=401)
         
         from .models import EditorUser
-        user = EditorUser.objects.filter(email=session.get('u')).first()
+        # Review 5, R5-8: matched case-insensitively, so a session issued with the typed spelling still
+        # finds an account stored with different capitalisation. Sessions already in browsers keep working.
+        user = EditorUser.objects.filter(email__iexact=session.get('u') or '').first()
         if not user:
             return JsonResponse({'detail': 'User not found'}, status=401)
             

@@ -140,10 +140,27 @@ class TemplateTests(SimpleTestCase):
         self.assertIn('sonnet', self._template('.env.production.example')['ANTHROPIC_MODEL'])
 
     def test_production_template_uses_the_real_fallback_setting(self):
+        """The template must name the setting the application actually reads.
+
+        Review 5, R5-18: the value itself is now 'false', to match the live host, which runs on the
+        shared Qwen worker with no Anthropic key. Turning the fallback on without a key and without
+        Anthropic pricing makes verify_production_readiness fail, so the template does not ship it on.
+        """
         values = self._template('.env.production.example')
-        self.assertNotIn('AI_PROVIDER_FALLBACK', values)
-        self.assertEqual(values['ENABLE_CLOUD_FALLBACK'], 'true')
+        self.assertNotIn('AI_PROVIDER_FALLBACK', values)   # a name the application never reads
+        self.assertIn(values['ENABLE_CLOUD_FALLBACK'], {'true', 'false'})
         self.assertEqual(values['AI_PROVIDER'], 'shared_qwen')
+
+    def test_production_template_does_not_need_a_key_it_does_not_ship(self):
+        """Review 5, R5-18: nothing switched on by default may require ANTHROPIC_API_KEY."""
+        values = self._template('.env.production.example')
+        truthy = {'1', 'true', 'yes', 'on'}
+        needs_key = (values['ENABLE_CLOUD_FALLBACK'] in truthy
+                     or values['AI_PROVIDER'] == 'anthropic'
+                     or (values.get('VENUE_DISCOVERY_ENABLED', 'false') in truthy
+                         and values.get('VENUE_DISCOVERY_MODE', 'claude_agent') == 'claude_agent')
+                     or values.get('VENUE_INDEX_ESCALATE', 'off') == 'anthropic')
+        self.assertFalse(needs_key, 'the template bills Anthropic by default but ships no key')
 
 
 class PlaceholderSentryDsnTests(SimpleTestCase):

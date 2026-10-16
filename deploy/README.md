@@ -21,9 +21,11 @@ sudo apt install -y postgresql-client nginx
 ## 2. Configure production environment
 
 ```bash
-cp .env.production.example .env
+cp -n .env.production.example .env     # -n: never overwrite an .env that already exists
 chmod 600 .env
 ```
+
+**On a host that is already running, skip this step entirely.** Section 9 below is the one to follow.
 
 Replace every `CHANGE_ME` value and every zero AI cost/pricing value that the readiness verifier reports as incomplete.
 
@@ -66,6 +68,9 @@ For the recommended same-origin deployment leave `VITE_API_BASE_URL` blank.
 ## 6. Install systemd services
 
 Review paths/users first, then:
+
+The unit files bind gunicorn to `127.0.0.1:8200`, which is the port `deploy/nginx-flexee.conf` proxies to.
+Change both together or neither.
 
 ```bash
 sudo cp flexee-api.service /etc/systemd/system/
@@ -177,3 +182,38 @@ Do not mark the deployment production-ready until all of these are true:
 - production readiness verifier has zero failures
 - live deployed article E2E succeeds
 - live deployed book E2E succeeds for the book path you intend to offer
+
+## 9. Updating a host that is already running
+
+These steps replace sections 1 to 8 for an existing deployment. Nothing here touches `.env`, the unit
+files or the nginx config: on a live host those hold settings the repository does not know about.
+
+```bash
+cd /var/www/flexee_admin_manuscript_backend
+source /var/www/shared_venv/bin/activate
+git checkout main
+git pull
+pip install -r requirements.txt
+python manage.py migrate
+```
+
+Add any new settings to `.env` by hand before restarting — compare it against
+`.env.production.example` and copy across only the keys you need:
+
+```bash
+diff <(grep -o '^[A-Z_]*' .env | sort -u) <(grep -o '^[A-Z_]*' .env.production.example | sort -u)
+nano .env
+```
+
+Then restart and check:
+
+```bash
+sudo systemctl restart flexee-api.service flexee-qcluster.service
+sudo systemctl status flexee-qcluster.service --no-pager | head -5
+curl -s -H "X-Forwarded-Proto: https" http://127.0.0.1:8200/api/health/
+python manage.py verify_production_readiness
+git log --oneline -4
+```
+
+The last command is the one worth keeping: it is the only quick way to tell whether the code you merged
+is the code the host is running.

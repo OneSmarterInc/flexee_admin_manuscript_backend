@@ -14,6 +14,8 @@ MANUSCRIPT_EXTENSIONS = {'.docx', '.pdf', '.md', '.zip'}
 ZIP_MANUSCRIPT_EXTENSIONS = {'.docx', '.pdf', '.md'}
 # Office packages are ZIP containers, so they get the archive limits too (Review 4, A3).
 OOXML_EXTENSIONS = ('.docx', '.docm', '.dotx', '.pptx', '.xlsx', '.odt')
+# A bundle member larger than this is already caught by the bundle's own uncompressed cap.
+NESTED_OOXML_SCAN_BYTES = 25 * 1024 * 1024
 
 
 class UploadSecurityError(ValueError):
@@ -87,6 +89,21 @@ def validate_ooxml_package(content: bytes, *, label='document'):
         return _scan_zip_members(content, require_manuscript=False, office=True)
     except UploadSecurityError as exc:
         raise UploadSecurityError(str(exc).replace('ZIP', label)) from exc
+
+
+def validate_upload(content: bytes, filename: str):
+    """The archive check every path that accepts a manuscript file runs.
+
+    Review 5, R5-7: the Office-package check reached only the first upload. A revised version, an edit, the
+    public form and the ZIP worker all called validate_manuscript_zip alone, so the same .docx that is
+    refused on create was accepted everywhere else.
+    """
+    name = str(filename or '').lower()
+    if name.endswith('.zip'):
+        return validate_manuscript_zip(content)
+    if name.endswith(OOXML_EXTENSIONS):
+        return validate_ooxml_package(content, label=name.rsplit('.', 1)[-1])
+    return None
 
 
 def validate_manuscript_zip(content: bytes):
@@ -171,6 +188,15 @@ def _scan_zip_members(content: bytes, *, require_manuscript, office=False):
             ext = os.path.splitext(info.filename)[1].lower()
             if ext in ZIP_MANUSCRIPT_EXTENSIONS:
                 supported += 1
+            # Review 5, R5-7: a .docx inside the bundle is an archive of its own, and the bundle's own
+            # member count says nothing about what that package declares. Its parts get the same limits.
+            if not office and ext in OOXML_EXTENSIONS and uncompressed <= NESTED_OOXML_SCAN_BYTES:
+                try:
+                    member = archive.read(info)
+                except Exception as exc:        # noqa: BLE001 - unreadable member, treated as unsafe
+                    raise UploadSecurityError(
+                        f'{info.filename} inside the ZIP could not be read') from exc
+                validate_ooxml_package(member, label=f'{info.filename} inside the ZIP')
 
         if require_manuscript and supported == 0:
             raise UploadSecurityError(

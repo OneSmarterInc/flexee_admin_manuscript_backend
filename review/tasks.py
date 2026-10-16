@@ -17,7 +17,7 @@ from .services.review_engine import run_review, extract_text, word_count as wc_f
 from .services.email_service import send_review_emails
 from .views import _generate_chapter_summary, _format_chapter_editor_summary, _chapter_figure_count
 from .monitoring import capture_exception, capture_message, monitor_background_task
-from .storage_security import validate_manuscript_zip
+from .storage_security import validate_upload
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +76,8 @@ def run_public_review_task(job_id, submission_id):
         zip_contents = None
         zip_overall_source = None
         
+        validate_upload(content, review_filename)   # Review 5, R5-7: Office packages too
         if review_filename.lower().endswith('.zip'):
-            validate_manuscript_zip(content)
             with zipfile.ZipFile(BytesIO(content)) as zf:
                 manuscript_entries = []
                 for name in zf.namelist():

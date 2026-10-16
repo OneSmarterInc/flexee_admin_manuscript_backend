@@ -405,14 +405,18 @@ def admin_venue_submission_decision(request, submission_id):
     # Build a lightweight adapter so we can reuse the existing email service
     # functions which expect an object with .author_name, .author_email, .title.
     manuscript = item.manuscript
-    author_email = (manuscript.author_email or '').strip()
+    # Review 5, R5-9: the decision goes to the address that signed in, not the free-text contact field on
+    # the manuscript. Review 4 fixed this for the packet confirmation; the editor's decision mail, which
+    # carries the same author-chosen name and title, still used the typed address.
+    author_email = (manuscript.author_account.email if manuscript.author_account_id
+                    else (manuscript.author_email or '').strip())
     if author_email:
         try:
             class _VenueSubmissionAdapter:
                 """Bridges VenueSubmission → email_service interface."""
                 author_name = manuscript.author_name
-                author_email = manuscript.author_email
                 title = manuscript.title
+            _VenueSubmissionAdapter.author_email = author_email
 
             adapter = _VenueSubmissionAdapter()
             venue_name = item.venue.name if item.venue_id else 'the journal'

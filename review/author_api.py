@@ -56,13 +56,11 @@ from .services.email_service import _send as _send_email
 from .audit import record_audit_event
 from .monitoring import capture_exception
 from .storage_security import (
-    OOXML_EXTENSIONS,
     UploadSecurityError,
     sanitize_original_filename,
     secure_download_response,
     validate_manuscript_filename,
-    validate_manuscript_zip,
-    validate_ooxml_package,
+    validate_upload,
 )
 from .storage_quota import StorageQuotaExceeded, storage_quota_guard
 from . import manuscript_versions as versions
@@ -123,6 +121,13 @@ def _revoke_manuscript_tokens(author):
 
 
 LINK_LIKE = re.compile(r'(://|www\.|\b[a-z0-9-]+\.(com|net|org|io|co|info|biz|xyz|app|link|ru|cn)\b|[<>@])', re.I)
+# Review 5, R5-9: titles are quoted back in the mail Flexee sends, so they carry no web address either.
+# '://' alone let 'www.evil.example' through. The name test's [<>@] is left out: a title may hold an @.
+LINK_LIKE_TITLE = re.compile(r'(://|www\.|\b[a-z0-9-]+\.(com|net|org|io|co|info|biz|xyz|app|link|ru|cn)\b)', re.I)
+
+
+def _looks_like_link_title(text):
+    return bool(LINK_LIKE_TITLE.search(str(text or '')))
 
 
 def _looks_like_link(text):
@@ -769,7 +774,7 @@ def author_manuscripts(request):
         errors.append('title is required')
     if not author_name:
         errors.append('author is required')
-    elif _looks_like_link(author_name) or '://' in title:
+    elif _looks_like_link(author_name) or _looks_like_link_title(title):
         # Review 4, A2: the name and title are quoted back in the mail Flexee sends about this manuscript,
         # so they carry no web address — the same rule the public form and the claim form already apply.
         errors.append('author name and title cannot contain web addresses')
@@ -799,10 +804,7 @@ def author_manuscripts(request):
     safe_upload_name = sanitize_original_filename(upload.name, default='manuscript')
     upload.name = safe_upload_name
     try:
-        if safe_upload_name.lower().endswith('.zip'):
-            validate_manuscript_zip(content)
-        elif safe_upload_name.lower().endswith(OOXML_EXTENSIONS):
-            validate_ooxml_package(content, label=safe_upload_name.rsplit('.', 1)[-1].lower())
+        validate_upload(content, safe_upload_name)
     except UploadSecurityError as exc:
         return JsonResponse({'detail': str(exc), 'errors': [str(exc)]}, status=400)
 
@@ -903,7 +905,7 @@ def author_update_manuscript(request, manuscript_id):
         errors.append('title is required')
     if not author_name:
         errors.append('author is required')
-    elif _looks_like_link(author_name) or '://' in title:
+    elif _looks_like_link(author_name) or _looks_like_link_title(title):
         # Review 4, A2: the name and title are quoted back in the mail Flexee sends about this manuscript,
         # so they carry no web address — the same rule the public form and the claim form already apply.
         errors.append('author name and title cannot contain web addresses')
@@ -931,11 +933,10 @@ def author_update_manuscript(request, manuscript_id):
         content = upload.read()
         upload.seek(0)
         upload.name = sanitize_original_filename(upload.name, default='manuscript')
-        if upload.name.lower().endswith('.zip'):
-            try:
-                validate_manuscript_zip(content)
-            except UploadSecurityError as exc:
-                return JsonResponse({'detail': str(exc), 'errors': [str(exc)]}, status=400)
+        try:   # Review 5, R5-7: the same archive limits as the first upload
+            validate_upload(content, upload.name)
+        except UploadSecurityError as exc:
+            return JsonResponse({'detail': str(exc), 'errors': [str(exc)]}, status=400)
 
     old_file_name = manuscript.manuscript_file.name if upload is not None else None
     try:
@@ -2057,11 +2058,10 @@ def author_manuscript_versions(request, manuscript_id):
     content = upload.read()
     upload.seek(0)
     upload.name = sanitize_original_filename(upload.name, default='manuscript')
-    if upload.name.lower().endswith('.zip'):
-        try:
-            validate_manuscript_zip(content)
-        except UploadSecurityError as exc:
-            return JsonResponse({'detail': str(exc), 'errors': [str(exc)]}, status=400)
+    try:       # Review 5, R5-7: a revised version gets the same archive limits as the first upload
+        validate_upload(content, upload.name)
+    except UploadSecurityError as exc:
+        return JsonResponse({'detail': str(exc), 'errors': [str(exc)]}, status=400)
     digest = hashlib.sha256(content).hexdigest()
     if digest == manuscript.manuscript_sha256:
         return JsonResponse({'detail': 'This file is identical to the current version.',
@@ -2069,7 +2069,13 @@ def author_manuscript_versions(request, manuscript_id):
 
     fields = {'manuscript_type': manuscript_type or None}
     if 'title' in request.POST and request.POST['title'].strip():
-        fields['title'] = request.POST['title'].strip()[:500]
+        # Review 5, R5-9: a new version can rename the manuscript, and the new title goes into the mail
+        # Flexee sends about it. It gets the same check as the title given on the first upload.
+        new_title = request.POST['title'].strip()[:500]
+        if _looks_like_link_title(new_title):
+            return JsonResponse({'detail': 'author name and title cannot contain web addresses',
+                                 'errors': ['author name and title cannot contain web addresses']}, status=400)
+        fields['title'] = new_title
     if 'abstract' in request.POST:
         fields['abstract'] = request.POST['abstract'].strip()
     if 'keywords' in request.POST:

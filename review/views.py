@@ -116,11 +116,12 @@ def _generate_chapter_summary(text, filename='', word_count=0):
         + text[:12000]
     )
     try:
+        # Review 4, X3: use the provider this deployment is configured with. Forcing 'ollama' meant every
+        # chapter summary failed in production, where AI_PROVIDER is shared_qwen and no Ollama is running.
         _, output = ai_chat_json(
             prompt,
             max_tokens=220,
             timeout=120,
-            force_provider='ollama',
             operation='chapter_summary',
         )
         payload = json.loads(output)

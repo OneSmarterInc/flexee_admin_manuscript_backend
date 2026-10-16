@@ -463,6 +463,86 @@ def purge_old_auth_events(now):
     AuthorAuthEvent.objects.filter(occurred_at__lt=cutoff).delete()
 
 
+def _plan_still_holds_manuscript(manuscript_id, now):
+    """Is the author still working a submission plan for this manuscript?
+
+    Review 4, P1: a live plan keeps the author's copy, because they still need the file to send it on.
+    Review 5, R5-3: a draft plan that was generated and never started does not hold it for ever; after
+    RETENTION_DRAFT_PLAN_GRACE_DAYS it stops counting, or the manuscript would outlive every promise
+    made about it.
+    """
+    from .models import SubmissionPlan
+    live = SubmissionPlan.objects.filter(manuscript_id=manuscript_id, status__in=('active', 'paused'))
+    if live.exists():
+        return True
+    try:
+        grace = max(0, int(os.getenv('RETENTION_DRAFT_PLAN_GRACE_DAYS', '90')))
+    except ValueError:
+        grace = 90
+    return SubmissionPlan.objects.filter(manuscript_id=manuscript_id, status='draft',
+                                         updated_at__gte=now - timedelta(days=grace)).exists()
+
+
+def _purge_manuscript_content(manuscript, now):
+    """Delete the shared manuscript payload once every venue copy has expired. Returns True if it went.
+
+    The caller holds the manuscript row lock.
+    """
+    has_retained_copy = manuscript.venue_submissions.filter(
+        retention_purged_at__isnull=True
+    ).exists()
+    if has_retained_copy or manuscript.content_purged_at:
+        return False
+    # Review 4, P1: the author's own copy is not deleted while they are still working the plan.
+    # A venue's retention window governs that venue's copy; it says nothing about the manuscript
+    # the author is still sending elsewhere. Purging here left the author with a plan they could
+    # not act on and no file to send. Review 5, R5-3: when this defers the purge, the second pass
+    # at the end of the sweep picks the manuscript up again once the plan is over.
+    if _plan_still_holds_manuscript(manuscript.id, now):
+        return False
+    if (manuscript.current_version_id
+            and not VenueSubmission.objects.filter(version_id=manuscript.current_version_id).exists()):
+        return False  # the author's newer version has not been sent anywhere yet: it is theirs to keep
+
+    from .manuscript_versions import delete_file_after_commit, purge_version_file
+    for version in manuscript.versions.filter(content_purged_at__isnull=True):
+        if version.file and version.file.name != (manuscript.manuscript_file.name if manuscript.manuscript_file else ''):
+            purge_version_file(version, now)
+        else:  # shares the working copy's file, which is deleted just below
+            type(version).objects.filter(id=version.id).update(file='', bytes=0, abstract='',
+                                                               parsed_profile={}, content_purged_at=now)
+    delete_file_after_commit(manuscript.manuscript_file)   # audit item 21
+    manuscript.manuscript_file = ''
+    manuscript.manuscript_bytes = 0
+    manuscript.parsed_profile = {}
+    manuscript.abstract = ''
+    manuscript.notes = ''
+    manuscript.content_purged_at = now
+    manuscript.save(
+        update_fields=[
+            'manuscript_file',
+            'manuscript_bytes',
+            'parsed_profile',
+            'abstract',
+            'notes',
+            'content_purged_at',
+            'updated_at',
+        ]
+    )
+    manuscript.readiness_assessments.all().delete()
+    manuscript.venue_matches.all().delete()
+    ManuscriptEmbedding.objects.filter(manuscript=manuscript).delete()  # derived from the content
+    AuditEvent.objects.create(
+        actor_role='system',
+        action='manuscript.retention_purged',
+        resource_type='manuscript',
+        resource_id=str(manuscript.id),
+        manuscript_id=manuscript.id,
+        detail={'reason': 'all venue submission retention windows expired'},
+    )
+    return True
+
+
 @monitor_background_task('retention_sweep')
 def sweep_retention_task():
     """Purge expired venue-scoped content and remove the shared manuscript payload once every venue copy has expired."""
@@ -558,63 +638,29 @@ def sweep_retention_task():
                                                            retention_purged_at__isnull=True).exists()):
                 from .manuscript_versions import purge_version_file
                 purge_version_file(submission.version, now)
-            has_retained_copy = manuscript.venue_submissions.filter(
-                retention_purged_at__isnull=True
-            ).exists()
-            if has_retained_copy or manuscript.content_purged_at:
-                continue
-            # Review 4, P1: the author's own copy is not deleted while they are still working the plan.
-            # A venue's retention window governs that venue's copy; it says nothing about the manuscript
-            # the author is still sending elsewhere. Purging here left the author with a plan they could
-            # not act on and no file to send.
-            from .models import SubmissionPlan
-            if SubmissionPlan.objects.filter(manuscript_id=manuscript.id,
-                                             status__in=('draft', 'active', 'paused')).exists():
-                continue
-            if (manuscript.current_version_id
-                    and not VenueSubmission.objects.filter(version_id=manuscript.current_version_id).exists()):
-                continue  # the author's newer version has not been sent anywhere yet: it is theirs to keep
-
-            from .manuscript_versions import purge_version_file
-            for version in manuscript.versions.filter(content_purged_at__isnull=True):
-                if version.file and version.file.name != (manuscript.manuscript_file.name if manuscript.manuscript_file else ''):
-                    purge_version_file(version, now)
-                else:  # shares the working copy's file, which is deleted just below
-                    type(version).objects.filter(id=version.id).update(file='', bytes=0, abstract='',
-                                                                       parsed_profile={}, content_purged_at=now)
-            delete_file_after_commit(manuscript.manuscript_file)   # audit item 21
-            manuscript.manuscript_file = ''
-            manuscript.manuscript_bytes = 0
-            manuscript.parsed_profile = {}
-            manuscript.abstract = ''
-            manuscript.notes = ''
-            manuscript.content_purged_at = now
-            manuscript.save(
-                update_fields=[
-                    'manuscript_file',
-                    'manuscript_bytes',
-                    'parsed_profile',
-                    'abstract',
-                    'notes',
-                    'content_purged_at',
-                    'updated_at',
-                ]
-            )
-            manuscript.readiness_assessments.all().delete()
-            manuscript.venue_matches.all().delete()
-            ManuscriptEmbedding.objects.filter(manuscript=manuscript).delete()  # derived from the content
-            AuditEvent.objects.create(
-                actor_role='system',
-                action='manuscript.retention_purged',
-                resource_type='manuscript',
-                resource_id=str(manuscript.id),
-                manuscript_id=manuscript.id,
-                detail={'reason': 'all venue submission retention windows expired'},
-            )
-            purged_manuscripts += 1
+            if _purge_manuscript_content(manuscript, now):
+                purged_manuscripts += 1
 
     # Public rate-limit counters are only useful for the current window; drop old ones here.
     from .public_rate import purge_old_windows
+    # Review 5, R5-3: a manuscript whose purge was deferred — a plan was live when its last venue copy
+    # expired — is looked at again here. The first loop only ever reaches a manuscript through a submission
+    # it is purging on this run, so once every copy was gone the manuscript was never revisited and the
+    # author's file stayed for good.
+    deferred = (Manuscript.objects
+                .filter(content_purged_at__isnull=True,
+                        venue_submissions__retention_purged_at__isnull=False)
+                .exclude(venue_submissions__retention_purged_at__isnull=True)
+                .distinct()
+                .values_list('id', flat=True)[:batch_size])
+    for manuscript_id in list(deferred):
+        with transaction.atomic():
+            manuscript = Manuscript.objects.select_for_update().filter(id=manuscript_id).first()
+            if manuscript is None:
+                continue
+            if _purge_manuscript_content(manuscript, now):
+                purged_manuscripts += 1
+
     purge_old_windows()
     purge_old_auth_events(now)
     purge_old_public_submission_files(now)

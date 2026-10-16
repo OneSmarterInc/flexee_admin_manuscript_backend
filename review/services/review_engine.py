@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 from io import BytesIO
 from docx import Document
 from pypdf import PdfReader
@@ -575,6 +576,22 @@ def _repair_missing_outputs(parsed, decision, measured, judgments, kind):
 WHOLE_DOCUMENT_CRITERIA = {'teaches_claim', 'sim_fit', 'journal_fit'}
 
 
+REVIEW_CHUNK_TIMEOUT = 240
+
+
+def _review_budget_seconds():
+    """Wall clock for one chunked manuscript review (Review 5, R5-5).
+
+    Must stay below Q_CLUSTER['timeout'] (1800 s), or the worker kills the task and the ReviewJob is
+    left 'processing' with no error recorded.
+    """
+    try:
+        value = int(os.getenv('MANUSCRIPT_REVIEW_BUDGET_SECONDS', '1200'))
+    except ValueError:
+        value = 1200
+    return max(60, min(value, 1500))
+
+
 def _judge_chunked(text, declared_sim, rubric_items, kind, disclosure, measured, num_ctx, max_tokens):
     # Bug H10: the author's AI-use disclosure is about the whole manuscript, so every chunk is shown it.
     # Otherwise only the last chunk sees it, the others fail it, and the worst verdict wins.
@@ -598,13 +615,25 @@ def _judge_chunked(text, declared_sim, rubric_items, kind, disclosure, measured,
         
     all_judgments = []
     models_used = set()
+    # Review 5, R5-5: the chunked review gets one wall-clock budget, like semantic readiness. A book runs
+    # to a hundred chunks or more, and at the model's own timeout each that reaches far past the worker's
+    # 30-minute limit: the worker kills the task, so nothing records the failure and the job is left
+    # 'processing'. Stopping here keeps the chunks already judged and finishes the review with them.
+    deadline = time.monotonic() + _review_budget_seconds()
     for chunk in chunks:
+        remaining = deadline - time.monotonic()
+        if remaining <= 5:
+            break
         chunk_prompt = _build_prompt(chunk + disclosure_block, declared_sim, rubric_items, kind, measured)
-        model, output = ai_chat_json(
-            chunk_prompt,
-            max_tokens=max_tokens,
-            operation='manuscript_review_chunk',
-        )
+        try:
+            model, output = ai_chat_json(
+                chunk_prompt,
+                max_tokens=max_tokens,
+                timeout=min(REVIEW_CHUNK_TIMEOUT, remaining),
+                operation='manuscript_review_chunk',
+            )
+        except Exception:                                # noqa: BLE001 - a chunk that fails is skipped
+            continue
         models_used.add(model)
         # Review 4, Y6: one chunk whose answer is not JSON at all (an apology, or output cut off at the
         # token cap — normal for a shared worker with no JSON mode) used to raise out of the loop and throw

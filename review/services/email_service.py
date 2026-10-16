@@ -158,12 +158,15 @@ def send_review_emails(submission, result):
     return {'status': 'sent', 'detail': detail, 'notified_at': timezone.now()}
 
 
-def send_acceptance_email(submission, message):
+def send_acceptance_email(submission, message, venue_name=None):
     target = submission.author_email.strip()
-    
+
+    # Review 4, P6: when a journal's own editors made the decision, the mail says which journal. An author
+    # with packets out at several venues could not tell who had accepted them.
+    decided_by = f'the editors of {venue_name}' if venue_name else 'the Flexee editorial team'
     body = (
         f"Dear {submission.author_name},\n\n"
-        f"We are pleased to inform you that your submission \"{submission.title}\" has been approved by the Flexee editorial team.\n\n"
+        f"We are pleased to inform you that your submission \"{submission.title}\" has been approved by {decided_by}.\n\n"
         "Your work has successfully passed our initial review process, and we will proceed with the next steps. Our team will contact you with further details.\n\n"
     )
     if message:
@@ -178,12 +181,14 @@ def send_acceptance_email(submission, message):
     if smtp_settings and smtp_settings.admin_notification_emails:
         bcc_list = [email.strip() for email in smtp_settings.admin_notification_emails.split(',') if email.strip()]
         
+    subject = f'Your submission has been accepted by {venue_name}' if venue_name \
+        else 'Your Submission Has Been Approved – Flexee'
     if target:
-        detail = _send(target, 'Your Submission Has Been Approved – Flexee', body, bcc=bcc_list)
+        detail = _send(target, subject, body, bcc=bcc_list)
     elif bcc_list:
         for bcc_email in bcc_list:
             if bcc_email.strip():
-                _send(bcc_email.strip(), 'Your Submission Has Been Approved – Flexee', body)
+                _send(bcc_email.strip(), subject, body)
         detail = {'recipient': 'Admins Only (No Author Email)', 'sent': True}
     else:
         return {'status': 'error', 'detail': {'error': 'No author email provided and no admins configured'}}
@@ -191,12 +196,14 @@ def send_acceptance_email(submission, message):
     return {'status': 'sent' if detail.get('sent') else 'error', 'detail': detail, 'notified_at': timezone.now()}
 
 
-def send_rejection_email(submission, reason):
+def send_rejection_email(submission, reason, venue_name=None):
     target = submission.author_email.strip()
-    
+
+    # Review 4, P6: name the journal that decided, so the author knows which packet this is about.
+    addressed_to = venue_name or 'Flexee'
     body = (
         f"Dear {submission.author_name},\n\n"
-        f"Thank you for submitting \"{submission.title}\" to Flexee and for giving us the opportunity to review your work.\n\n"
+        f"Thank you for submitting \"{submission.title}\" to {addressed_to} and for giving us the opportunity to review your work.\n\n"
         "After careful consideration, we have decided not to proceed with your submission at this stage.\n\n"
         f"Editorial Feedback:\n{reason}\n\n"
         "We appreciate the time and effort invested in your submission and encourage you to continue developing your work.\n\n"

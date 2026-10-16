@@ -177,7 +177,12 @@ def withdrawn_venue_ids(manuscript):
     from .models import VenueSubmission
     planned = SubmissionPlanStep.objects.filter(plan__manuscript=manuscript, state='withdrawn')
     left = VenueSubmission.objects.filter(manuscript=manuscript, status__in=('withdrawn', 'transferred'))
-    return set(planned.values_list('venue_id', flat=True)) | set(left.values_list('venue_id', flat=True))
+    closed = set(planned.values_list('venue_id', flat=True)) | set(left.values_list('venue_id', flat=True))
+    # Review 4, P5: sending a revised version to the venue that asked for it withdraws the superseded
+    # packet, which made the venue look abandoned. A venue holding a live packet has not been left.
+    still_there = set(VenueSubmission.objects.filter(manuscript=manuscript, status__in=LIVE_SUBMISSION_STATUSES)
+                      .values_list('venue_id', flat=True))
+    return closed - still_there
 
 
 def _author_exclusions(previous_plan):
@@ -378,9 +383,18 @@ def _advance(plan, *, actor='author'):
     for queued in plan.steps.filter(state='queued', venue_id__in=closed).order_by('order'):
         _move(queued, 'skipped', 'skipped', actor='system',
               note=f'{queued.venue.name} already declined this manuscript, or it was withdrawn from there.')
+    # Review 4, P10: a venue Flexee has since excluded (a predatory publisher, say) or switched off is
+    # passed over too. The plan was made when it still looked fine; telling the author to submit there
+    # now, and then refusing to build the packet, is the worst of both.
+    for queued in plan.steps.filter(state='queued').exclude(
+            venue__excluded=False, venue__active=True).order_by('order'):
+        _move(queued, 'skipped', 'skipped', actor='system',
+              note=f'{queued.venue.name} is no longer available on Flexee.')
     nxt = plan.steps.filter(state='queued').order_by('order').first()
     if nxt is None:
-        plan.status = 'completed' if plan.steps.filter(state='accepted').exists() else plan.status
+        # Review 4, P11: with nothing queued the plan is over either way. Leaving it 'active' with no
+        # current step stranded the author: no venue to work and no way to start a fresh plan.
+        plan.status = 'completed'
         _set_position(plan, None)
         return None
     _move(nxt, 'current', 'became_current', actor=actor)
@@ -404,10 +418,23 @@ def _adopt_live_submission(plan, *, actor='venue'):
     """Bug H2: a packet the author sent before Start, while the plan was paused, or straight to a venue
     further down still belongs to the plan. That venue becomes the current step and is linked, so its
     editor's decision reaches the plan. Only on an active plan with nothing in progress."""
-    if plan.status != 'active' or plan.steps.filter(state='submitted').exists():
+    if plan.status != 'active':
         return None
     live = _live_submission(plan.manuscript_id)
     if live is None:
+        return None
+    # Review 4, P4: a step the author already marked sent by hand, for this same venue, is linked to the
+    # real packet when one arrives. Without this the step and the packet stayed strangers: recording the
+    # outcome closed the step and left the packet live, still holding the manuscript and blocking the
+    # next venue. An unlinked step for a *different* venue still means another submission is in progress.
+    sent_by_hand = plan.steps.select_for_update().filter(
+        venue_id=live.venue_id, state='submitted', venue_submission__isnull=True).first()
+    if sent_by_hand is not None:
+        sent_by_hand.submitted_version_id = live.version_id or sent_by_hand.submitted_version_id
+        sent_by_hand.venue_submission = live
+        sent_by_hand.save(update_fields=['submitted_version', 'venue_submission', 'updated_at'])
+        return sent_by_hand
+    if plan.steps.filter(state='submitted').exists():
         return None
     step = plan.steps.select_for_update().filter(venue_id=live.venue_id, state__in={'queued', 'current'}).first()
     if step is None:
@@ -628,9 +655,15 @@ def _newer_version(plan, step, version_number):
     version = ManuscriptVersion.objects.filter(manuscript=plan.manuscript, number=version_number).first()
     if version is None:
         raise PlanError('That version does not exist.', 'bad_version', 400)
-    baseline = step.submitted_version.number if step.submitted_version_id else plan.manuscript_version.number
+    # Review 4, P3: the baseline is the version this plan was built on, not the version the declining venue
+    # happened to see. After a revision cycle — venue asks for changes, author sends v2, venue still says no —
+    # those differ, and measuring against the venue refused every 'revised' answer while the plan, still made
+    # for v1, refused every step as stale. The author could neither revise nor move on. The declining venue is
+    # excluded from the regenerated plan either way, so it needs no protection here.
+    baseline = plan.manuscript_version.number
     if version.number <= baseline:
-        raise PlanError(f'Upload a revised version first: the venue saw version {baseline}.', 'needs_revision')
+        raise PlanError(f'Upload a revised version first: this plan was made for version {baseline}.',
+                        'needs_revision')
     return version
 
 
@@ -729,6 +762,14 @@ def _accept_outside_the_plan(submission):
         step = (plan.steps.select_for_update().filter(venue_id=submission.venue_id, state__in={'queued', 'current'})
                 .select_related('venue').first())
         if step is None:
+            # Review 4, P2: the venue that accepted was never in this plan — the author sent the packet
+            # straight from its venue page. There is no step to mark accepted, but the manuscript is placed,
+            # so the plan is over. Left active or paused it kept asking "did you revise?", and every answer
+            # was refused with already_accepted: a plan the author could neither work nor close.
+            name = submission.venue.name if submission.venue_id else 'another venue'
+            plan.status = 'completed'
+            _set_position(plan, None)
+            _log(plan, 'completed', actor='venue', note=f'Accepted by {name}, which was not in this plan.')
             return None
         plan.steps.filter(state='current').exclude(id=step.id).update(state='queued', updated_at=timezone.now())
         step.venue_submission = submission

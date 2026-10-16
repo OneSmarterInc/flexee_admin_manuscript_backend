@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import logging
 import uuid
 import os
 import re
@@ -68,6 +69,7 @@ from . import manuscript_versions as versions
 from .gap_classes import classify_violation, item as gap_item
 
 
+_logger = logging.getLogger(__name__)
 ALLOWED_MANUSCRIPT_TYPES = {value for value, _ in Manuscript.TYPE_CHOICES}
 ALLOWED_VENUE_TYPES = {value for value, _ in Venue.TYPE_CHOICES}
 ALLOWED_REQUIREMENT_TYPES = {'text', 'textarea', 'url', 'checkbox', 'file'}
@@ -372,7 +374,16 @@ def _structured_desk_rule_violations(manuscript, config, readiness, manuscript_t
         for rule in rules
     )
     if needs_text and manuscript_text is None:
-        manuscript_text = load_manuscript_text(manuscript)
+        # Review 4, P7: the file may be gone (retention purge) or unreadable (a corrupt or renamed .docx).
+        # A desk rule that cannot be measured is skipped below, because it has no reading to compare —
+        # it is not a reason to fail the author's whole request with a 500.
+        try:
+            manuscript_text = load_manuscript_text(manuscript)
+        except Exception:                                    # noqa: BLE001 - any unreadable file reads as absent
+            _logger.warning('Desk rules for manuscript %s could not read the file; text rules skipped.',
+                            manuscript.pk)
+            manuscript_text = None
+            needs_text = False
 
     reference_total = None
     if needs_text:
@@ -394,10 +405,14 @@ def _structured_desk_rule_violations(manuscript, config, readiness, manuscript_t
             expected = int(expected)
             triggered = _numeric_rule_triggered(actual, operator, expected)
         elif field == 'reference_count':
+            if not needs_text:
+                continue   # the file could not be read: nothing was counted, so nothing is judged
             actual = int(reference_total or 0)
             expected = int(expected)
             triggered = _numeric_rule_triggered(actual, operator, expected)
         elif field == 'required_sections':
+            if not needs_text:
+                continue   # likewise: an unread file must not look like a manuscript missing every section
             expected_sections = [str(item).strip() for item in expected or [] if str(item).strip()]
             missing = [
                 section
@@ -960,7 +975,12 @@ def author_update_manuscript(request, manuscript_id):
                 EvidenceFinding.objects.filter(venue_submission=submission).delete()
                 submission.status = 'draft'
                 submission.editorial_brief = {}
-                submission.packet = {}
+                # Review 4, P8: everything derived from the manuscript is rebuilt, but what the author typed
+                # for this venue is kept. Emptying the packet silently blanked their cover letter, and the
+                # version-upload path (manuscript_versions._reset_draft_packets) already keeps these fields.
+                submission.packet = {k: v for k, v in (submission.packet or {}).items()
+                                     if k in {'author_name', 'author_email', 'coauthors', 'disclosure',
+                                              'transferred_from_submission_id', 'requirement_responses'}}
                 submission.save(update_fields=['status', 'editorial_brief', 'packet', 'updated_at'])
                 reset_submissions += 1
     except StorageQuotaExceeded as exc:

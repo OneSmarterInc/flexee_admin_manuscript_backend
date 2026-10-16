@@ -12,6 +12,8 @@ from django.http import FileResponse
 
 MANUSCRIPT_EXTENSIONS = {'.docx', '.pdf', '.md', '.zip'}
 ZIP_MANUSCRIPT_EXTENSIONS = {'.docx', '.pdf', '.md'}
+# Office packages are ZIP containers, so they get the archive limits too (Review 4, A3).
+OOXML_EXTENSIONS = ('.docx', '.docm', '.dotx', '.pptx', '.xlsx', '.odt')
 
 
 class UploadSecurityError(ValueError):
@@ -69,6 +71,24 @@ def _safe_zip_member_name(name):
     return True
 
 
+def validate_ooxml_package(content: bytes, *, label='document'):
+    """Apply the archive limits to a .docx/.pptx/.xlsx, which is a ZIP container too.
+
+    Review 4, A3: python-docx inflates every part of the package into memory when the readiness check
+    reads it. Without this, a 60 KB .docx declaring a gigabyte-long word/document.xml passes the upload
+    and exhausts the web process or the worker. Unlike a manuscript bundle, an OOXML package is not
+    required to contain a .docx/.pdf/.md member — it *is* the document.
+    """
+    if not zipfile.is_zipfile(BytesIO(content)):
+        # Not an archive at all (a renamed .doc or .rtf, say). Reading it is the extractor's problem, as before;
+        # there is no archive here to inflate, so this check has nothing to say about it.
+        return None
+    try:
+        return _scan_zip_members(content, require_manuscript=False)
+    except UploadSecurityError as exc:
+        raise UploadSecurityError(str(exc).replace('ZIP', label)) from exc
+
+
 def validate_manuscript_zip(content: bytes):
     """
     Validate a manuscript ZIP before it is persisted or processed.
@@ -77,6 +97,10 @@ def validate_manuscript_zip(content: bytes):
     disk, but traversal/symlink/special-file names are rejected anyway so future
     storage changes cannot turn an inert archive into a filesystem escape.
     """
+    return _scan_zip_members(content, require_manuscript=True)
+
+
+def _scan_zip_members(content: bytes, *, require_manuscript):
     max_files = _env_int(
         ('MANUSCRIPT_ZIP_MAX_FILES', 'AUTHOR_ZIP_MAX_FILES', 'ZIP_MAX_FILES'),
         40,
@@ -137,7 +161,7 @@ def validate_manuscript_zip(content: bytes):
             if ext in ZIP_MANUSCRIPT_EXTENSIONS:
                 supported += 1
 
-        if supported == 0:
+        if require_manuscript and supported == 0:
             raise UploadSecurityError(
                 'No .docx, .pdf, or .md manuscript file was found inside the ZIP archive'
             )

@@ -4,11 +4,13 @@ import os
 import re
 import uuid
 from datetime import timedelta
+from django.db import transaction
 from django.db.models import Q, Count
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 from .json_object import json_object
+from .auth import normalize_email
 from .auth import (
     clear_session_cookie, issue_session, read_session, remote_hash, require_admin,
     set_session_cookie, verify_password, verify_totp, require_platform_superuser,
@@ -373,7 +375,9 @@ def admin_verify_password(request):
     recent_failures = AdminAuthEvent.objects.filter(
         remote_hash=rh, success=False, occurred_at__gte=timezone.now() - timedelta(minutes=window_minutes)
     ).count()
-    username = str(data.get('username', '')).strip()
+    # Review 4, A5: the claim flow stores the editor's address lowercased, so the typed address is matched the
+    # same way. It also keys the per-account lockout, which varying the capitalisation would otherwise sidestep.
+    username = normalize_email(data.get('username', ''))
     if recent_failures >= max_failures:
         AdminAuthEvent.objects.create(remote_hash=rh, success=False, detail={'reason': 'rate_limited'})
         record_admin_auth_event(request, 'admin.login_rate_limited', username=username, detail={'stage': 'password', 'reason': 'rate_limited'})
@@ -386,7 +390,7 @@ def admin_verify_password(request):
     password = str(data.get('password', ''))
 
     from .models import EditorUser
-    user = EditorUser.objects.filter(email=username).first()
+    user = EditorUser.objects.filter(email__iexact=username).first()
     # Audit item 32: an unknown account takes as long as a wrong password, so timing does not tell.
     password_ok = verify_password(password, user.password_hash if user else _dummy_hash())
     ok = bool(user and password_ok and os.getenv('ADMIN_SESSION_SECRET', ''))
@@ -478,7 +482,9 @@ def admin_login(request):
     recent_failures = AdminAuthEvent.objects.filter(
         remote_hash=rh, success=False, occurred_at__gte=timezone.now() - timedelta(minutes=window_minutes)
     ).count()
-    username = str(data.get('username', '')).strip()
+    # Review 4, A5: the claim flow stores the editor's address lowercased, so the typed address is matched the
+    # same way. It also keys the per-account lockout, which varying the capitalisation would otherwise sidestep.
+    username = normalize_email(data.get('username', ''))
     if recent_failures >= max_failures:
         AdminAuthEvent.objects.create(remote_hash=rh, success=False, detail={'reason': 'rate_limited'})
         record_admin_auth_event(request, 'admin.login_rate_limited', username=username, detail={'stage': 'authenticator', 'reason': 'rate_limited'})
@@ -497,7 +503,7 @@ def admin_login(request):
         credentials_ok = user is not None
     else:
         # Older screens still send the password again; accepted until every screen sends a ticket.
-        user = EditorUser.objects.filter(email=username).first()
+        user = EditorUser.objects.filter(email__iexact=username).first()
         credentials_ok = bool(verify_password(password, user.password_hash if user else _dummy_hash()) and user)
 
     if _account_locked(username):
@@ -730,21 +736,23 @@ def admin_submission_detail(request, submission_id):
 @require_POST
 @require_platform_superuser
 def admin_submission_accept(request, submission_id):
-    try:
-        submission = Submission.objects.get(id=submission_id)
-    except Submission.DoesNotExist:
-        return JsonResponse({'detail': 'Submission not found'}, status=404)
-
-    if submission.admin_decision:
-        return JsonResponse({'detail': 'Submission already has an admin decision'}, status=400)
-
     data = _json_body(request)
     message = str(data.get('message', '')).strip()
 
-    submission.admin_decision = 'ACCEPTED'
-    submission.acceptance_message = message
-    submission.save(update_fields=['admin_decision', 'acceptance_message', 'updated_at'])
-    ReviewEvent.objects.create(submission=submission, event_type='admin_accepted', detail={'message': message})
+    # Review 4, X1: the decision is claimed under a row lock. Reading admin_decision and then writing it
+    # let two clicks — or an Accept and a Reject at the same moment — both pass the check, so the author
+    # was sent an acceptance and a rejection for the same manuscript.
+    with transaction.atomic():
+        submission = Submission.objects.select_for_update().filter(id=submission_id).first()
+        if submission is None:
+            return JsonResponse({'detail': 'Submission not found'}, status=404)
+        if submission.admin_decision:
+            return JsonResponse({'detail': 'Submission already has an admin decision'}, status=400)
+
+        submission.admin_decision = 'ACCEPTED'
+        submission.acceptance_message = message
+        submission.save(update_fields=['admin_decision', 'acceptance_message', 'updated_at'])
+        ReviewEvent.objects.create(submission=submission, event_type='admin_accepted', detail={'message': message})
     record_audit_event(
         request,
         'legacy_submission.decision_recorded',
@@ -780,23 +788,23 @@ def admin_submission_accept(request, submission_id):
 @require_POST
 @require_platform_superuser
 def admin_submission_reject(request, submission_id):
-    try:
-        submission = Submission.objects.get(id=submission_id)
-    except Submission.DoesNotExist:
-        return JsonResponse({'detail': 'Submission not found'}, status=404)
-
-    if submission.admin_decision:
-        return JsonResponse({'detail': 'Submission already has an admin decision'}, status=400)
-
     data = _json_body(request)
     reason = str(data.get('reason', '')).strip()
     if not reason:
         return JsonResponse({'detail': 'Rejection reason is required'}, status=400)
 
-    submission.admin_decision = 'REJECTED'
-    submission.rejection_reason = reason
-    submission.save(update_fields=['admin_decision', 'rejection_reason', 'updated_at'])
-    ReviewEvent.objects.create(submission=submission, event_type='admin_rejected', detail={'reason': reason})
+    # Review 4, X1: claimed under a row lock, so this and Accept cannot both win. See admin_submission_accept.
+    with transaction.atomic():
+        submission = Submission.objects.select_for_update().filter(id=submission_id).first()
+        if submission is None:
+            return JsonResponse({'detail': 'Submission not found'}, status=404)
+        if submission.admin_decision:
+            return JsonResponse({'detail': 'Submission already has an admin decision'}, status=400)
+
+        submission.admin_decision = 'REJECTED'
+        submission.rejection_reason = reason
+        submission.save(update_fields=['admin_decision', 'rejection_reason', 'updated_at'])
+        ReviewEvent.objects.create(submission=submission, event_type='admin_rejected', detail={'reason': reason})
     record_audit_event(
         request,
         'legacy_submission.decision_recorded',

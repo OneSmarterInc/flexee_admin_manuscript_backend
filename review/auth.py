@@ -6,12 +6,18 @@ import os
 import secrets
 import struct
 import time
+import unicodedata
 from functools import wraps
 from django.http import JsonResponse
 
 COOKIE_NAME = 'flxee_admin_session'
 AUTHOR_COOKIE_NAME = 'flxee_author_session'
 UNSAFE_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}
+
+
+def normalize_email(value):
+    """One spelling for an address everywhere it is stored, looked up, or used as a rate-limit key."""
+    return unicodedata.normalize('NFKC', str(value or '')).strip().lower()[:254]
 
 
 def _secure_cookie_required():

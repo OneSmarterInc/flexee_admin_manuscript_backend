@@ -91,6 +91,28 @@ def assert_prompt_fits_context(prompt, *, num_ctx, num_predict):
         )
 
 
+def _abandon_shared_job(client, settings, payload, job_id):
+    """Take a job Flexee has stopped waiting for off the shared queue, and tell a worker holding it to stop.
+
+    Neither call may raise: the caller is already failing, and the original error is the useful one.
+    """
+    try:
+        client.lrem(settings['queue'], 0, payload)       # still queued: it never runs
+    except Exception:                                    # noqa: BLE001 - best effort, never mask the real error
+        pass
+    try:                                                 # already popped: the worker can check this and stop
+        client.setex(f"{settings['result_prefix']}cancelled:{job_id}", max(60, int(settings['job_ttl'])), "1")
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
+def _forget_shared_result(client, settings, job_id):
+    try:
+        client.delete(f"{settings['result_prefix']}{job_id}")
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
 def _wait_for_shared_result(client, job_id, timeout):
     settings = _shared_qwen_settings()
     result_key = f"{settings['result_prefix']}{job_id}"
@@ -165,12 +187,25 @@ def shared_qwen_chat_json(
         "max_tokens": max_tokens,
         "num_ctx": num_ctx,
         "temperature": float(os.getenv("OLLAMA_TEMPERATURE", "0.2")),
+        # Review 4, Y12: the deadline travels with the job, so a worker that reaches it late can drop it
+        # instead of spending GPU minutes on an answer nobody is waiting for any more.
+        "expires_at": time.time() + request_timeout,
+        "job_ttl": settings['job_ttl'],
     }
+    payload = json.dumps(job)
 
-    client.rpush(settings['queue'], json.dumps(job))
+    client.rpush(settings['queue'], payload)
 
-    result = _wait_for_shared_result(client, job_id, request_timeout)
-    client.delete(f"{settings['result_prefix']}{job_id}")
+    try:
+        result = _wait_for_shared_result(client, job_id, request_timeout)
+    except BaseException:
+        # Review 4, Y12: give up on the queue entry as well as on the wait. Until this, every timed-out
+        # readiness chunk stayed queued and the shared worker — which other projects share — still ran all
+        # of them to completion. One stuck readiness run left up to 16 abandoned prompts behind it.
+        _abandon_shared_job(client, settings, payload, job_id)
+        raise
+    finally:
+        _forget_shared_result(client, settings, job_id)
 
     model = str(result.get("model") or "qwen2.5-shared")
     content = _json_payload(_strip_thinking(result.get("content", "")))

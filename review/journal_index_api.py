@@ -20,6 +20,7 @@ from .models import IndexedVenue, Venue
 from .public_rate import hit, journal_index_limits, limited_response
 
 PAGE_SIZE = 20
+MAX_PAGE = 100_000
 TIER_ORDER = {Venue.TIER_CLAIMED: 0, Venue.TIER_VERIFIED_INDEX: 1, Venue.TIER_LISTED: 2}
 LISTED_TRUST = {'tier': 'listed', 'label': 'Listed only', 'last_verified_at': None, 'source_urls': []}
 
@@ -104,7 +105,9 @@ def journal_search(request):
     tier = request.GET.get('tier', '')
     open_access = request.GET.get('open_access') in {'1', 'true'}
     try:
-        page = max(1, int(request.GET.get('page', 1)))
+        # Review 4, A4: the page number is also bounded above. Without a ceiling, ?page=10**20 reaches the
+        # database as an offset and raises (PostgreSQL: bigint out of range) on a public, unauthenticated GET.
+        page = min(max(1, int(request.GET.get('page', 1))), MAX_PAGE)
     except (TypeError, ValueError):
         page = 1
 

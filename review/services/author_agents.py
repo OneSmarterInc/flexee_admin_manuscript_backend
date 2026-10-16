@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import re
+import time
 import zipfile
 from io import BytesIO
 
@@ -18,6 +19,17 @@ from .review_engine import extract_text, word_count
 logger = logging.getLogger(__name__)
 
 SEMANTIC_CHUNK_ATTEMPTS = 2
+SEMANTIC_CHUNK_TIMEOUT = 180
+
+
+def _semantic_budget_seconds():
+    """Wall clock for one semantic readiness run. Must stay below Q_CLUSTER['timeout'] (1800 s), or the
+    worker kills the task and nothing records the failure (Review 4, Y12)."""
+    try:
+        value = int(os.getenv('SEMANTIC_READINESS_BUDGET_SECONDS', '1200'))
+    except ValueError:
+        value = 1200
+    return max(60, min(value, 1500))
 
 
 AGENT_VERSION = 'author-agents-v1'
@@ -505,14 +517,25 @@ def run_semantic_readiness(manuscript):
             # A small local model sometimes returns one malformed answer. Retry
             # that chunk once, keep every chunk that succeeds, and fall back only
             # when no chunk could be read. Coverage reports what was analysed.
+            # Review 4, Y12: the whole run gets one wall-clock budget. Without it, 8 chunks retried once at
+            # 180 s each can reach ~48 minutes, past the worker's 30-minute limit; the worker is then killed
+            # mid-chunk, so the `except` below and the failure handling further down never run and the
+            # assessment stays 'pending' for ever. The budget stops the loop while the process is still ours.
+            deadline = time.monotonic() + _semantic_budget_seconds()
             for index, chunk in enumerate(selected):
                 last_error = None
                 for _attempt in range(SEMANTIC_CHUNK_ATTEMPTS):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 5:
+                        last_error = last_error or TimeoutError(
+                            'Semantic readiness ran out of time before this part of the manuscript was read.')
+                        break
                     try:
                         model, raw = _agent_json(
                             _chunk_prompt(manuscript, chunk),
                             max_tokens=650,
                             operation='semantic_readiness',
+                            timeout=min(SEMANTIC_CHUNK_TIMEOUT, remaining),
                         )
                         result = _sanitize_chunk_result(raw, chunk, text)
                     except Exception as exc:
@@ -529,6 +552,8 @@ def run_semantic_readiness(manuscript):
                         index + 1, len(selected), manuscript.pk,
                         last_error.__class__.__name__, last_error,
                     )
+                    if deadline - time.monotonic() <= 5:
+                        break   # out of budget: keep what was read and finish the row rather than be killed
             if not results:
                 ai_failed = True
 

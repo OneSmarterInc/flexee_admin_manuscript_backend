@@ -999,7 +999,12 @@ def extract_with_ai(pages, config, *, operation='venue_discovery_extraction', fe
         prompt = f'{feedback}\n\n{prompt}'
     last_error = None
     deadline = time.monotonic() + timeout if timeout else None
-    for _attempt in range(2):
+    # Review 4, Y10: the free retry is for local models. On a paid provider a second attempt is a second
+    # billed call, so one escalation cost two — VENUE_INDEX_ESCALATIONS_PER_RUN=10 allowed 20 paid calls,
+    # and the run's escalation count disagreed with the admin's cloud-call count. The escalation ladder
+    # (local, local retry, then cloud) already provides the retry.
+    attempts = 2 if config.ai_provider in {'ollama', 'shared_qwen'} else 1
+    for _attempt in range(attempts):
         wait = _env_int('VENUE_DISCOVERY_AI_TIMEOUT', 180, 30, 1800)
         if deadline is not None:
             left = int(deadline - time.monotonic())
@@ -2024,8 +2029,12 @@ def _recheck_existing(run, fetcher, config, extractor, skip):
             _updated, outcome = process_candidate(url, fetcher, config, extractor=extractor)
         except Exception as exc:
             # Keep the last good data; just note the failed check.
+            # Review 4, Y1: the attempt counts, so last_checked_at moves even when the site did not answer.
+            # Leaving it meant the oldest-first queue handed back the same dead journal every run, and the
+            # stale journals behind it were never re-checked at all.
             record.last_error = str(exc)[:300]
-            record.save(update_fields=['last_error', 'updated_at'])
+            record.last_checked_at = timezone.now()
+            record.save(update_fields=['last_error', 'last_checked_at', 'updated_at'])
             _record_error(run, url, 'recheck', exc)
             continue
         if outcome == 'changed' and before != 'changed':
@@ -2146,7 +2155,8 @@ def _run_claude_agent(run, config, *, create_message=None):
         except Exception as exc:
             for record in batch:
                 record.last_error = 'Re-check could not run.'
-                record.save(update_fields=['last_error', 'updated_at'])
+                record.last_checked_at = timezone.now()   # Review 4, Y1: the attempt counts
+                record.save(update_fields=['last_error', 'last_checked_at', 'updated_at'])
             _record_error(run, '', 'recheck', exc.__class__.__name__)
             continue
         _account(run, stats, pages)
@@ -2154,5 +2164,8 @@ def _run_claude_agent(run, config, *, create_message=None):
         for record in batch:
             if record.id not in updated:
                 # Keep the last good data; just note that this check did not confirm it.
+                # Review 4, Y1: last_checked_at moves anyway. Otherwise the oldest-first queue sent the
+                # same unanswered journal to the paid agent every run, and the rest were never re-checked.
                 record.last_error = 'The latest re-check did not return this venue.'
-                record.save(update_fields=['last_error', 'updated_at'])
+                record.last_checked_at = timezone.now()
+                record.save(update_fields=['last_error', 'last_checked_at', 'updated_at'])

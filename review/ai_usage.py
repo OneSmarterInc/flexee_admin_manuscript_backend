@@ -136,9 +136,10 @@ def _period_starts(now):
 
 
 def _committed_cost_since(start, reservation_cutoff) -> Decimal:
+    # Review 4, Y7: a failed call that the provider still billed carries its real cost, so it counts here.
     completed = AIUsageEvent.objects.filter(
         created_at__gte=start,
-        status='completed',
+        status__in=('completed', 'failed'),
     ).aggregate(total=Sum('actual_cost_usd'))['total'] or ZERO
     reserved = AIUsageEvent.objects.filter(
         created_at__gte=max(start, reservation_cutoff),
@@ -334,25 +335,47 @@ def fail_ai_call(
     operation='ai_chat',
     estimated_input_tokens=0,
 ):
+    """Record a call that did not give a usable answer.
+
+    Review 4, Y7: a provider can bill for a call that fails here — an Anthropic reply that is all thinking
+    and stops at max_tokens, or a refusal, both report real usage. The tokens it reports are attached to
+    the exception by the provider, and are recorded and charged, so the daily ceiling reflects what was
+    actually spent rather than zero.
+    """
+    billed_in = max(0, int(getattr(exc, 'billed_input_tokens', 0) or 0))
+    billed_out = max(0, int(getattr(exc, 'billed_output_tokens', 0) or 0))
+    if billed_in or billed_out:
+        cost, priced = estimate_cost(provider, model, billed_in, billed_out)
+        input_tokens, output_tokens, usage_estimated = billed_in, billed_out, False
+    else:
+        cost, priced = ZERO, pricing_for(provider, model)['priced']
+        input_tokens, output_tokens, usage_estimated = max(0, int(estimated_input_tokens or 0)), 0, True
+
     if event is None:
         return AIUsageEvent.objects.create(
             provider=str(provider or 'unknown')[:40],
             model=str(model or '')[:200],
             operation=str(operation or 'ai_chat')[:100],
             status='failed',
-            input_tokens=max(0, int(estimated_input_tokens or 0)),
-            output_tokens=0,
-            total_tokens=max(0, int(estimated_input_tokens or 0)),
-            estimated_max_cost_usd=ZERO,
-            actual_cost_usd=ZERO,
-            priced=pricing_for(provider, model)['priced'],
-            usage_estimated=True,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=input_tokens + output_tokens,
+            estimated_max_cost_usd=cost,
+            actual_cost_usd=cost,
+            priced=priced,
+            usage_estimated=usage_estimated,
             error_type=exc.__class__.__name__[:100],
         )
     event.status = 'failed'
     event.error_type = exc.__class__.__name__[:100]
-    event.actual_cost_usd = ZERO
-    event.save(update_fields=['status', 'error_type', 'actual_cost_usd', 'updated_at'])
+    event.actual_cost_usd = cost
+    fields = ['status', 'error_type', 'actual_cost_usd', 'updated_at']
+    if billed_in or billed_out:
+        event.input_tokens, event.output_tokens = input_tokens, output_tokens
+        event.total_tokens = input_tokens + output_tokens
+        event.usage_estimated = False
+        fields += ['input_tokens', 'output_tokens', 'total_tokens', 'usage_estimated']
+    event.save(update_fields=fields)
     return event
 
 

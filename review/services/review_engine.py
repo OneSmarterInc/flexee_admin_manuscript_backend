@@ -606,7 +606,14 @@ def _judge_chunked(text, declared_sim, rubric_items, kind, disclosure, measured,
             operation='manuscript_review_chunk',
         )
         models_used.add(model)
-        parsed = _parse_model_json(output)
+        # Review 4, Y6: one chunk whose answer is not JSON at all (an apology, or output cut off at the
+        # token cap — normal for a shared worker with no JSON mode) used to raise out of the loop and throw
+        # away every other chunk's answer, failing the whole review. A chunk that cannot be read is skipped,
+        # exactly as a chunk whose JSON is not an object already was; M4 below still fails if none is usable.
+        try:
+            parsed = _parse_model_json(output)
+        except Exception:                                    # noqa: BLE001 - unreadable answer, not a crash
+            parsed = None
         if isinstance(parsed, dict):
             by_id = {item.get('id'): item for item in (parsed.get('items') or []) if isinstance(item, dict)}
             allowed = {'pass', 'needs_work', 'fail'}

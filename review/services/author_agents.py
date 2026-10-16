@@ -10,7 +10,7 @@ from io import BytesIO
 from django.db import transaction
 from django.utils import timezone
 
-from ..models import EvidenceFinding, ReadinessAssessment, VenueSubmission
+from ..models import EvidenceFinding, ReadinessAssessment, VenueMatch, VenueSubmission
 from ..storage_security import validate_manuscript_zip
 from .field_agent import _extract_citations, _verify_citation_crossref
 from .ai_provider import ai_chat_json, ai_available
@@ -957,8 +957,15 @@ def run_semantic_matching(manuscript, *, venue_ids=None):
         match.gaps = _unique(list(match.gaps or []) + semantic_gap_text, 40)
         match.evidence = evidence
         match.venue_config = config
-        match.save(update_fields=['fit_summary', 'reasons', 'gaps', 'evidence', 'venue_config'])
-        updated.append(match)
+        # Review 4, Y11: the author can re-run matching while this job is working, and that deletes rows
+        # that left the shortlist. save(update_fields=...) on a deleted row raises, which used to fail the
+        # whole job and lose the explanations already written for every venue after it. A row that is gone
+        # is simply no longer wanted.
+        written = VenueMatch.objects.filter(id=match.id).update(
+            fit_summary=match.fit_summary, reasons=match.reasons, gaps=match.gaps,
+            evidence=match.evidence, venue_config=config)
+        if written:
+            updated.append(match)
 
     return {
         'matches': updated,
@@ -1368,7 +1375,28 @@ def _persist_assessment_evidence(submission, config, brief, citation_checks, mod
     return created
 
 
-def _anonymization_prompt(text):
+def _anonymization_budget_chars(wrapper_chars, *, max_tokens):
+    """Review 4, Y2: how much manuscript fits beside the instructions in the model's context.
+
+    The fixed 12,000-character slice did not fit the code's own default context (4096), so
+    assert_prompt_fits_context raised for every manuscript of about 12k characters or more. This call is
+    not guarded the way the brief call is, so the whole assessment failed and an author submitting to a
+    double-blind venue could never get a packet.
+    """
+    from .local_llm import DEFAULT_OLLAMA_NUM_CTX
+    try:
+        num_ctx = int(os.getenv('OLLAMA_NUM_CTX', str(DEFAULT_OLLAMA_NUM_CTX)))
+    except ValueError:
+        num_ctx = DEFAULT_OLLAMA_NUM_CTX
+    return max(1000, int(((num_ctx - max_tokens) * 4 - wrapper_chars) * 0.95))
+
+
+def _anonymization_prompt(text, *, max_tokens=1000):
+    budget = _anonymization_budget_chars(len(_anonymization_body('')), max_tokens=max_tokens)
+    return _anonymization_body(text[:budget])
+
+
+def _anonymization_body(text):
     return f"""You are an editorial assistant checking a manuscript for double-blind review compliance.
 Analyze the text for ANY identifying information. Look specifically for:
 1. Author names
@@ -1390,7 +1418,7 @@ Return a JSON object with:
 If you find ANY identifying information, status MUST be 'blocked'. Otherwise 'passed'.
 
 MANUSCRIPT TEXT:
-{text[:12000]}
+{text}
 """
 
 

@@ -116,6 +116,9 @@ QUOTE_FIELDS = {
     'aims_scope': ('scope', 'aim'),
     'article_types': ('type',),
     'required_submission_items': ('item', 'require', 'checklist', 'declaration', 'statement'),
+    # Review 4, Y9: a deadline is a dated claim an author plans around, and author_config_view shows it as
+    # a live one. It is published only when the model quoted the page it came from.
+    'deadlines': ('deadline', 'date', 'due', 'close', 'submission window'),
 }
 
 
@@ -151,6 +154,8 @@ def keep_quoted_rules(candidate):
         out['aims_scope'] = ''
     if 'required_submission_items' not in quoted:
         out['required_submission_items'] = []
+    if 'deadlines' not in quoted:
+        out['deadlines'] = {}
     if 'article_types' not in quoted:
         from .venue_discovery import TYPE_LABELS
         signal_types = []

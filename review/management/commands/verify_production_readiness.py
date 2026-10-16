@@ -129,7 +129,13 @@ class Command(BaseCommand):
         )
         truthy = {'1', 'true', 'yes', 'on'}
         cloud_fallback = os.getenv('ENABLE_CLOUD_FALLBACK', 'false').strip().lower() in truthy
-        uses_anthropic = provider == 'anthropic' or cloud_fallback
+        # Review 4, Y3: venue discovery in claude_agent mode (the default) bills Anthropic too, through
+        # reserve_ai_call. With cost enforcement on — required in production — an unpriced model raises
+        # before the first call, so every scheduled run failed every category while this check said PASS.
+        discovery_agent = (os.getenv('VENUE_DISCOVERY_ENABLED', 'false').strip().lower() in truthy
+                           and os.getenv('VENUE_DISCOVERY_MODE', 'claude_agent').strip().lower() == 'claude_agent')
+        index_escalates = os.getenv('VENUE_INDEX_ESCALATE', '').strip().lower() == 'anthropic'
+        uses_anthropic = provider == 'anthropic' or cloud_fallback or discovery_agent or index_escalates
         if provider == 'ollama':
             model = os.getenv('OLLAMA_MODEL', '').strip()
             require(bool(model), 'OLLAMA_MODEL must be configured when AI_PROVIDER=ollama.')
@@ -153,7 +159,10 @@ class Command(BaseCommand):
                 'The redis Python package must be installed when AI_PROVIDER=shared_qwen.',
             )
         if uses_anthropic:
-            reason = 'AI_PROVIDER=anthropic' if provider == 'anthropic' else 'ENABLE_CLOUD_FALLBACK=true'
+            reason = ('AI_PROVIDER=anthropic' if provider == 'anthropic'
+                      else 'ENABLE_CLOUD_FALLBACK=true' if cloud_fallback
+                      else 'VENUE_DISCOVERY_MODE=claude_agent' if discovery_agent
+                      else 'VENUE_INDEX_ESCALATE=anthropic')
             require(configured('ANTHROPIC_API_KEY'), f'ANTHROPIC_API_KEY must be configured when {reason}.')
             require(
                 importlib.util.find_spec('anthropic') is not None,

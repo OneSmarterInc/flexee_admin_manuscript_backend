@@ -894,7 +894,13 @@ def _catalogue_pass(run, config, http, now, budget, say=lambda m: None):
             # Smaller than the cutoff: no longer among the N largest, so out of the index (unless linked).
             small = [r.id for r in unseen.only('id', 'metrics')
                      if int((r.metrics or {}).get('works_count') or 0) <= cutoff]
-            run.removed_count += IndexedVenue.objects.filter(id__in=small, venue__isnull=True, excluded=False).delete()[0]
+            # Review 5, R5-10: the same two rules as the out-of-scope removal above. A journal an editor
+            # has claimed stays, because VenueClaim.indexed cascades and the claim would go with it; and
+            # the count is of journals, taken before the delete, not of every cascaded row.
+            leaving_small = (IndexedVenue.objects.filter(id__in=small, venue__isnull=True, excluded=False)
+                             .exclude(claims__status__in=('pending_email', 'pending_review', 'approved')))
+            run.removed_count += leaving_small.count()
+            leaving_small.delete()
             unseen = unseen.exclude(id__in=small)  # a linked small journal stays, and is not 'missing'
         # Only a complete pass can say a journal left the catalogue. Keep it, flag it.
         run.flagged_missing = unseen.filter(missing_since__isnull=True).update(missing_since=now)

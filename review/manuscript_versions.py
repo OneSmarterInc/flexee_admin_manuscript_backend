@@ -146,7 +146,12 @@ def _reset_draft_packets(manuscript, version):
         submission.editorial_brief = {}
         submission.packet = {**{k: v for k, v in (submission.packet or {}).items()
                                 if k in {'author_name', 'author_email', 'coauthors', 'disclosure',
-                                         'transferred_from_submission_id'}},
+                                         'transferred_from_submission_id',
+                                         # Review 4, P8: the answers the author typed for this venue (a cover
+                                         # letter, a statement) are their writing, not something derived from
+                                         # the file. A new version re-derives the packet; it does not re-type
+                                         # these, and dropping them emptied the form with no warning.
+                                         'requirement_responses'}},
                              'manuscript_filename': version.filename, 'title': version.title,
                              'manuscript_type': version.manuscript_type}
         submission.save(update_fields=['version', 'status', 'editorial_brief', 'packet', 'updated_at'])

@@ -444,6 +444,7 @@ class Command(BaseCommand):
         )
 
     def _ai_cost_report(self, started_at):
+        from ...ai_usage import LOCAL_PROVIDERS
         rows = AIUsageEvent.objects.filter(created_at__gte=started_at)
         completed = rows.filter(status='completed')
         totals = completed.aggregate(
@@ -480,8 +481,11 @@ class Command(BaseCommand):
             'cost_usd': format(totals['cost_usd'] or 0, '.6f'),
             'failed_calls': rows.filter(status='failed').count(),
             'blocked_calls': rows.filter(status='blocked').count(),
+            # Review 4, Y5: use the same definition of "local" as ai_usage, which review 2 (X14) corrected
+            # to include shared Qwen. This copy still had the old list, so every shared-Qwen E2E report
+            # repeated the miscount the published README calls a fixed error.
             'unpriced_cloud_calls': completed.exclude(
-                provider__in=['ollama', 'mock']
+                provider__in=LOCAL_PROVIDERS
             ).filter(priced=False).count(),
             'by_operation': operations,
             'note': (

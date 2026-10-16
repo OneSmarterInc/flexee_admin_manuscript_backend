@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import logging
 import uuid
 import os
 import re
@@ -55,17 +56,20 @@ from .services.email_service import _send as _send_email
 from .audit import record_audit_event
 from .monitoring import capture_exception
 from .storage_security import (
+    OOXML_EXTENSIONS,
     UploadSecurityError,
     sanitize_original_filename,
     secure_download_response,
     validate_manuscript_filename,
     validate_manuscript_zip,
+    validate_ooxml_package,
 )
 from .storage_quota import StorageQuotaExceeded, storage_quota_guard
 from . import manuscript_versions as versions
 from .gap_classes import classify_violation, item as gap_item
 
 
+_logger = logging.getLogger(__name__)
 ALLOWED_MANUSCRIPT_TYPES = {value for value, _ in Manuscript.TYPE_CHOICES}
 ALLOWED_VENUE_TYPES = {value for value, _ in Venue.TYPE_CHOICES}
 ALLOWED_REQUIREMENT_TYPES = {'text', 'textarea', 'url', 'checkbox', 'file'}
@@ -370,7 +374,16 @@ def _structured_desk_rule_violations(manuscript, config, readiness, manuscript_t
         for rule in rules
     )
     if needs_text and manuscript_text is None:
-        manuscript_text = load_manuscript_text(manuscript)
+        # Review 4, P7: the file may be gone (retention purge) or unreadable (a corrupt or renamed .docx).
+        # A desk rule that cannot be measured is skipped below, because it has no reading to compare —
+        # it is not a reason to fail the author's whole request with a 500.
+        try:
+            manuscript_text = load_manuscript_text(manuscript)
+        except Exception:                                    # noqa: BLE001 - any unreadable file reads as absent
+            _logger.warning('Desk rules for manuscript %s could not read the file; text rules skipped.',
+                            manuscript.pk)
+            manuscript_text = None
+            needs_text = False
 
     reference_total = None
     if needs_text:
@@ -392,10 +405,14 @@ def _structured_desk_rule_violations(manuscript, config, readiness, manuscript_t
             expected = int(expected)
             triggered = _numeric_rule_triggered(actual, operator, expected)
         elif field == 'reference_count':
+            if not needs_text:
+                continue   # the file could not be read: nothing was counted, so nothing is judged
             actual = int(reference_total or 0)
             expected = int(expected)
             triggered = _numeric_rule_triggered(actual, operator, expected)
         elif field == 'required_sections':
+            if not needs_text:
+                continue   # likewise: an unread file must not look like a manuscript missing every section
             expected_sections = [str(item).strip() for item in expected or [] if str(item).strip()]
             missing = [
                 section
@@ -752,6 +769,10 @@ def author_manuscripts(request):
         errors.append('title is required')
     if not author_name:
         errors.append('author is required')
+    elif _looks_like_link(author_name) or '://' in title:
+        # Review 4, A2: the name and title are quoted back in the mail Flexee sends about this manuscript,
+        # so they carry no web address — the same rule the public form and the claim form already apply.
+        errors.append('author name and title cannot contain web addresses')
     if manuscript_type not in ALLOWED_MANUSCRIPT_TYPES:
         errors.append('unsupported manuscript_type')
     if not disclosure:
@@ -777,11 +798,13 @@ def author_manuscripts(request):
     upload.seek(0)
     safe_upload_name = sanitize_original_filename(upload.name, default='manuscript')
     upload.name = safe_upload_name
-    if safe_upload_name.lower().endswith('.zip'):
-        try:
+    try:
+        if safe_upload_name.lower().endswith('.zip'):
             validate_manuscript_zip(content)
-        except UploadSecurityError as exc:
-            return JsonResponse({'detail': str(exc), 'errors': [str(exc)]}, status=400)
+        elif safe_upload_name.lower().endswith(OOXML_EXTENSIONS):
+            validate_ooxml_package(content, label=safe_upload_name.rsplit('.', 1)[-1].lower())
+    except UploadSecurityError as exc:
+        return JsonResponse({'detail': str(exc), 'errors': [str(exc)]}, status=400)
 
     digest = hashlib.sha256(content).hexdigest()
     access_token = secrets.token_urlsafe(32)
@@ -880,6 +903,10 @@ def author_update_manuscript(request, manuscript_id):
         errors.append('title is required')
     if not author_name:
         errors.append('author is required')
+    elif _looks_like_link(author_name) or '://' in title:
+        # Review 4, A2: the name and title are quoted back in the mail Flexee sends about this manuscript,
+        # so they carry no web address — the same rule the public form and the claim form already apply.
+        errors.append('author name and title cannot contain web addresses')
     if manuscript_type not in ALLOWED_MANUSCRIPT_TYPES:
         errors.append('unsupported manuscript_type')
     if not disclosure:
@@ -948,7 +975,12 @@ def author_update_manuscript(request, manuscript_id):
                 EvidenceFinding.objects.filter(venue_submission=submission).delete()
                 submission.status = 'draft'
                 submission.editorial_brief = {}
-                submission.packet = {}
+                # Review 4, P8: everything derived from the manuscript is rebuilt, but what the author typed
+                # for this venue is kept. Emptying the packet silently blanked their cover letter, and the
+                # version-upload path (manuscript_versions._reset_draft_packets) already keeps these fields.
+                submission.packet = {k: v for k, v in (submission.packet or {}).items()
+                                     if k in {'author_name', 'author_email', 'coauthors', 'disclosure',
+                                              'transferred_from_submission_id', 'requirement_responses'}}
                 submission.save(update_fields=['status', 'editorial_brief', 'packet', 'updated_at'])
                 reset_submissions += 1
     except StorageQuotaExceeded as exc:
@@ -1668,7 +1700,15 @@ def author_readiness(request, manuscript_id):
 
 
 @require_GET
+@require_author
 def public_venues(request):
+    """The venue list behind the transfer picker.
+
+    Review 4, X2: this used to need no session at all, so a single uncredentialed GET returned every
+    venue's configuration — quality_threshold, reviewer_criteria, desk-rejection rules, capacity and
+    demand — for every organization, and could be scraped without limit. The payload is the one authors
+    are meant to see; only the missing sign-in was wrong.
+    """
     items = Venue.objects.author_visible().select_related('organization')
     return JsonResponse({'venues': [_venue_payload(item) for item in items]})
 
@@ -2509,23 +2549,34 @@ def author_submit_packet(request, submission_id):
         )
         item.save(update_fields=['status', 'submitted_at', 'retention_expires_at', 'updated_at'])
         _replace_revision_requested(item)
-    from .submission_plan import sync_from_submission
+    from .submission_plan import reviews_on_flexee, sync_from_submission
     sync_from_submission(item)  # a planned venue moves to 'submitted' (never raises)
 
     # ── Confirmation email to author ────────────────────────────────────────────
     manuscript = item.manuscript
-    author_email = (manuscript.author_email or '').strip()
+    # Review 4, A2: the confirmation goes to the address that signed in, not to the free-text contact address
+    # on the manuscript. Otherwise an account holder can have Flexee mail any address they like, with the
+    # manuscript title and author name they chose in the body.
+    author_email = (manuscript.author_account.email if manuscript.author_account_id
+                    else (manuscript.author_email or '').strip())
     if author_email:
         try:
             venue_name = item.venue.name if item.venue_id else 'the selected journal'
             subject = f'Submission Received – {manuscript.title}'
+            if item.venue_id and reviews_on_flexee(item.venue):
+                next_step = (f'Your submission is now in the editorial queue. The editors of {venue_name} '
+                             f'will review your work and get back to you with a decision. You can check the '
+                             f'status of your submission at any time by logging into the Author Workspace.')
+            else:
+                # Review 4, P9: nobody at this venue decides on Flexee, so the mail does not promise that they do.
+                next_step = (f'{venue_name} handles its own submissions, so any reply comes from them directly, '
+                             f'by their own process. Record what they decide in the Author Workspace and your '
+                             f'submission plan moves on.')
             body = (
                 f'Dear {manuscript.author_name},\n\n'
                 f'We have received your manuscript submission "{manuscript.title}" '
                 f'to {venue_name}.\n\n'
-                f'Your submission is now in the editorial queue. The editorial team will '
-                f'review your work and get back to you with a decision. You can check the '
-                f'status of your submission at any time by logging into the Author Workspace.\n\n'
+                f'{next_step}\n\n'
                 f'Submission reference: {submission_id}\n\n'
                 f'Thank you for submitting to {venue_name}.\n\n'
                 f'Best regards,\nFlexee Editorial Team'

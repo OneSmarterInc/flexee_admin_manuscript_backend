@@ -418,9 +418,10 @@ def admin_venue_submission_decision(request, submission_id):
             venue_name = item.venue.name if item.venue_id else 'the journal'
 
             if decision == 'accepted':
-                send_acceptance_email(adapter, note)
+                send_acceptance_email(adapter, note, venue_name=venue_name)
             elif decision == 'rejected':
-                send_rejection_email(adapter, note or 'No additional reason was provided.')
+                send_rejection_email(adapter, note or 'No additional reason was provided.',
+                                     venue_name=venue_name)
             else:  # revision_requested
                 subject = f'Revision requested for your submission to {venue_name}'
                 body = (

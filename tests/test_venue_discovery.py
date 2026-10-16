@@ -485,13 +485,20 @@ def test_book_publisher_scenario_matches_book_manuscripts():
 
 @pytest.mark.django_db
 def test_only_added_venues_reach_authors():
+    from review.models import Author
     record = stage_journal()
-    public = Client().get('/api/author/venues/').json()['venues']
+    # Review 4, X2: the venue list needs a signed-in author; what reaches them is what is tested here.
+    reader = Author.objects.create(email='reader@example.com', name='Reader', email_verified=True)
+    author = Client()
+    author.cookies[AUTHOR_COOKIE_NAME] = issue_author_session(reader.id)[0]
+    assert Client().get('/api/author/venues/').status_code == 401
+
+    public = author.get('/api/author/venues/').json()['venues']
     assert public == []  # staged candidates are invisible to authors
 
     client, _ = admin_client()
     client.post(f'/api/admin/venue-discovery/{record.id}/add-to-venue-agent/')
-    names = [v['name'] for v in Client().get('/api/author/venues/').json()['venues']]
+    names = [v['name'] for v in author.get('/api/author/venues/').json()['venues']]
     assert names == ['Journal of Applied AI in Organizations']
 
 

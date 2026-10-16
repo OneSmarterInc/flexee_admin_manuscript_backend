@@ -508,6 +508,14 @@ def sweep_retention_task():
             ):
                 continue
 
+            # Review 4, P1b: a venue with the work open keeps its copy. The retention clock starts when the
+            # packet is sent, so an editor who takes longer than the venue's own retention window would
+            # otherwise have the manuscript deleted out from under the review in progress, and the author's
+            # plan step would sit at 'submitted' against a packet nobody can open. A packet merely sent and
+            # not yet picked up still expires on time, which is the privacy promise made to the author.
+            if submission.status in ('under_review', 'revision_requested'):
+                continue
+
             from .manuscript_versions import delete_file_after_commit
             for row in submission.requirement_files.all():
                 delete_file_after_commit(row.file)   # audit item 21: after commit, not before
@@ -554,6 +562,14 @@ def sweep_retention_task():
                 retention_purged_at__isnull=True
             ).exists()
             if has_retained_copy or manuscript.content_purged_at:
+                continue
+            # Review 4, P1: the author's own copy is not deleted while they are still working the plan.
+            # A venue's retention window governs that venue's copy; it says nothing about the manuscript
+            # the author is still sending elsewhere. Purging here left the author with a plan they could
+            # not act on and no file to send.
+            from .models import SubmissionPlan
+            if SubmissionPlan.objects.filter(manuscript_id=manuscript.id,
+                                             status__in=('draft', 'active', 'paused')).exists():
                 continue
             if (manuscript.current_version_id
                     and not VenueSubmission.objects.filter(version_id=manuscript.current_version_id).exists()):

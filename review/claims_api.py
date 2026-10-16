@@ -50,8 +50,7 @@ def _one_line(value, limit):
     return CONTROL.sub(' ', unicodedata.normalize('NFKC', str(value or ''))).strip()[:limit]
 
 
-def normalize_email(value):
-    return unicodedata.normalize('NFKC', str(value or '')).strip().lower()[:254]
+from .auth import normalize_email  # noqa: E402  (one definition, shared with the admin sign-in)
 
 
 def _env_int(name, default):
@@ -355,7 +354,12 @@ def admin_claim_approve(request, claim_id):
             return JsonResponse({'detail': 'This journal is excluded from the index.'}, status=409)
         same_journal = Q(venue=venue) | (Q(indexed_id=claim.indexed_id) if claim.indexed_id else Q(pk__in=[]))
         earlier = VenueClaim.objects.filter(same_journal, status='approved').exclude(id=claim.id)
-        if venue.trust_tier == Venue.TIER_CLAIMED or earlier.exists():
+        # Review 4, A1: a venue someone already works on is not handed over either. Its organization having
+        # members means real editors hold it; _own_organization would otherwise move the venue to a fresh
+        # organization and those editors would lose the journal without being told.
+        held_by_editors = bool(venue.organization_id) and Membership.objects.filter(
+            organization_id=venue.organization_id).exists()
+        if venue.trust_tier == Venue.TIER_CLAIMED or earlier.exists() or held_by_editors:
             return JsonResponse({'detail': 'This journal is already managed by an editor. Reject this claim, or ask '
                                            'the current editor to add this person.'}, status=409)
         org = _own_organization(venue)

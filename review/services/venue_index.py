@@ -852,9 +852,15 @@ def _catalogue_pass(run, config, http, now, budget, say=lambda m: None):
                 run.out_of_scope += 1
                 # A journal already in the index that no longer qualifies (e.g. the scope was narrowed)
                 # is taken out, unless an admin linked it to a live venue.
-                run.removed_count += IndexedVenue.objects.filter(
+                # Review 4, Y8: a journal an editor has claimed stays. VenueClaim.indexed cascades, so the
+                # refresh used to delete a confirmed claim with the record: nobody was told, it vanished
+                # from the admin's list, and the editor waited for an answer that could never come.
+                leaving = IndexedVenue.objects.filter(
                     openalex_id=_short_id(source.get('id')), venue__isnull=True, excluded=False,
-                    in_worklist=False).delete()[0]
+                    in_worklist=False).exclude(claims__status__in=('pending_email', 'pending_review', 'approved'))
+                # Review 4, Y4: count the journals that left, not every cascaded row with them.
+                run.removed_count += leaving.count()
+                leaving.delete()
                 continue
             openalex_id = _short_id(source.get('id'))
             fields = spine_fields(source, details)

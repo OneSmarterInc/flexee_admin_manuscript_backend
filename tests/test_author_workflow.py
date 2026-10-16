@@ -235,6 +235,11 @@ class AuthorWorkflowApiTests(TestCase):
         self.assertEqual(allowed.json()['manuscript']['id'], manuscript['id'])
 
     def test_public_venue_list_exposes_active_config_only(self):
+        # Review 4, X2: the list needs a signed-in author now; what it then shows is unchanged.
+        from review.models import Author
+        from review.auth import issue_author_session
+        reader = Author.objects.create(email='venue.reader@example.com', name='Reader', email_verified=True)
+        self.client.cookies['flxee_author_session'] = issue_author_session(reader.id)[0]
         venue_a, _ = self._create_venues()
         VenueAgentConfig.objects.filter(venue=venue_a, version=1).update(active=False)
         VenueAgentConfig.objects.create(

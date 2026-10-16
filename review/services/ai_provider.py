@@ -100,10 +100,17 @@ def _anthropic_chat_json(
 
     raw = _strip_fences(raw.strip())
     stop_reason = getattr(message, 'stop_reason', None)
-    if stop_reason == 'refusal':
-        raise RuntimeError('Anthropic declined this request (stop_reason: refusal).')
-    if not raw:
-        raise RuntimeError(f'Anthropic returned an empty response (stop_reason: {stop_reason}).')
+    if stop_reason == 'refusal' or not raw:
+        # Review 4, Y7: Anthropic billed for this call even though there is no answer to use — a reply that
+        # is all thinking and stopped at max_tokens, or a refusal. The usage it reported travels with the
+        # exception so the failure is recorded at its real cost instead of zero.
+        detail = ('Anthropic declined this request (stop_reason: refusal).' if stop_reason == 'refusal'
+                  else f'Anthropic returned an empty response (stop_reason: {stop_reason}).')
+        error = RuntimeError(detail)
+        billed = getattr(message, 'usage', None)
+        error.billed_input_tokens = int(getattr(billed, 'input_tokens', 0) or 0)
+        error.billed_output_tokens = int(getattr(billed, 'output_tokens', 0) or 0)
+        raise error
 
     if return_usage:
         usage = getattr(message, 'usage', None)

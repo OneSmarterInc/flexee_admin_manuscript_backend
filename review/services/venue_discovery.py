@@ -1003,7 +1003,11 @@ def extract_with_ai(pages, config, *, operation='venue_discovery_extraction', fe
     # billed call, so one escalation cost two — VENUE_INDEX_ESCALATIONS_PER_RUN=10 allowed 20 paid calls,
     # and the run's escalation count disagreed with the admin's cloud-call count. The escalation ladder
     # (local, local retry, then cloud) already provides the retry.
-    attempts = 2 if config.ai_provider in {'ollama', 'shared_qwen'} else 1
+    # Review 5, R5-13: decided from the provider that will actually serve the call. config.ai_provider is
+    # empty in the default production setup, which read as "paid" and quietly dropped the free local retry
+    # everywhere — the opposite of what Y10 was for.
+    provider = (config.ai_provider or os.getenv('AI_PROVIDER', '')).strip().lower()
+    attempts = 2 if provider in {'ollama', 'shared_qwen', ''} else 1
     for _attempt in range(attempts):
         wait = _env_int('VENUE_DISCOVERY_AI_TIMEOUT', 180, 30, 1800)
         if deadline is not None:

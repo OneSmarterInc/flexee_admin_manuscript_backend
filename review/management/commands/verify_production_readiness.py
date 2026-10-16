@@ -66,6 +66,12 @@ class Command(BaseCommand):
         require(settings.CSRF_COOKIE_SECURE is True, 'Django CSRF cookies must be Secure.')
         require(os.getenv('COOKIE_SECURE', '').strip().lower() in {'1', 'true', 'yes', 'on'}, 'COOKIE_SECURE must be true for the custom author session cookie.')
         require(settings.SECURE_SSL_REDIRECT is True, 'SECURE_SSL_REDIRECT must be enabled.')
+        # Review 5: with SECURE_SSL_REDIRECT on and no proxy header, Django reads every nginx-proxied
+        # request as plain HTTP and redirects it. The redirect carries no CORS headers, so the frontend
+        # sees an opaque failure — and nothing here used to catch it.
+        require(bool(getattr(settings, 'SECURE_PROXY_SSL_HEADER', None)),
+                'TRUST_X_FORWARDED_PROTO must be true behind a TLS-terminating proxy, or '
+                'SECURE_SSL_REDIRECT will redirect every proxied request.')
         require(settings.DATABASES['default']['ENGINE'] == 'django.db.backends.postgresql', 'Production must use PostgreSQL.')
 
         origins = [x.strip() for x in os.getenv('FRONTEND_ORIGINS', '').split(',') if x.strip()]
@@ -180,8 +186,13 @@ class Command(BaseCommand):
             'At least one positive AI daily or monthly cost ceiling must be configured.',
         )
         if uses_anthropic:
-            model = anthropic_model()
-            require(pricing_for('anthropic', model)['priced'], 'Anthropic input and output pricing must be configured for cost enforcement.')
+            # Review 5: discovery can run its own model, and that is the one it will be billed for.
+            models = {anthropic_model()}
+            if discovery_agent and os.getenv('VENUE_DISCOVERY_MODEL', '').strip():
+                models.add(os.getenv('VENUE_DISCOVERY_MODEL', '').strip())
+            for model in sorted(m for m in models if m):
+                require(pricing_for('anthropic', model)['priced'],
+                        f'Anthropic input and output pricing must be configured for {model}.')
             if 'haiku' in model.lower():
                 warn(
                     f'ANTHROPIC_MODEL is {model}. Review findings, match reasons and the editorial brief '

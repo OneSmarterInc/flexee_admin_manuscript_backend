@@ -264,7 +264,11 @@ def purge_old_backups(backup_root: Path, *, retention_days: int, keep: Path | No
     backup_root = backup_root.resolve()
     keep = keep.resolve() if keep else None
     for path in backup_root.iterdir() if backup_root.exists() else []:
-        if not path.is_dir() or not path.name.startswith(BACKUP_PREFIX):
+        # Review 5: an interrupted backup leaves '.flexee-backup-....partial', which startswith(PREFIX)
+        # never matched, so every failed run stayed on disk for good — a full database dump and a full
+        # media tarball each time. They are pruned on the same retention clock as a finished backup.
+        partial = path.name.startswith(f'.{BACKUP_PREFIX}') and path.name.endswith('.partial')
+        if not path.is_dir() or not (path.name.startswith(BACKUP_PREFIX) or partial):
             continue
         if keep and path.resolve() == keep:
             continue

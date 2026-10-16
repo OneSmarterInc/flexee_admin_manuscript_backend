@@ -898,6 +898,9 @@ def plan_payload(plan):
         'current_step_id': str(current.id) if current and plan.status == 'active' else None,
         'waiting_for_author': waiting is not None,
         'waiting_step_id': str(waiting.id) if waiting else None,
+        # Review 5: a venue outside this plan may have accepted the manuscript, in which case no new plan
+        # can be made. The page used to offer "Generate a new plan" and the request was then refused.
+        'accepted_by': _accepted(plan.manuscript_id),
         'steps': [step_payload(s) for s in steps],
         'not_included': [dict(n, reason=plain_words(n.get('reason'), 'out')) if isinstance(n, dict) else n
                          for n in plan.not_included or []],

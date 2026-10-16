@@ -68,6 +68,8 @@ from .gap_classes import classify_violation, item as gap_item
 
 
 _logger = logging.getLogger(__name__)
+# Review 5: the transfer picker's venue list is paged rather than returning the catalogue.
+PUBLIC_VENUES_PAGE_SIZE = 200
 ALLOWED_MANUSCRIPT_TYPES = {value for value, _ in Manuscript.TYPE_CHOICES}
 ALLOWED_VENUE_TYPES = {value for value, _ in Venue.TYPE_CHOICES}
 ALLOWED_REQUIREMENT_TYPES = {'text', 'textarea', 'url', 'checkbox', 'file'}
@@ -979,9 +981,11 @@ def author_update_manuscript(request, manuscript_id):
                 # Review 4, P8: everything derived from the manuscript is rebuilt, but what the author typed
                 # for this venue is kept. Emptying the packet silently blanked their cover letter, and the
                 # version-upload path (manuscript_versions._reset_draft_packets) already keeps these fields.
+                # Review 5: the author has just edited the manuscript's own disclosure, coauthors and
+                # contact details, so the copies held in the packet are stale. They are dropped and
+                # rebuilt from the manuscript, while what the author typed for this venue is kept.
                 submission.packet = {k: v for k, v in (submission.packet or {}).items()
-                                     if k in {'author_name', 'author_email', 'coauthors', 'disclosure',
-                                              'transferred_from_submission_id', 'requirement_responses'}}
+                                     if k in {'transferred_from_submission_id', 'requirement_responses'}}
                 submission.save(update_fields=['status', 'editorial_brief', 'packet', 'updated_at'])
                 reset_submissions += 1
     except StorageQuotaExceeded as exc:
@@ -1710,8 +1714,21 @@ def public_venues(request):
     demand — for every organization, and could be scraped without limit. The payload is the one authors
     are meant to see; only the missing sign-in was wrong.
     """
-    items = Venue.objects.author_visible().select_related('organization')
-    return JsonResponse({'venues': [_venue_payload(item) for item in items]})
+    # Review 5: bounded, so the whole catalogue is not built in memory on every call and cannot be
+    # scraped in one request. The transfer picker filters to this manuscript's own matches anyway.
+    try:
+        limit = min(max(1, int(request.GET.get('limit', PUBLIC_VENUES_PAGE_SIZE))), 500)
+    except (TypeError, ValueError):
+        limit = PUBLIC_VENUES_PAGE_SIZE
+    try:
+        offset = max(0, min(int(request.GET.get('offset', 0)), 100_000))
+    except (TypeError, ValueError):
+        offset = 0
+    queryset = Venue.objects.author_visible().select_related('organization').order_by('name', 'id')
+    total = queryset.count()
+    items = queryset[offset:offset + limit]
+    return JsonResponse({'venues': [_venue_payload(item) for item in items],
+                         'pagination': {'offset': offset, 'limit': limit, 'total': total}})
 
 
 def _normalise_label(value):

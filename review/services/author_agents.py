@@ -500,6 +500,10 @@ def run_semantic_readiness(manuscript):
         engine_version=f'{AGENT_VERSION}:semantic-readiness',
     )
 
+    # Review 5, R5-20: the budget covers the whole run. It used to start at the chunk loop, so reading a
+    # large PDF beforehand and the Crossref checks afterwards were both outside it, and a run could still
+    # overshoot the worker's limit by several minutes with nothing recorded.
+    run_deadline = time.monotonic() + _semantic_budget_seconds()
     try:
         text = load_manuscript_text(manuscript)
         all_chunks = _chunk_numbered_lines(text)
@@ -521,7 +525,7 @@ def run_semantic_readiness(manuscript):
             # 180 s each can reach ~48 minutes, past the worker's 30-minute limit; the worker is then killed
             # mid-chunk, so the `except` below and the failure handling further down never run and the
             # assessment stays 'pending' for ever. The budget stops the loop while the process is still ours.
-            deadline = time.monotonic() + _semantic_budget_seconds()
+            deadline = run_deadline
             for index, chunk in enumerate(selected):
                 last_error = None
                 for _attempt in range(SEMANTIC_CHUNK_ATTEMPTS):
@@ -593,7 +597,7 @@ def run_semantic_readiness(manuscript):
         # It remains advisory: deterministic readiness continues to control the
         # ready_for_matching gate, and a Crossref outage cannot fail readiness.
         try:
-            citations = _citation_checks(text, manuscript.manuscript_sha256)
+            citations = _citation_checks(text, manuscript.manuscript_sha256, deadline=run_deadline)
         except Exception:
             citations = {
                 'total_references': 0,
@@ -638,6 +642,10 @@ def run_semantic_readiness(manuscript):
             'coverage_percent': profile['coverage'].get('coverage_percent', 0),
             'mechanical_assessment_id': str(mechanical.id),
             'chunks_failed': len(failed_chunks),
+            # Review 5, R5-20: an exhausted run was saved as a clean 'completed' and its numbers did not
+            # add up, because chunks the budget never reached counted as neither analysed nor failed.
+            'chunks_not_attempted': max(0, len(selected) - len(results) - len(failed_chunks)),
+            'budget_exhausted': time.monotonic() >= run_deadline,
             'model': model,
             'note': (
                 'Deterministic checks remain the blocking readiness gate. Semantic findings are advisory '
@@ -975,10 +983,14 @@ def run_semantic_matching(manuscript, *, venue_ids=None):
     }
 
 
-def _citation_checks(text, manuscript_sha):
+def _citation_checks(text, manuscript_sha, *, deadline=None):
     total, citations = _extract_citations(text)
     if not citations:
         return {'total_references': total, 'checked': 0, 'results': []}
+    # Review 5, R5-20: each Crossref lookup is a network call, and they ran after the run's deadline had
+    # already passed. With no time left none is started, and the loop stops when the budget runs out.
+    if deadline is not None and time.monotonic() >= deadline:
+        return {'total_references': total, 'checked': 0, 'results': [], 'skipped': 'out of time'}
 
     count = min(
         _env_int('AUTHOR_CROSSREF_CHECKS', DEFAULT_CROSSREF_CHECKS, minimum=1, maximum=12),
@@ -988,6 +1000,8 @@ def _citation_checks(text, manuscript_sha):
     sampled = rng.sample(citations, count) if len(citations) > count else list(citations)
     results = []
     for citation in sampled:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         result = _verify_citation_crossref(citation)
         results.append({
             'citation': _clean_text(citation, 700),

@@ -84,7 +84,7 @@ def validate_ooxml_package(content: bytes, *, label='document'):
         # there is no archive here to inflate, so this check has nothing to say about it.
         return None
     try:
-        return _scan_zip_members(content, require_manuscript=False)
+        return _scan_zip_members(content, require_manuscript=False, office=True)
     except UploadSecurityError as exc:
         raise UploadSecurityError(str(exc).replace('ZIP', label)) from exc
 
@@ -100,19 +100,26 @@ def validate_manuscript_zip(content: bytes):
     return _scan_zip_members(content, require_manuscript=True)
 
 
-def _scan_zip_members(content: bytes, *, require_manuscript):
-    max_files = _env_int(
-        ('MANUSCRIPT_ZIP_MAX_FILES', 'AUTHOR_ZIP_MAX_FILES', 'ZIP_MAX_FILES'),
-        40,
-    )
-    max_uncompressed = _env_int(
-        (
-            'MANUSCRIPT_ZIP_MAX_UNCOMPRESSED_BYTES',
-            'AUTHOR_ZIP_MAX_UNCOMPRESSED_BYTES',
-            'ZIP_MAX_EXTRACTED_BYTES',
-        ),
-        50 * 1024 * 1024,
-    )
+def _scan_zip_members(content: bytes, *, require_manuscript, office=False):
+    if office:
+        # Review 5, R5-2: an Office package is one document, not a bundle of them. Word writes a part per
+        # image, per relationship, per theme and per style table, so a manuscript with twenty figures runs
+        # to dozens of entries and the 40-entry bundle limit refused ordinary files.
+        max_files = _env_int(('OOXML_MAX_FILES',), 1000)
+        max_uncompressed = _env_int(('OOXML_MAX_UNCOMPRESSED_BYTES',), 150 * 1024 * 1024)
+    else:
+        max_files = _env_int(
+            ('MANUSCRIPT_ZIP_MAX_FILES', 'AUTHOR_ZIP_MAX_FILES', 'ZIP_MAX_FILES'),
+            40,
+        )
+        max_uncompressed = _env_int(
+            (
+                'MANUSCRIPT_ZIP_MAX_UNCOMPRESSED_BYTES',
+                'AUTHOR_ZIP_MAX_UNCOMPRESSED_BYTES',
+                'ZIP_MAX_EXTRACTED_BYTES',
+            ),
+            50 * 1024 * 1024,
+        )
     max_ratio = _env_int(('MANUSCRIPT_ZIP_MAX_COMPRESSION_RATIO',), 200)
 
     try:
@@ -151,7 +158,11 @@ def _scan_zip_members(content: bytes, *, require_manuscript):
 
             compressed = max(0, int(info.compress_size or 0))
             uncompressed = max(0, int(info.file_size or 0))
-            if uncompressed >= 1024 * 1024:
+            # Review 5, R5-2: in an Office package the ratio limit guards the parts that get parsed — the
+            # XML and its relationships, which is where a declared-gigabyte document.xml would sit. Embedded
+            # media (an uncompressed TIFF or BMP) legitimately compresses far past the ratio and is left be.
+            ratio_applies = not office or info.filename.lower().endswith(('.xml', '.rels'))
+            if ratio_applies and uncompressed >= 1024 * 1024:
                 if compressed == 0 or (uncompressed / max(1, compressed)) > max_ratio:
                     raise UploadSecurityError(
                         'ZIP member compression ratio exceeds the configured safety limit'

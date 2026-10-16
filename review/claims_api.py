@@ -312,11 +312,19 @@ def _venue_for(claim):
     return venue
 
 
-def _own_organization(venue):
-    """The journal gets its own organization, so its new owner never reaches other journals."""
+def _own_organization(venue, claimant_email=''):
+    """The journal gets its own organization, so its new owner never reaches other journals.
+
+    Review 5, R5-1: the claimant's own membership does not make the organization shared. When the person
+    claiming already runs this one venue, the organization is this journal's own office, and moving the
+    venue into a fresh one would leave them holding two.
+    """
     current = venue.organization
+    others = Membership.objects.filter(organization=current)
+    if claimant_email:
+        others = others.exclude(user__email__iexact=claimant_email)
     shared = current is None or Venue.objects.filter(organization=current).exclude(id=venue.id).exists() \
-        or Membership.objects.filter(organization=current).exists()
+        or others.exists()
     if not shared:
         return current
     org = Organization.objects.create(name=f'{venue.name} editorial office'[:300], organization_type='journal')
@@ -354,16 +362,18 @@ def admin_claim_approve(request, claim_id):
             return JsonResponse({'detail': 'This journal is excluded from the index.'}, status=409)
         same_journal = Q(venue=venue) | (Q(indexed_id=claim.indexed_id) if claim.indexed_id else Q(pk__in=[]))
         earlier = VenueClaim.objects.filter(same_journal, status='approved').exclude(id=claim.id)
-        # Review 4, A1: a venue someone already works on is not handed over either. Its organization having
+        email = normalize_email(claim.email)
+        # Review 4, A1: a venue someone else already works on is not handed over. Its organization having
         # members means real editors hold it; _own_organization would otherwise move the venue to a fresh
         # organization and those editors would lose the journal without being told.
-        held_by_editors = bool(venue.organization_id) and Membership.objects.filter(
-            organization_id=venue.organization_id).exists()
-        if venue.trust_tier == Venue.TIER_CLAIMED or earlier.exists() or held_by_editors:
+        # Review 5, R5-1: the claimant does not count as someone else. An owner claiming the venue they
+        # already run was refused by their own membership, so they could never reach 'Editor-confirmed'.
+        held_by_others = bool(venue.organization_id) and Membership.objects.filter(
+            organization_id=venue.organization_id).exclude(user__email__iexact=email).exists()
+        if venue.trust_tier == Venue.TIER_CLAIMED or earlier.exists() or held_by_others:
             return JsonResponse({'detail': 'This journal is already managed by an editor. Reject this claim, or ask '
                                            'the current editor to add this person.'}, status=409)
-        org = _own_organization(venue)
-        email = normalize_email(claim.email)
+        org = _own_organization(venue, claimant_email=email)
         user = EditorUser.objects.filter(email=email).first() or (
             EditorUser.objects.filter(email__iexact=email).first() if email.isascii() else None)
         new_account = user is None

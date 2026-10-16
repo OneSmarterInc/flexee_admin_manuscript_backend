@@ -9,6 +9,7 @@ Reading never publishes anything. A journal whose rules were read is "ready"; an
 """
 import logging
 import os
+import re
 from dataclasses import replace
 from datetime import timedelta
 from urllib.parse import urlsplit
@@ -118,12 +119,32 @@ QUOTE_FIELDS = {
     'required_submission_items': ('item', 'require', 'checklist', 'declaration', 'statement'),
     # Review 4, Y9: a deadline is a dated claim an author plans around, and author_config_view shows it as
     # a live one. It is published only when the model quoted the page it came from.
-    'deadlines': ('deadline', 'date', 'due', 'close', 'submission window'),
+    # Review 5, R5-11: a call for papers is where a real deadline is quoted from, so it counts as evidence
+    # for one; without it, verified call deadlines were wiped. 'date' is dropped — as a substring it also
+    # matched 'last_updated', which quotes nothing about a deadline.
+    'deadlines': ('deadline', 'due', 'closing', 'closes', 'submission window', 'call for papers',
+                  'call_for_papers'),
 }
 
 
 def _get(item, name):
     return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
+
+
+def _names_field(evidence_field, word):
+    """Does the model's own name for this evidence start a word with `word`?
+
+    Review 5, R5-11: matched as a bare substring, 'date' also sat inside 'last_updated' and 'type' inside
+    'prototype', so evidence about one thing counted as a quote for another. Matching from the start of a
+    word keeps the stems the rules rely on — 'item' still matches 'required_submission_items', 'require'
+    matches 'required' — while 'date' no longer matches 'updated'. Underscores and hyphens read as spaces,
+    so 'call for papers' matches a field named 'call_for_papers'.
+    """
+    haystack = re.sub(r'[^a-z0-9]+', ' ', evidence_field.lower()).strip()
+    needle = re.sub(r'[^a-z0-9]+', ' ', word.lower()).strip()
+    if not haystack or not needle:
+        return False
+    return re.search(r'\b' + re.escape(needle).replace(r'\ ', ' '), haystack) is not None
 
 
 def quoted_fields(item):
@@ -140,7 +161,7 @@ def quoted_fields(item):
     for field, words in QUOTE_FIELDS.items():
         if not _get(item, field):
             continue
-        if any(any(w in str(e.get('field') or '').lower() for w in words) for e in model_evidence):
+        if any(any(_names_field(str(e.get('field') or ''), w) for w in words) for e in model_evidence):
             quoted.add(field)
     return quoted, model_evidence
 

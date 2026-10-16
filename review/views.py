@@ -28,7 +28,7 @@ from .storage_security import (
     sanitize_original_filename,
     secure_download_response,
     validate_manuscript_filename,
-    validate_manuscript_zip,
+    validate_upload,
 )
 
 
@@ -261,11 +261,10 @@ def submit(request):
     digest = hashlib.sha256(content).hexdigest()
     safe_upload_name = sanitize_original_filename(upload.name, default='manuscript')
     upload.name = safe_upload_name
-    if safe_upload_name.lower().endswith('.zip'):
-        try:
-            validate_manuscript_zip(content)
-        except UploadSecurityError as exc:
-            return JsonResponse({'detail': str(exc), 'errors': [str(exc)]}, status=400)
+    try:       # Review 5, R5-7: the public form gets the same archive limits as the author upload
+        validate_upload(content, safe_upload_name)
+    except UploadSecurityError as exc:
+        return JsonResponse({'detail': str(exc), 'errors': [str(exc)]}, status=400)
 
     from .storage_quota import StorageQuotaExceeded, storage_quota_guard
     try:

@@ -3,6 +3,7 @@ import json
 
 from django.db.models import Q
 from django.http import JsonResponse
+from django.utils import timezone
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from .json_object import json_object
@@ -194,6 +195,12 @@ def index_list(request):
         page = 1
 
     rules_key, rules_label, _subfields = rules_field()
+    # Flow review: a run left at 'processing' by a killed worker disabled every run button on this
+    # panel, and close_stale_runs() was only ever called by start_index_run — reachable through those
+    # same buttons. The admin had no way out of the panel. The discovery panel already clears its own
+    # stale runs when its list loads; this one now does the same.
+    from .services.venue_index import close_stale_runs
+    close_stale_runs()
     return JsonResponse({
         'profile': {'key': config.profile, 'label': PROFILES.get(config.profile, {}).get('label', config.profile),
                     'subfields': config.subfields},
@@ -236,6 +243,30 @@ def index_run_now(request):
         record_audit_event(request, 'venue_index.run_requested', resource_type='venue_index_run',
                            resource_id=run.id, detail={'mode': mode})
     return JsonResponse({'run': run_payload(run), 'already_running': not created}, status=202)
+
+
+@require_POST
+@require_platform_superuser
+def index_stop_run(request):
+    """Stop the current import. Records already saved are kept.
+
+    Flow review: the discovery panel has had a Stop button all along; this panel had none. A run left
+    behind by a killed worker disabled all five of its run buttons, and the only thing that cleared
+    one was a function reachable through those same buttons. The list now clears a run older than an
+    hour by itself, and this is the way out before that hour is up.
+    """
+    from .services.venue_index import close_stale_runs
+    close_stale_runs()
+    run = VenueIndexRun.objects.filter(status__in=['queued', 'processing']).order_by('-created_at').first()
+    if run is None:
+        return JsonResponse({'detail': 'No import is in progress.'}, status=409)
+    VenueIndexRun.objects.filter(id=run.id).update(
+        status='failed', completed_at=timezone.now(),
+        summary=f'Stopped by {request.editor_user.email}. Records saved before that were kept.')
+    record_audit_event(request, 'venue_index.run_stopped', resource_type='venue_index_run', resource_id=run.id,
+                       detail={'previous_status': run.status, 'mode': run.mode})
+    run.refresh_from_db()
+    return JsonResponse({'run': run_payload(run)})
 
 
 @require_http_methods(['GET', 'POST'])

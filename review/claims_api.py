@@ -198,9 +198,11 @@ def claim_create(request):
         venue, record = resolve_target(str(data.get('kind') or ''), str(data.get('key') or ''))
     except ClaimError as exc:
         return JsonResponse({'detail': exc.detail}, status=exc.status)
-    if venue and venue.trust_tier == Venue.TIER_CLAIMED:
-        return JsonResponse({'detail': 'This journal is already managed by its editors on Flexee. '
-                                       'Ask its editorial office to add you.'}, status=409)
+    # Flow review: this used to be a 409 telling the claimant to "ask its editorial office to add you",
+    # and no part of the app let the office do that. A second editor at a journal already on Flexee was
+    # simply turned away, and so was the replacement for an editor who had left. The claim is accepted
+    # instead: it still needs the email confirmed and a Flexee superuser's decision before it grants
+    # anything, and that superuser can now add the person to the office that holds the journal.
 
     target = {'venue': venue} if venue else {'indexed': record}
     existing = VenueClaim.objects.filter(email=email, status__in=OPEN, **target).first()
@@ -370,17 +372,31 @@ def admin_claim_approve(request, claim_id):
         # already run was refused by their own membership, so they could never reach 'Editor-confirmed'.
         held_by_others = bool(venue.organization_id) and Membership.objects.filter(
             organization_id=venue.organization_id).exclude(user__email__iexact=email).exists()
-        if venue.trust_tier == Venue.TIER_CLAIMED or earlier.exists() or held_by_others:
-            return JsonResponse({'detail': 'This journal is already managed by an editor. Reject this claim, or ask '
-                                           'the current editor to add this person.'}, status=409)
-        org = _own_organization(venue, claimant_email=email)
+        # Flow review: both refusals here named an action nothing in the app implements. Membership rows
+        # are created in this one place, there is no add-member endpoint and no members panel, so
+        # "ask the current editor to add this person" was impossible — and a journal whose only editor
+        # left was stranded for good: the venue stays claimed, new claims are refused upstream, and
+        # re-approval is refused by the old approved claim. The protection stays (approval never moves a
+        # journal quietly between organizations); a superuser can now say yes to the thing the message
+        # already promised, and add this person to the organization that holds the journal.
+        add_to_existing = bool(data.get('add_to_existing'))
+        already_managed = venue.trust_tier == Venue.TIER_CLAIMED or earlier.exists() or held_by_others
+        join_existing = add_to_existing and bool(venue.organization_id)
+        if already_managed and not join_existing:
+            return JsonResponse({'detail': 'This journal is already managed by an editor. Reject this claim, add '
+                                           'this person as an additional editor, or ask them to claim another '
+                                           'journal.', 'code': 'already_managed'}, status=409)
+        org = (venue.organization if join_existing
+               else _own_organization(venue, claimant_email=email))
         user = EditorUser.objects.filter(email=email).first() or (
             EditorUser.objects.filter(email__iexact=email).first() if email.isascii() else None)
         new_account = user is None
         if new_account:
             user = EditorUser.objects.create(email=email, password_hash='!unset')  # no password until set
-        membership, _ = Membership.objects.get_or_create(user=user, organization=org, defaults={'role': 'owner'})
-        if membership.role != 'owner':
+        # Someone added to an office that already has editors joins as an editor; the owner stays the owner.
+        role = 'editor' if (join_existing and already_managed) else 'owner'
+        membership, _ = Membership.objects.get_or_create(user=user, organization=org, defaults={'role': role})
+        if role == 'owner' and membership.role != 'owner':
             membership.role = 'owner'
             membership.save(update_fields=['role'])
         claim.status, claim.venue, claim.editor_user = 'approved', venue, user
@@ -389,7 +405,8 @@ def admin_claim_approve(request, claim_id):
         record_audit_event(request, 'venue_claim.approved', resource_type='venue_claim', resource_id=claim.id,
                            organization_id=org.id, venue_id=venue.id,
                            detail={'journal': claim.journal_name, 'email': claim.email, 'new_account': new_account,
-                                   'domain_matches': claim.domain_matches})
+                                   'domain_matches': claim.domain_matches, 'role': role,
+                                   'added_to_existing_office': bool(join_existing and already_managed)})
     sign_in = f'{_origin(request)}/admin'
     # Review 2, A5: an account that never set its password gets a fresh link too (the first may have expired).
     needs_password = new_account or user.password_hash == '!unset'
@@ -402,6 +419,47 @@ def admin_claim_approve(request, claim_id):
           f'"Editor-confirmed", with the date you last confirmed its rules.\n' + (f'\nNote from Flexee: {note}\n' if note else ''))
     return JsonResponse({'claim': claim_payload(claim), 'venue': {'id': str(venue.id), 'slug': venue.slug},
                          'new_account': new_account})
+
+
+@require_POST
+@require_platform_superuser
+def admin_claim_resend_access(request, claim_id):
+    """Send an approved claim's editor a fresh set-password link.
+
+    Flow review: the approval email carried one signed link, good for SET_PASSWORD_DAYS. After that
+    editor_set_password answered 'This link has expired. Ask Flexee for a new one.' and there was
+    nothing to ask — an approved claim offered no buttons, re-approving and rejecting both answered
+    409, and a fresh claim was refused because the journal was by then claimed. Authors have Forgot
+    password; editors had no route at all, so a Django shell was the only way to let them in.
+
+    reset_two_step clears the authenticator as well, for the other half of the same lock-out: the
+    authenticator secret is written when the set-password page loads and shown only once, so closing
+    that tab left an editor with a password, a dead link, and no way to produce a sign-in code.
+    """
+    data = _json(request) or {}
+    claim = VenueClaim.objects.select_related('editor_user', 'venue').filter(id=claim_id).first()
+    if claim is None:
+        return JsonResponse({'detail': 'Claim not found'}, status=404)
+    if claim.status != 'approved' or claim.editor_user is None:
+        return JsonResponse({'detail': 'Only an approved claim has an editor to send a link to.'}, status=409)
+    user = claim.editor_user
+    reset_two_step = bool(data.get('reset_two_step'))
+    if reset_two_step and user.totp_secret:
+        user.totp_secret, user.totp_last_step = '', None
+        user.save(update_fields=['totp_secret', 'totp_last_step', 'updated_at'])
+    journal = claim.venue.name if claim.venue_id else claim.journal_name
+    two_step = ('You will set up your sign-in code app (two-step sign-in) again on that page. '
+                'Keep that tab open until the app shows a code.\n\n' if reset_two_step or not user.totp_secret else '')
+    _send(claim.email, f'Your Flexee access for {journal}',
+          f'Hello {claim.name},\n\nHere is a new link to set your Flexee password. It works for '
+          f'{SET_PASSWORD_DAYS} days:\n{set_password_link(request, user)}\n\n{two_step}'
+          f'Then sign in at {_origin(request)}/admin.\n')
+    record_audit_event(request, 'venue_claim.access_resent', resource_type='venue_claim', resource_id=claim.id,
+                       venue_id=claim.venue_id,
+                       detail={'journal': claim.journal_name, 'email': claim.email,
+                               'two_step_reset': reset_two_step})
+    return JsonResponse({'ok': True, 'email': claim.email, 'two_step_reset': reset_two_step,
+                         'claim': claim_payload(claim)})
 
 
 @require_POST

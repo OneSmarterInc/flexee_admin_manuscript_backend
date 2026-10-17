@@ -1007,12 +1007,15 @@ def _send_author_verification(request, author):
     from django.core.signing import dumps
 
     token = dumps({'author_id': str(author.id)})
-    path = f'/api/author/verify-email/?token={token}'
-    public_origin = (
-        os.getenv('AUTHOR_VERIFICATION_BASE_URL', '').strip()
-        or os.getenv('PUBLIC_BACKEND_URL', '').strip()
-    )
-    verify_url = f"{public_origin.rstrip('/')}{path}" if public_origin else request.build_absolute_uri(path)
+    # Flow review: this link used to point at the API, which answers in bare JSON. Every new author
+    # clicked it and landed on a blank tab reading {"detail": "Email verified successfully"} — no
+    # branding and no way back, with their open workspace tab still refusing uploads until they
+    # thought to reload. It points at the author portal now, which verifies and says what to do next.
+    portal = (_author_portal_origin(request)
+              or os.getenv('AUTHOR_VERIFICATION_BASE_URL', '').strip().rstrip('/')
+              or os.getenv('PUBLIC_BACKEND_URL', '').strip().rstrip('/'))
+    path = f'/author/verify-email?token={token}'
+    verify_url = f'{portal}{path}' if portal else request.build_absolute_uri(f'/api/author/verify-email/?token={token}')
 
     result = _send_email(
         to=author.email,
@@ -1428,18 +1431,33 @@ def author_password_reset_confirm(request):
 @require_GET
 def author_verify_email(request):
     token = request.GET.get('token')
+    # Flow review: links already sitting in inboxes point here, and a browser opening this got raw
+    # JSON. A browser is sent to the author portal's own page, which calls back here for the answer.
+    wants_page = 'text/html' in (request.headers.get('Accept') or '')
+    if wants_page:
+        portal = _author_portal_origin(request)
+        if portal:
+            from django.http import HttpResponseRedirect
+            from urllib.parse import quote
+            return HttpResponseRedirect(f'{portal}/author/verify-email?token={quote(token or "")}')
+
     if not token:
-        return JsonResponse({'detail': 'Token missing'}, status=400)
-    
+        return JsonResponse({'detail': 'Token missing', 'code': 'token_missing'}, status=400)
+
     from django.core.signing import loads, SignatureExpired, BadSignature
     try:
         data = loads(token, max_age=86400 * 7)
         author = Author.objects.get(id=data['author_id'])
+    except SignatureExpired:
+        return JsonResponse({'detail': 'This verification link has expired. Sign in and ask for a new one.',
+                             'code': 'token_expired'}, status=400)
+    except (BadSignature, Author.DoesNotExist):
+        return JsonResponse({'detail': 'This verification link is not valid.', 'code': 'token_invalid'}, status=400)
+    if not author.email_verified:
         author.email_verified = True
         author.save(update_fields=['email_verified'])
-        return JsonResponse({'detail': 'Email verified successfully'})
-    except (SignatureExpired, BadSignature, Author.DoesNotExist):
-        return JsonResponse({'detail': 'Invalid or expired token'}, status=400)
+    # A second click on the same link is a success, not an error: the account is verified either way.
+    return JsonResponse({'ok': True, 'detail': 'Email verified successfully', 'email': author.email})
 
 
 @require_POST

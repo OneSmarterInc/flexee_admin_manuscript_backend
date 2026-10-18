@@ -532,6 +532,12 @@ def _purge_manuscript_content(manuscript, now):
     manuscript.readiness_assessments.all().delete()
     manuscript.venue_matches.all().delete()
     ManuscriptEmbedding.objects.filter(manuscript=manuscript).delete()  # derived from the content
+    # Security audit, A02: evidence findings quote the manuscript. _persist_readiness_evidence writes
+    # rows with venue_submission=None and up to 1500 characters of the text in `excerpt`, and the
+    # sweep's own delete reaches only the submission-scoped rows — so the quoted passages outlived the
+    # purge for ever, while the manuscript they came from was gone and the author had been told it was
+    # deleted. They are derived from the content and go with it.
+    manuscript.evidence_findings.all().delete()
     AuditEvent.objects.create(
         actor_role='system',
         action='manuscript.retention_purged',

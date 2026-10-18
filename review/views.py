@@ -407,20 +407,26 @@ def admin_verify_password(request):
         return JsonResponse({'detail': 'Invalid username or password.'}, status=401)
 
     requires_totp = user.memberships.filter(role__in=['owner', 'editor']).exists() or user.platform_superuser
-    totp_setup_uri = None
 
+    # Security audit, A07: this used to mint a fresh authenticator secret here and return the
+    # otpauth:// URI, for any account whose secret was blank, to anyone who presented the password.
+    # A password on its own then enrolled the second factor — so a phished or reused editor password
+    # was enough to register an attacker's own authenticator and finish signing in, which is exactly
+    # what the second factor exists to prevent. It also contradicted the comment in claims_api that
+    # says enrolment does not belong to whoever first reaches the sign-in page with the password.
+    # Enrolment now happens only on the emailed set-password page. An account with no secret cannot
+    # sign in, and a Flexee superuser sends it a fresh access link from Venue Claims.
     if requires_totp and not user.totp_secret:
-        # Accounts made before the invite flow set up 2FA (audit item 26): first sign-in still sets it up.
-        # Invited editors set it up on the emailed set-password page instead.
-        from .auth import start_totp_setup
-        totp_setup_uri = start_totp_setup(user)
+        record_admin_auth_event(
+            request, 'admin.login_failed', user=user, username=username,
+            detail={'stage': 'password', 'reason': 'authenticator_not_enrolled'})
+        return JsonResponse(
+            {'detail': 'This account has no sign-in code app set up yet. Ask Flexee to send you a new '
+                       'access link, and set it up from that link.',
+             'code': 'totp_not_enrolled'}, status=403)
 
     # Audit item 27: the browser keeps this short-lived ticket for the second step, not the password.
-    resp = {'ok': True, 'login_ticket': _login_ticket(user)}
-    if totp_setup_uri:
-        resp['totp_setup_uri'] = totp_setup_uri
-
-    return JsonResponse(resp)
+    return JsonResponse({'ok': True, 'login_ticket': _login_ticket(user)})
 
 
 def _dummy_hash():

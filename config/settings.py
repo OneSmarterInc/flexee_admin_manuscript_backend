@@ -112,6 +112,14 @@ MIDDLEWARE = [
 
 # Browser clients use cookie-backed sessions, so unsafe cross-origin requests
 # must carry a Django CSRF token in addition to passing our Origin checks.
+# Security audit: the frontend reads the token from the JSON body of /api/csrf/, never from the
+# cookie, so the cookie does not need to be reachable from JavaScript. Marking it HttpOnly means an
+# XSS on one of our own pages cannot lift the token straight out of document.cookie. It is a narrow
+# gain — the protection that matters is that another origin cannot read the token at all, which CORS
+# already enforces — and it costs nothing here. If any future client needs to read the cookie
+# directly, this is the line to revisit.
+CSRF_COOKIE_HTTPONLY = True
+
 CSRF_TRUSTED_ORIGINS = [
     origin.strip()
     for origin in os.getenv(

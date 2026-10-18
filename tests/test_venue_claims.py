@@ -116,10 +116,15 @@ def test_claim_validation(outbox, payload, status):
 
 
 @pytest.mark.django_db
-def test_claimed_excluded_and_undecided_journals_cannot_be_claimed(outbox):
+def test_excluded_and_undecided_journals_cannot_be_claimed(outbox):
+    # Flow review: a journal already on Flexee now accepts the claim rather than turning the person
+    # away with "ask its editorial office to add you" — nothing in the app let the office do that, so a
+    # second editor, or the replacement for one who had left, had nowhere to go. The claim still grants
+    # nothing until the email is confirmed and a Flexee superuser approves it.
     make_venue('Field Notes Journal', 'fnj')  # already editor-managed
     response = post(Client(), '/api/journals/claim/', {'kind': 'venue', 'key': 'fnj', 'email': 'a@b.org', **CLAIM})
-    assert response.status_code == 409
+    assert response.status_code == 201
+    assert VenueClaim.objects.get(email='a@b.org').status == 'pending_email'
     assert claim(listed(excluded=True)).status_code == 404
     flagged = journal('Flagged', openalex_id='S10', screening_status='flagged')
     assert claim(flagged).status_code == 404

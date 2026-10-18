@@ -336,7 +336,11 @@ def require_author(view):
     def wrapped(request, *args, **kwargs):
         session = read_author_session(request)
         if not session:
-            return JsonResponse({'detail': 'Author authentication required'}, status=401)
+            # Flow review: 'Author authentication required' was shown to the author verbatim, mid-upload,
+            # with no sign-in link and nothing that recovered. The code lets the page offer the one
+            # action that helps.
+            return JsonResponse({'detail': 'Your sign-in has expired. Sign in again to continue.',
+                                 'code': 'author_signin_required'}, status=401)
         request.flexee_author = session
         return view(request, *args, **kwargs)
     return wrapped

@@ -325,6 +325,17 @@ def admin_start_venue_review(request, submission_id):
                 {'detail': f'Cannot start editorial review from status {item.status}'},
                 status=409,
             )
+        # Flow review: the retention sweep purges a packet that is still 'submitted', wiping the
+        # packet, the editorial brief and every requirement file. Starting review on what is left
+        # moved an empty packet to 'under_review' — where it is then exempt from the sweep for good,
+        # with downloads disabled and no brief — so the editor could only decide blind.
+        if item.retention_purged_at and item.status != 'under_review':
+            return JsonResponse(
+                {'detail': 'This manuscript has passed its retention window and its files were deleted. '
+                           'There is nothing left to review. Ask the author to send it again.',
+                 'code': 'retention_expired'},
+                status=409,
+            )
         previous_status = item.status
         if item.status != 'under_review':
             item.status = 'under_review'

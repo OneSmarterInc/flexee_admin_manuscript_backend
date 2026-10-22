@@ -14,6 +14,7 @@ AI_KEYS = (
     'ENABLE_CLOUD_FALLBACK', 'AI_PROVIDER_FALLBACK', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL',
     'AI_COST_ENFORCEMENT_ENABLED', 'AI_DAILY_COST_LIMIT_USD', 'AI_ANTHROPIC_INPUT_USD_PER_MILLION',
     'AI_ANTHROPIC_OUTPUT_USD_PER_MILLION', 'AI_MODEL_PRICING_JSON',
+    'VENUE_DISCOVERY_ENABLED', 'VENUE_DISCOVERY_MODE', 'VENUE_DISCOVERY_MODEL',
 )
 
 SHARED_QWEN = {
@@ -118,9 +119,15 @@ class CloudFallbackReadinessTests(SimpleTestCase):
         out = run_checker(SHARED_QWEN)
         self.assertEqual(line_for(out, 'ANTHROPIC_API_KEY'), '')
 
-    def test_haiku_review_model_warns(self):
-        out = run_checker({**SHARED_QWEN, **CLOUD, 'ANTHROPIC_MODEL': 'claude-haiku-4-5-20251001'})
-        self.assertIn('[WARN] ANTHROPIC_MODEL is claude-haiku-4-5-20251001', out)
+    def test_the_review_model_does_not_warn_against_itself(self):
+        """22 October: Haiku is the review model, so the checker must not argue with the default.
+
+        The old warning told the operator to move to a Sonnet-class model, which now contradicts
+        the decision the code ships. It was unreliable as well: it read whichever model sorted
+        last, so with discovery in claude_agent mode it reported on the discovery model.
+        """
+        out = run_checker({**SHARED_QWEN, **CLOUD, 'ANTHROPIC_MODEL': 'claude-haiku-5-5'})
+        self.assertNotIn('should use a Sonnet-class model', out)
 
     def test_unused_fallback_setting_warns(self):
         out = run_checker({**SHARED_QWEN, 'AI_PROVIDER_FALLBACK': 'anthropic'})

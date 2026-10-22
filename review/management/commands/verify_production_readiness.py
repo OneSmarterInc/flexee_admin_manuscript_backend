@@ -193,11 +193,17 @@ class Command(BaseCommand):
             for model in sorted(m for m in models if m):
                 require(pricing_for('anthropic', model)['priced'],
                         f'Anthropic input and output pricing must be configured for {model}.')
-            if 'haiku' in model.lower():
-                warn(
-                    f'ANTHROPIC_MODEL is {model}. Review findings, match reasons and the editorial brief '
-                    'should use a Sonnet-class model.'
-                )
+            # 22 October: Haiku is the review model, decided off the production E2E, so the warning
+            # that used to sit here — telling the operator to move to a Sonnet-class model — argued
+            # with the default the code now ships. It was unreliable as well: it sat outside the loop
+            # above and read whichever model sorted last, so with discovery in claude_agent mode it
+            # reported on the Sonnet discovery model and never on the review model at all.
+            #
+            # Nothing replaces it. This command warns about things it can check, and whether the
+            # configured rates match the billed model is not one of them: there is no rate table to
+            # compare against, so any warning here would fire on every run whether the rates were
+            # right or wrong. That guidance belongs where it now is, in the .env templates beside
+            # the rates themselves.
         limits = storage_limits()
         require(limits['author_limit_bytes'] > 0, 'AUTHOR_STORAGE_LIMIT_BYTES must be positive.')
         require(limits['total_limit_bytes'] >= limits['author_limit_bytes'], 'TOTAL_STORAGE_LIMIT_BYTES must be at least the per-author storage limit.')

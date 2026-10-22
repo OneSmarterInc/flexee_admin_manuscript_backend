@@ -53,10 +53,16 @@ def line_for(output, text):
 
 
 class ReviewModelDefaultTests(SimpleTestCase):
-    def test_review_path_defaults_to_sonnet(self):
+    def test_review_path_defaults_to_haiku(self):
+        """The review path runs on Haiku, decided 22 October off the production E2E.
+
+        One structured call each, against criteria we supply, with the answer validated
+        against the text it cites. The 12 October run measured about $0.003 and 36 seconds
+        per manuscript on Haiku, naming specific gaps rather than restating the venue type.
+        """
         with mock.patch.dict(os.environ, {'ANTHROPIC_MODEL': ''}):
             self.assertEqual(anthropic_model(), DEFAULT_ANTHROPIC_MODEL)
-        self.assertIn('sonnet', DEFAULT_ANTHROPIC_MODEL)
+        self.assertIn('haiku', DEFAULT_ANTHROPIC_MODEL)
 
     def test_explicit_model_is_respected(self):
         with mock.patch.dict(os.environ, {'ANTHROPIC_MODEL': 'claude-opus-5-5'}):
@@ -133,11 +139,23 @@ class TemplateTests(SimpleTestCase):
                 for k, _, v in (line.partition('=') for line in fh if '=' in line and not line.startswith('#'))
             }
 
-    def test_dev_template_uses_sonnet_for_review(self):
-        self.assertIn('sonnet', self._template('.env.example')['ANTHROPIC_MODEL'])
+    def test_dev_template_uses_haiku_for_review(self):
+        self.assertIn('haiku', self._template('.env.example')['ANTHROPIC_MODEL'])
 
-    def test_production_template_uses_sonnet_for_review(self):
-        self.assertIn('sonnet', self._template('.env.production.example')['ANTHROPIC_MODEL'])
+    def test_production_template_uses_haiku_for_review(self):
+        self.assertIn('haiku', self._template('.env.production.example')['ANTHROPIC_MODEL'])
+
+    def test_discovery_keeps_a_sonnet_class_model_in_both_templates(self):
+        """Discovery and review deliberately run different models; this pins the split.
+
+        Discovery decides what to search and which pages to open across several steps,
+        which is the work a smaller model does worst. Review is a single structured call.
+        A later change that aligns the two should fail here rather than pass quietly.
+        """
+        for name in ('.env.example', '.env.production.example'):
+            values = self._template(name)
+            self.assertIn('sonnet', values['VENUE_DISCOVERY_MODEL'], name)
+            self.assertNotEqual(values['VENUE_DISCOVERY_MODEL'], values['ANTHROPIC_MODEL'], name)
 
     def test_production_template_uses_the_real_fallback_setting(self):
         """The template must name the setting the application actually reads.

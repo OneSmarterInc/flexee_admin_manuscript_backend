@@ -20,9 +20,17 @@ from ..ai_usage import (
 from .local_llm import estimate_prompt_tokens, ollama_chat_json, shared_qwen_chat_json
 
 
-# Review, readiness, match reasons and the editorial brief are judgment an
-# author or editor acts on, so the review path defaults to a Sonnet-class model.
-DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-5-5'
+# Review, readiness, match reasons and the editorial brief: one structured call
+# each, against criteria we supply, with the answer validated against the text it
+# cites. The 12 October production E2E measured Haiku at about $0.003 and 36
+# seconds per manuscript on that path, naming specific gaps rather than restating
+# the venue type, so Haiku is the review default.
+#
+# Venue discovery is the opposite kind of work: multi-step agentic browsing where
+# the model chooses what to search and which pages to open. It keeps a
+# Sonnet-class model through VENUE_DISCOVERY_MODEL. The two defaults differ on
+# purpose; do not align them.
+DEFAULT_ANTHROPIC_MODEL = 'claude-haiku-5-5'
 
 
 def anthropic_model() -> str:

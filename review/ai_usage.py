@@ -82,6 +82,18 @@ def _pricing_json() -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def explicitly_priced_models() -> set:
+    """Models carrying their own rate pair in AI_MODEL_PRICING_JSON.
+
+    The flat AI_<PROVIDER>_INPUT/OUTPUT_USD_PER_MILLION pair is a per-provider
+    fallback, so it applies one rate to every model of that provider. That is fine
+    while one model is billed and wrong as soon as two are: the review path runs
+    Haiku and venue discovery runs a Sonnet-class model, twenty times the output
+    rate apart. Only an explicit entry here can tell them apart.
+    """
+    return {name for name, row in _pricing_json().items() if isinstance(row, dict)}
+
+
 def pricing_for(provider: str, model: str) -> dict:
     provider = str(provider or '').strip().lower()
     model = str(model or '').strip()

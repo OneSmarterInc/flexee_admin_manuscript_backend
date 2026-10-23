@@ -6,7 +6,7 @@ from pathlib import Path
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
-from review.ai_usage import budget_limits, pricing_for
+from review.ai_usage import budget_limits, explicitly_priced_models, pricing_for
 from review.auth import allowed_frontend_origins
 from review.services.ai_provider import anthropic_model
 from review.storage_quota import storage_limits
@@ -190,9 +190,24 @@ class Command(BaseCommand):
             models = {anthropic_model()}
             if discovery_agent and os.getenv('VENUE_DISCOVERY_MODEL', '').strip():
                 models.add(os.getenv('VENUE_DISCOVERY_MODEL', '').strip())
-            for model in sorted(m for m in models if m):
+            billed = sorted(m for m in models if m)
+            for model in billed:
                 require(pricing_for('anthropic', model)['priced'],
                         f'Anthropic input and output pricing must be configured for {model}.')
+            # 23 October: the check above passes on the flat AI_ANTHROPIC_* pair, which is a
+            # per-provider fallback and therefore prices every Anthropic model the same. With
+            # review on Haiku and discovery on a Sonnet-class model that is a 20x error on the
+            # output rate, and it reads as PASS. Only an explicit per-model entry separates them.
+            if len(billed) > 1:
+                unnamed = [m for m in billed if m not in explicitly_priced_models()]
+                require(
+                    not unnamed,
+                    f'{len(billed)} Anthropic models are billed here ({", ".join(billed)}), so each '
+                    'needs its own rate pair in AI_MODEL_PRICING_JSON. The flat '
+                    'AI_ANTHROPIC_INPUT/OUTPUT_USD_PER_MILLION pair prices every Anthropic model '
+                    'the same'
+                    + (f'; no entry for: {", ".join(unnamed)}.' if unnamed else '.'),
+                )
             # 22 October: Haiku is the review model, decided off the production E2E, so the warning
             # that used to sit here — telling the operator to move to a Sonnet-class model — argued
             # with the default the code now ships. It was unreliable as well: it sat outside the loop

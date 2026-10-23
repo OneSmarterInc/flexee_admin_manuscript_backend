@@ -1,5 +1,7 @@
 import io
+import json
 import os
+from decimal import Decimal
 from unittest import mock
 
 from django.core.management import call_command
@@ -32,6 +34,19 @@ CLOUD = {
     'AI_ANTHROPIC_INPUT_USD_PER_MILLION': '3',
     'AI_ANTHROPIC_OUTPUT_USD_PER_MILLION': '15',
 }
+
+# Venue discovery in claude_agent mode bills Anthropic on its own model, so switching it
+# on is what puts a second billed model in play alongside the review model.
+DISCOVERY = {
+    'VENUE_DISCOVERY_ENABLED': 'true',
+    'VENUE_DISCOVERY_MODE': 'claude_agent',
+    'VENUE_DISCOVERY_MODEL': 'claude-sonnet-5-5',
+}
+
+PER_MODEL_PRICING = (
+    '{"claude-haiku-5-5":{"input_usd_per_million":"0.50","output_usd_per_million":"2.50"},'
+    '"claude-sonnet-5-5":{"input_usd_per_million":"2.00","output_usd_per_million":"10.00"}}'
+)
 
 
 def run_checker(env):
@@ -129,6 +144,44 @@ class CloudFallbackReadinessTests(SimpleTestCase):
         out = run_checker({**SHARED_QWEN, **CLOUD, 'ANTHROPIC_MODEL': 'claude-haiku-5-5'})
         self.assertNotIn('should use a Sonnet-class model', out)
 
+    def test_two_billed_models_on_one_flat_rate_pair_fails(self):
+        """23 October: Haiku review plus Sonnet discovery cannot share one rate pair.
+
+        The per-model pricing check passes on the flat AI_ANTHROPIC_* pair, because that
+        pair is a per-provider fallback and answers for any model asked of it. So the
+        earlier check reported PASS on a configuration that prices Sonnet output at
+        Haiku's rate, or the reverse, depending on which pair was filled in.
+        """
+        env = {**SHARED_QWEN, **CLOUD, **DISCOVERY, 'ANTHROPIC_MODEL': 'claude-haiku-5-5'}
+        out = run_checker(env)
+        line = line_for(out, 'Anthropic models are billed here')
+        self.assertTrue(line.startswith('[FAIL]'), out)
+        self.assertIn('claude-haiku-5-5', line)
+        self.assertIn('claude-sonnet-5-5', line)
+
+    def test_two_billed_models_pass_with_a_rate_pair_each(self):
+        env = {**SHARED_QWEN, **CLOUD, **DISCOVERY,
+               'ANTHROPIC_MODEL': 'claude-haiku-5-5',
+               'AI_MODEL_PRICING_JSON': PER_MODEL_PRICING}
+        out = run_checker(env)
+        self.assertTrue(line_for(out, 'Anthropic models are billed here').startswith('[PASS]'), out)
+        for model in ('claude-haiku-5-5', 'claude-sonnet-5-5'):
+            self.assertTrue(line_for(out, f'pricing must be configured for {model}').startswith('[PASS]'), out)
+
+    def test_a_partial_pricing_table_names_the_model_it_is_missing(self):
+        env = {**SHARED_QWEN, **CLOUD, **DISCOVERY,
+               'ANTHROPIC_MODEL': 'claude-haiku-5-5',
+               'AI_MODEL_PRICING_JSON': '{"claude-sonnet-5-5":{"input_usd_per_million":"2.00","output_usd_per_million":"10.00"}}'}
+        out = run_checker(env)
+        line = line_for(out, 'Anthropic models are billed here')
+        self.assertTrue(line.startswith('[FAIL]'), out)
+        self.assertIn('no entry for: claude-haiku-5-5', line)
+
+    def test_one_billed_model_may_still_use_the_flat_rate_pair(self):
+        """With a single billed model the flat pair is unambiguous, so it stays valid."""
+        out = run_checker({**SHARED_QWEN, **CLOUD})
+        self.assertEqual(line_for(out, 'Anthropic models are billed here'), '')
+
     def test_unused_fallback_setting_warns(self):
         out = run_checker({**SHARED_QWEN, 'AI_PROVIDER_FALLBACK': 'anthropic'})
         self.assertIn('[WARN] AI_PROVIDER_FALLBACK is not read by the application', out)
@@ -163,6 +216,35 @@ class TemplateTests(SimpleTestCase):
             values = self._template(name)
             self.assertIn('sonnet', values['VENUE_DISCOVERY_MODEL'], name)
             self.assertNotEqual(values['VENUE_DISCOVERY_MODEL'], values['ANTHROPIC_MODEL'], name)
+
+    def test_both_templates_price_each_billed_model_separately(self):
+        """Every model a template can bill must carry its own rate pair.
+
+        The review model and the discovery model are different on purpose, so the flat
+        AI_ANTHROPIC_* pair cannot serve both. A later change that adds a model without
+        pricing it, or that drops the table back to one shared pair, should fail here.
+        """
+        for name in ('.env.example', '.env.production.example'):
+            values = self._template(name)
+            table = json.loads(values['AI_MODEL_PRICING_JSON'])
+            for model in (values['ANTHROPIC_MODEL'], values['VENUE_DISCOVERY_MODEL']):
+                self.assertIn(model, table, f'{name} bills {model} with no rate pair')
+                row = table[model]
+                for side in ('input_usd_per_million', 'output_usd_per_million'):
+                    self.assertGreater(Decimal(str(row[side])), 0, f'{name}: {model}.{side}')
+
+    def test_haiku_is_priced_at_its_long_prompt_tier(self):
+        """Haiku 5.5 charges 5x above 100,000 tokens and estimate_cost holds one rate.
+
+        A manuscript can cross that line. Pricing the short-prompt tier would bill a long
+        manuscript at a fifth of its cost, passing the daily ceiling with the counter at
+        20 percent, so both templates carry the above-100k rates deliberately.
+        """
+        for name in ('.env.example', '.env.production.example'):
+            table = json.loads(self._template(name)['AI_MODEL_PRICING_JSON'])
+            haiku = table['claude-haiku-5-5']
+            self.assertEqual(Decimal(str(haiku['input_usd_per_million'])), Decimal('0.50'), name)
+            self.assertEqual(Decimal(str(haiku['output_usd_per_million'])), Decimal('2.50'), name)
 
     def test_production_template_uses_the_real_fallback_setting(self):
         """The template must name the setting the application actually reads.

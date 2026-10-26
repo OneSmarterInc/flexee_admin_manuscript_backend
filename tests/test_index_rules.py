@@ -1,9 +1,11 @@
 """Build plan step 4: read the first field's journal rules from official pages; an admin approves each."""
+import io
 import json
 from unittest import mock
 
 import pytest
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import Client
 from django.utils import timezone
 
@@ -406,3 +408,107 @@ def test_order_is_unchanged_when_no_abdc_data_is_imported():
             doaj={'guidelines_url': 'https://small.example/guide'})
     order = list(ir.reading_order(ir.rules_candidates('business-is')).values_list('title', flat=True))
     assert order == ['DOAJ Journal', 'Huge Publisher Journal']
+
+
+# ---------------------------------------------------------------------------
+# Publishing: the journal's own name, and the bulk command
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+def test_published_venue_carries_the_journals_own_title():
+    """Rules are often read from a publisher's or society's page, and the extracted name is theirs.
+
+    JAIS went live as "Association for Information Systems" and a Clausius title as "Clausius
+    Scientific Press". An author searching the index for the journal found nothing, and the public
+    URL carried the publisher's slug. The index already holds the catalogue title; use it.
+    """
+    item = journal('Journal of the Association for Information Systems', openalex_id='S1')
+    fetcher, _config = make_fetcher(JOURNAL_PAGES)
+    run_rules(fetcher)
+    item.refresh_from_db()
+    item.discovered.name = 'Association for Information Systems'
+    item.discovered.save(update_fields=['name'])
+
+    assert admin_client().post(f'/api/admin/venue-index/{item.id}/publish/').status_code == 200
+    venue = Venue.objects.get()
+    assert venue.name == 'Journal of the Association for Information Systems'
+    assert venue.slug.startswith('journal-of-the-association')
+
+
+@pytest.mark.django_db
+def test_a_venue_that_already_exists_is_never_renamed():
+    """Only a venue created by this publish takes the index title; an existing one keeps its name."""
+    item = journal('Journal of Applied AI in Organizations', openalex_id='S1')
+    fetcher, _config = make_fetcher(JOURNAL_PAGES)
+    run_rules(fetcher)
+    item.refresh_from_db()
+    client = admin_client()
+    assert client.post(f'/api/admin/venue-index/{item.id}/publish/').status_code == 200
+    venue = Venue.objects.get()
+    venue.name = 'Renamed By An Editor'
+    venue.save(update_fields=['name'])
+
+    assert client.post(f'/api/admin/venue-index/{item.id}/publish/').status_code == 200
+    venue.refresh_from_db()
+    assert venue.name == 'Renamed By An Editor' and Venue.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_bulk_publish_dry_run_changes_nothing():
+    journal('Ready Journal', openalex_id='S1')
+    fetcher, _config = make_fetcher(JOURNAL_PAGES)
+    run_rules(fetcher)
+    EditorUser.objects.create(email='root@example.com', password_hash='x', platform_superuser=True)
+    out = io.StringIO()
+    call_command('publish_ready_index_records', '--dry-run', stdout=out)
+    assert 'would publish' in out.getvalue().lower()
+    assert Venue.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_bulk_publish_applies_the_same_gates_as_the_button():
+    """A record the button would refuse must be skipped here with the button's own reason."""
+    ready = journal('Ready Journal', openalex_id='S1')
+    flagged = journal('Flagged Journal', openalex_id='S2')
+    fetcher, _config = make_fetcher(JOURNAL_PAGES)
+    run_rules(fetcher)
+    ready.refresh_from_db()
+    flagged.refresh_from_db()
+    if flagged.rules_status != 'ready':  # only the fixture page is readable; force the state under test
+        flagged.rules_status = 'ready'
+    flagged.screening_status = 'flagged'
+    flagged.save(update_fields=['rules_status', 'screening_status'])
+
+    EditorUser.objects.create(email='root@example.com', password_hash='x', platform_superuser=True)
+    out = io.StringIO()
+    call_command('publish_ready_index_records', stdout=out)
+    text = out.getvalue()
+    assert 'exclusion review' in text
+    assert Venue.objects.filter(name='Ready Journal').exists()
+    assert not Venue.objects.filter(name='Flagged Journal').exists()
+
+
+@pytest.mark.django_db
+def test_bulk_publish_names_the_actor_it_records():
+    journal('Ready Journal', openalex_id='S1')
+    fetcher, _config = make_fetcher(JOURNAL_PAGES)
+    run_rules(fetcher)
+    EditorUser.objects.create(email='one@example.com', password_hash='x', platform_superuser=True)
+    EditorUser.objects.create(email='two@example.com', password_hash='x', platform_superuser=True)
+    with pytest.raises(CommandError, match='More than one platform superuser'):
+        call_command('publish_ready_index_records', stdout=io.StringIO())
+
+    call_command('publish_ready_index_records', '--actor', 'two@example.com', stdout=io.StringIO())
+    from review.models import AuditEvent
+    event = AuditEvent.objects.filter(action='venue_index.published').first()
+    assert event is not None and event.actor_email == 'two@example.com'
+
+
+@pytest.mark.django_db
+def test_bulk_publish_needs_a_platform_superuser():
+    journal('Ready Journal', openalex_id='S1')
+    fetcher, _config = make_fetcher(JOURNAL_PAGES)
+    run_rules(fetcher)
+    with pytest.raises(CommandError, match='No platform superuser'):
+        call_command('publish_ready_index_records', stdout=io.StringIO())
+    assert Venue.objects.count() == 0

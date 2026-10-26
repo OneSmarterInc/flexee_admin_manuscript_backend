@@ -348,43 +348,71 @@ def index_apply_changes(request, record_id):
     return JsonResponse({'item': record_payload(item, detail=True)})
 
 
-@require_POST
-@require_platform_superuser
-def index_publish(request, record_id):
-    """An admin approves the rules the AI read: the journal becomes a live venue for authors,
-    labelled "Checked from official pages". Reading rules never publishes by itself."""
-    from .discovery_api import AddToVenueError, add_discovered_to_venue_agent
-    item = IndexedVenue.objects.select_related('discovered').filter(id=record_id).first()
-    if not item:
-        return JsonResponse({'detail': 'Index record not found'}, status=404)
+def publish_blocker(item):
+    """Why this index record may not be published, as (detail, status, code), or None when it may.
+
+    The Publish button and the bulk publish command share these gates, so a record the command
+    skips is exactly a record the button would refuse.
+    """
     if item.excluded:
-        return JsonResponse({'detail': 'This journal is excluded. Restore it before publishing.'}, status=409)
+        return 'This journal is excluded. Restore it before publishing.', 409, 'excluded'
     if item.screening_status == 'flagged':
-        return JsonResponse({'detail': 'Decide the exclusion review first (Keep or Exclude).'}, status=409)
+        return 'Decide the exclusion review first (Keep or Exclude).', 409, 'screening_pending'
     if item.rules_status != 'ready' or not item.discovered_id:
-        return JsonResponse({'detail': 'Its rules have not been read successfully yet.'}, status=409)
+        return 'Its rules have not been read successfully yet.', 409, 'rules_not_ready'
     # Audit item 5: never publish one journal onto another journal's reading or live venue.
     shared = (IndexedVenue.objects.filter(discovered_id=item.discovered_id).exclude(id=item.id)
               .values_list('title', flat=True).first())
     if shared is not None:
-        return JsonResponse({'detail': f'These rules were read from a page shared with "{shared}". '
-                                       'Read this journal\'s rules again before publishing.',
-                             'code': 'shared_reading'}, status=409)
+        return (f'These rules were read from a page shared with "{shared}". '
+                "Read this journal's rules again before publishing.", 409, 'shared_reading')
     added_venue_id = item.discovered.added_venue_id
     if added_venue_id:
         other = (IndexedVenue.objects.filter(venue_id=added_venue_id).exclude(id=item.id)
                  .values_list('title', flat=True).first())
         if other is not None or (item.venue_id and item.venue_id != added_venue_id):
-            return JsonResponse({'detail': 'These rules are already live as a different journal'
-                                           + (f' ("{other}")' if other else '') + '. Read this journal\'s '
-                                           'rules again before publishing.', 'code': 'other_venue'}, status=409)
-    try:
-        discovered, _already = add_discovered_to_venue_agent(request, item.discovered_id)
-    except AddToVenueError as exc:
-        return JsonResponse({'detail': exc.detail}, status=exc.status)
+            return ('These rules are already live as a different journal'
+                    + (f' ("{other}")' if other else '') + ". Read this journal's "
+                    'rules again before publishing.', 409, 'other_venue')
+    return None
+
+
+def publish_index_record(request, item):
+    """Publish one index record that has already cleared publish_blocker. Returns the record.
+
+    Raises AddToVenueError, which the caller reports in its own way.
+    """
+    from .discovery_api import add_discovered_to_venue_agent
+    # The venue is built from the page the rules were read on, and that page is often the
+    # publisher's or the society's rather than the journal's: JAIS was published as "Association
+    # for Information Systems" and a Clausius title as "Clausius Scientific Press". The index
+    # already holds the journal's own title from OpenAlex, so that is the name authors see.
+    discovered, _already = add_discovered_to_venue_agent(request, item.discovered_id, preferred_name=item.title)
     item.venue_id = discovered.added_venue_id
     item.save(update_fields=['venue', 'updated_at'])
     record_audit_event(request, 'venue_index.published', resource_type='indexed_venue', resource_id=item.id,
                        venue_id=item.venue_id, detail={'title': item.title, 'confidence': discovered.confidence})
-    item = IndexedVenue.objects.select_related('venue', 'discovered').get(id=item.id)
+    return IndexedVenue.objects.select_related('venue', 'discovered').get(id=item.id)
+
+
+@require_POST
+@require_platform_superuser
+def index_publish(request, record_id):
+    """An admin approves the rules the AI read: the journal becomes a live venue for authors,
+    labelled "Checked from official pages". Reading rules never publishes by itself."""
+    from .discovery_api import AddToVenueError
+    item = IndexedVenue.objects.select_related('discovered').filter(id=record_id).first()
+    if not item:
+        return JsonResponse({'detail': 'Index record not found'}, status=404)
+    blocker = publish_blocker(item)
+    if blocker is not None:
+        detail, status, code = blocker
+        body = {'detail': detail}
+        if code in {'shared_reading', 'other_venue'}:
+            body['code'] = code
+        return JsonResponse(body, status=status)
+    try:
+        item = publish_index_record(request, item)
+    except AddToVenueError as exc:
+        return JsonResponse({'detail': exc.detail}, status=exc.status)
     return JsonResponse({'item': record_payload(item, detail=True)})

@@ -323,3 +323,86 @@ def test_blocked_shows_in_the_missing_rules_filter():
     journal('Blocked', openalex_id='S1', rules_status='blocked', rules_error='x blocks automated reading')
     body = admin_client().get('/api/admin/venue-index/?filter=rules_missing').json()
     assert [i['title'] for i in body['items']] == ['Blocked'] and body['items'][0]['rules']['status'] == 'blocked'
+
+
+def abdc(record, rating, *, edition=2025, row=None):
+    """Attach an ABDC rating to an index record."""
+    from review.models import ABDCJournal
+    return ABDCJournal.objects.create(
+        edition=edition, source_row=row or (ABDCJournal.objects.count() + 1), title=record.title,
+        publisher=record.publisher, issn=record.issn_l, rating=rating, source_url='https://abdc.edu.au/',
+        source_file='abdc.csv', indexed_venue=record, match_status='matched', match_method='issn')
+
+
+@pytest.mark.django_db
+def test_abdc_rating_decides_the_reading_order():
+    """A* before A before B before C before unrated, whatever DOAJ says.
+
+    The DOAJ-first tiebreaker reads the journals that are easiest to fetch. In the October index
+    only 29 of 542 Information Systems records carried an ABDC rating, so that order spent the
+    budget on journals the field's authors do not submit to.
+    """
+    journal('Unrated Open Access Journal', openalex_id='S1', metrics={'works_count': 90000},
+            doaj={'guidelines_url': 'https://oa.example/guide'})
+    c_rated = journal('C Journal', openalex_id='S2', metrics={'works_count': 80000})
+    star = journal('A Star Journal', openalex_id='S3', metrics={'works_count': 10})
+    a_rated = journal('A Journal', openalex_id='S4', metrics={'works_count': 20})
+    abdc(c_rated, 'C')
+    abdc(star, 'A*')
+    abdc(a_rated, 'A')
+    order = list(ir.reading_order(ir.rules_candidates('business-is')).values_list('title', flat=True))
+    assert order == ['A Star Journal', 'A Journal', 'C Journal', 'Unrated Open Access Journal']
+
+
+@pytest.mark.django_db
+def test_readability_still_breaks_ties_inside_a_rating_band():
+    low = journal('No Guidelines A Journal', openalex_id='S1', metrics={'works_count': 500})
+    high = journal('Guidelines A Journal', openalex_id='S2', metrics={'works_count': 100},
+                   doaj={'guidelines_url': 'https://a.example/guide'})
+    abdc(low, 'A')
+    abdc(high, 'A')
+    order = list(ir.reading_order(ir.rules_candidates('business-is')).values_list('title', flat=True))
+    assert order == ['Guidelines A Journal', 'No Guidelines A Journal']
+
+
+@pytest.mark.django_db
+def test_only_the_newest_abdc_edition_decides_the_rank():
+    """A title downgraded in a later edition must not keep sorting on the older, better rating."""
+    downgraded = journal('Downgraded Journal', openalex_id='S1', metrics={'works_count': 10})
+    steady = journal('Steady A Journal', openalex_id='S2', metrics={'works_count': 10})
+    abdc(downgraded, 'A*', edition=2022, row=1)
+    abdc(downgraded, 'C', edition=2025, row=2)
+    abdc(steady, 'A', edition=2025, row=3)
+    order = list(ir.reading_order(ir.rules_candidates('business-is')).values_list('title', flat=True))
+    assert order == ['Steady A Journal', 'Downgraded Journal']
+
+
+@pytest.mark.django_db
+def test_never_read_journals_still_come_before_re_reads():
+    """A quarterly refresh of an A* journal must not displace a journal never read at all."""
+    old = timezone.now() - timezone.timedelta(days=400)
+    refresh = journal('A Star Due For Re-read', openalex_id='S1', rules_status='ready', rules_read_at=old,
+                      venue=Venue.objects.create(name='Live A Star', trust_tier=Venue.TIER_VERIFIED_INDEX))
+    journal('Unrated Never Read', openalex_id='S2')
+    abdc(refresh, 'A*')
+    order = list(ir.reading_order(ir.rules_candidates('business-is')).values_list('title', flat=True))
+    assert order.index('Unrated Never Read') < order.index('A Star Due For Re-read')
+
+
+@pytest.mark.django_db
+def test_the_old_order_is_restored_when_the_switch_is_off(monkeypatch):
+    monkeypatch.setenv('VENUE_INDEX_RULES_ABDC_FIRST', 'false')
+    journal('Huge Unrated Journal', openalex_id='S1', metrics={'works_count': 50000})
+    small = journal('Small A Star Journal', openalex_id='S2', metrics={'works_count': 600})
+    abdc(small, 'A*')
+    order = list(ir.reading_order(ir.rules_candidates('business-is')).values_list('title', flat=True))
+    assert order == ['Huge Unrated Journal', 'Small A Star Journal']
+
+
+@pytest.mark.django_db
+def test_order_is_unchanged_when_no_abdc_data_is_imported():
+    journal('Huge Publisher Journal', openalex_id='S1', metrics={'works_count': 50000})
+    journal('DOAJ Journal', openalex_id='S2', metrics={'works_count': 600},
+            doaj={'guidelines_url': 'https://small.example/guide'})
+    order = list(ir.reading_order(ir.rules_candidates('business-is')).values_list('title', flat=True))
+    assert order == ['DOAJ Journal', 'Huge Publisher Journal']

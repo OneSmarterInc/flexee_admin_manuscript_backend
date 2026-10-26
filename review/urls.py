@@ -2,6 +2,7 @@ from django.urls import path
 from . import views, discovery_api, index_api, claims_api, journal_index_api, plan_api
 from . import author_api
 from . import editor_api
+from . import abdc_api
 from .api_summary import admin_submission_api_summary
 from .security_api import csrf_token
 
@@ -99,6 +100,7 @@ urlpatterns = [
     path('admin/venue-submissions/<uuid:submission_id>/decision/', editor_api.admin_venue_submission_decision),
     path('admin/venue-submissions/<uuid:submission_id>/download/', editor_api.admin_venue_submission_download),
     path('admin/venue-index/', index_api.index_list),
+    path('admin/abdc-journals/', abdc_api.abdc_list, name='abdc-journals'),
     path('admin/venue-index/run/', index_api.index_run_now),
     path('admin/venue-index/stop/', index_api.index_stop_run),
     path('admin/venue-index/schedule/', index_api.index_schedule),

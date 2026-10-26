@@ -984,6 +984,37 @@ class IndexedVenue(models.Model):
         return self.venue.trust_tier if self.venue_id else Venue.TIER_LISTED
 
 
+class ABDCJournal(models.Model):
+    """ABDC source edition facts, independent of publication/verification state."""
+    RATING_CHOICES = [('A*', 'A*'), ('A', 'A'), ('B', 'B'), ('C', 'C')]
+    MATCH_CHOICES = [('matched', 'Matched'), ('pending_review', 'Pending review'), ('unmatched', 'Unmatched')]
+
+    id = models.BigAutoField(primary_key=True)
+    edition = models.PositiveSmallIntegerField(default=2025, db_index=True)
+    source_row = models.PositiveIntegerField()
+    title = models.CharField(max_length=500)
+    publisher = models.CharField(max_length=300, blank=True)
+    issn = models.CharField(max_length=30, blank=True)
+    issn_online = models.CharField(max_length=30, blank=True)
+    year_inception = models.PositiveSmallIntegerField(null=True, blank=True)
+    for_code = models.CharField(max_length=30, blank=True)
+    rating = models.CharField(max_length=2, choices=RATING_CHOICES, db_index=True)
+    source_url = models.URLField(max_length=1000)
+    source_file = models.CharField(max_length=255)
+    indexed_venue = models.ForeignKey('IndexedVenue', on_delete=models.SET_NULL,
+                                       null=True, blank=True, related_name='abdc_ratings')
+    match_status = models.CharField(max_length=24, choices=MATCH_CHOICES, default='unmatched', db_index=True)
+    match_method = models.CharField(max_length=32, blank=True)
+    candidates = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['title']
+        constraints = [models.UniqueConstraint(fields=['edition', 'source_row'],
+                                                name='unique_abdc_edition_source_row')]
+
+
 class VenueIndexRun(models.Model):
     STATUS_CHOICES = [
         ('queued', 'Queued'),

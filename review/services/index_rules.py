@@ -134,9 +134,16 @@ def entry_url(record):
 
 
 def entry_urls(record):
-    """The official URLs to try, in order: DOAJ's author-guidelines page, then the homepage."""
+    """The official URLs to try, in order.
+
+    DOAJ's author-guidelines page first, then any publisher route that is known to answer us, then
+    the homepage. The middle group exists because SAGE and INFORMS refuse our crawler on the host
+    OpenAlex gives us while serving the same guidelines from a host that answers; the code needed to
+    build those addresses is read out of the homepage we already hold. See publisher_routes.
+    """
+    from .publisher_routes import candidates_for
     urls = []
-    for url in ((record.doaj or {}).get('guidelines_url'), record.homepage_url):
+    for url in ((record.doaj or {}).get('guidelines_url'), *candidates_for(record), record.homepage_url):
         if url and url not in urls:
             urls.append(url)
     return urls

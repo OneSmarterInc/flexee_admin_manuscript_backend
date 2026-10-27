@@ -134,9 +134,16 @@ def entry_url(record):
 
 
 def entry_urls(record):
-    """The official URLs to try, in order: DOAJ's author-guidelines page, then the homepage."""
+    """The official URLs to try, in order.
+
+    DOAJ's author-guidelines page first, then any publisher route that is known to answer us, then
+    the homepage. The middle group exists because SAGE and INFORMS refuse our crawler on the host
+    OpenAlex gives us while serving the same guidelines from a host that answers; the code needed to
+    build those addresses is read out of the homepage we already hold. See publisher_routes.
+    """
+    from .publisher_routes import candidates_for
     urls = []
-    for url in ((record.doaj or {}).get('guidelines_url'), record.homepage_url):
+    for url in ((record.doaj or {}).get('guidelines_url'), *candidates_for(record), record.homepage_url):
         if url and url not in urls:
             urls.append(url)
     return urls
@@ -273,6 +280,38 @@ def _match_for(record, candidate):
     return found
 
 
+def _item_from_pages(record, pages, config, hints, *, extractor, min_confidence, escalation, run,
+                     time_left, now, errors):
+    """Turn one set of fetched pages into a stored candidate, or None when nothing could be read.
+
+    Shared by the addresses the index holds and by the pages a search finds, so a searched page is
+    held to exactly the same quote validation as any other.
+    """
+    from . import venue_discovery as vd
+    from .rules_escalation import extract_with_escalation
+    fingerprint = vd.content_fingerprint(pages)
+    own = own_discovered(record)
+    # Reuse only this journal's own earlier reading: another journal on the same page is not this one.
+    previous = own if own is not None and own.content_fingerprint == fingerprint else None
+    if previous and rules_found(previous, min_confidence)[0]:
+        # Unchanged pages that were read well before: reuse, no model call.
+        previous.last_checked_at = now
+        previous.save(update_fields=['last_checked_at', 'updated_at'])
+        vd.reconfirm_live_venue(previous, now)
+        return previous
+    candidate, _attempts = extract_with_escalation(record, pages, config, hints, escalation=escalation,
+                                                   min_confidence=min_confidence, extractor=extractor, run=run,
+                                                   time_left=time_left)
+    if candidate is None:
+        errors.append('The AI could not extract rules from the pages.')
+        return None
+    # This read is about this journal, whatever name a shared page shows.
+    candidate = keep_quoted_rules(dict(candidate, name=record.title[:300] or candidate['name']))
+    item, _outcome = vd.upsert_candidate(candidate, fingerprint,
+                                         existing=own if own is not None else _match_for(record, candidate))
+    return item
+
+
 def read_rules_for(record, fetcher, config, *, extractor=None, min_confidence=40, now=None, blocked_sites=None,
                    escalation=None, run=None, time_left=None):
     """Read one journal's rules. Updates the record; returns its new rules_status.
@@ -308,28 +347,31 @@ def read_rules_for(record, fetcher, config, *, extractor=None, min_confidence=40
         if not any(page.text for page in pages):
             errors.append('The page has no readable text (it may need JavaScript).')
             continue
-        fingerprint = vd.content_fingerprint(pages)
-        own = own_discovered(record)
-        # Reuse only this journal's own earlier reading: another journal on the same page is not this one.
-        previous = own if own is not None and own.content_fingerprint == fingerprint else None
-        if previous and rules_found(previous, min_confidence)[0]:
-            # Unchanged pages that were read well before: reuse, no model call.
-            previous.last_checked_at = now
-            previous.save(update_fields=['last_checked_at', 'updated_at'])
-            vd.reconfirm_live_venue(previous, now)
-            item = previous
-            break
-        candidate, _attempts = extract_with_escalation(record, pages, config, hints, escalation=escalation,
-                                                       min_confidence=min_confidence, extractor=extractor, run=run,
-                                                       time_left=time_left)
-        if candidate is None:
-            errors.append('The AI could not extract rules from the pages.')
-            break  # the pages were read; another URL on the same journal would not help the model
-        # This read is about this journal, whatever name a shared page shows.
-        candidate = keep_quoted_rules(dict(candidate, name=record.title[:300] or candidate['name']))
-        item, _outcome = vd.upsert_candidate(candidate, fingerprint,
-                                             existing=own if own is not None else _match_for(record, candidate))
-        break
+        item = _item_from_pages(record, pages, config, hints, extractor=extractor, min_confidence=min_confidence,
+                                escalation=escalation, run=run, time_left=time_left, now=now, errors=errors)
+        break  # the pages were read; another URL on the same journal would not help the model
+
+    # A page that was fetched is not the same as the right page. California Management Review's
+    # held homepage redirected to sagepub.com/shop/subscribe-to-a-journal/..., which was read
+    # successfully and of course carried no submission rules. Searching only on a failed fetch
+    # would never have fired there, so the search also runs when a page was read and produced
+    # nothing usable, which is the common case rather than the exception.
+    if item is None or not rules_found(item, min_confidence)[0]:
+        # The addresses we hold are often the wrong ones: OpenAlex gives the article-delivery or
+        # marketing host, and Elsevier, SAGE, Wiley and INFORMS refuse our crawler there, while
+        # the guidelines sit on a society site that answers us normally. Ask a search provider
+        # where the page is; it returns the text with the result, so the fetch happens on its side.
+        # Off unless a key is configured, in which case this is a no-op.
+        from .guidelines_search import find_guidelines_pages
+        searched = find_guidelines_pages(record)
+        if searched:
+            found = _item_from_pages(record, searched, config, hints, extractor=extractor,
+                                     min_confidence=min_confidence, escalation=escalation, run=run,
+                                     time_left=time_left, now=now, errors=errors)
+            # Only replace what we have when the search actually produced something; a worse
+            # reading must not overwrite a better one.
+            if found is not None and (item is None or rules_found(found, min_confidence)[0]):
+                item = found
 
     if item is not None:
         if item.origin != 'index' and not item.added_venue_id and item.discovery_status != 'ignored':

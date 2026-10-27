@@ -33,6 +33,11 @@ SEARCH_URL = 'https://api.tavily.com/search'
 MARKERS = ('author guidelines', 'guide for authors', 'submission guidelines', 'instructions for authors',
            'information for contributors', 'author instructions', 'manuscript preparation',
            'submission requirements')
+# Publisher sites carry commerce and marketing pages that mention manuscripts in passing. California
+# Management Review's held homepage redirected to sagepub.com/shop/subscribe-to-a-journal/..., which
+# read cleanly and carried no rules. A result on one of these paths is not the guidelines page.
+REJECT_PATHS = ('/shop/', '/subscribe', '/pricing', '/cart', '/basket', '/checkout', '/order',
+                '/librarians', '/advertis', '/permissions', '/reprints')
 MIN_TEXT = 400
 
 
@@ -64,6 +69,9 @@ def query_for(record):
 
 
 def _looks_like_guidelines(url, title, text):
+    address = url.casefold()
+    if any(path in address for path in REJECT_PATHS):
+        return False
     haystack = f'{url}\n{title}\n{text[:4000]}'.casefold()
     return any(marker in haystack for marker in MARKERS)
 

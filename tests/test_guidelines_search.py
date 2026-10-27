@@ -126,3 +126,52 @@ def test_nothing_changes_when_the_search_finds_nothing(monkeypatch):
     record.refresh_from_db()
     assert record.rules_status == 'blocked'
     assert 'blocked.example' in record.rules_error
+
+
+def test_a_shop_or_subscription_page_is_never_the_guidelines():
+    """California Management Review's held homepage redirected to a subscribe page.
+
+    It fetched cleanly, carried no rules, and the model returned nothing. A result on a commerce
+    path is rejected before the model is asked to look at it, however it is titled.
+    """
+    results = [{'url': 'https://www.sagepub.com/shop/subscribe-to-a-journal/california-management-review-202706',
+                'title': 'Subscribe: California Management Review',
+                'raw_content': 'Submission guidelines for authors. Manuscript preparation. ' * 20}]
+    assert gs.find_guidelines_pages(Rec(), searcher=lambda q: results) == []
+
+
+@pytest.mark.django_db
+def test_a_page_that_reads_cleanly_but_holds_no_rules_still_triggers_a_search(monkeypatch):
+    """The common failure is the wrong page, not a failed fetch.
+
+    Searching only when the fetch fails would never have fired for California Management Review,
+    whose subscribe page was read successfully and produced nothing.
+    """
+    record = journal('Journal of Applied AI in Organizations', openalex_id='S1',
+                     homepage='https://marketing.example/journal')
+    fetcher, config = make_fetcher(JOURNAL_PAGES)
+    good = vd.gather_pages(HOME, fetcher, config)
+    empty = [vd.FetchedPage(url='https://marketing.example/journal', title='Subscribe',
+                            text='Subscribe to this journal today. ' * 40, links=[])]
+
+    monkeypatch.setattr(vd, 'gather_pages', lambda url, f, c: empty)
+    calls = []
+
+    def search(rec, **kw):
+        calls.append(rec.title)
+        return good
+    monkeypatch.setattr('review.services.guidelines_search.find_guidelines_pages', search)
+    run_rules(fetcher)
+    record.refresh_from_db()
+    assert calls, 'the search should have run after a readable page produced no rules'
+    assert record.rules_status == 'ready'
+
+
+@pytest.mark.django_db
+def test_a_search_that_finds_nothing_leaves_the_original_reading_alone(monkeypatch):
+    record = journal('Journal of Applied AI in Organizations', openalex_id='S1')
+    fetcher, _config = make_fetcher(JOURNAL_PAGES)
+    monkeypatch.setattr('review.services.guidelines_search.find_guidelines_pages', lambda rec, **kw: [])
+    run_rules(fetcher)
+    record.refresh_from_db()
+    assert record.rules_status == 'ready'  # the held address worked; the search changed nothing

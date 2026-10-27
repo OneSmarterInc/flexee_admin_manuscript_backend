@@ -344,18 +344,27 @@ def read_rules_for(record, fetcher, config, *, extractor=None, min_confidence=40
                                 escalation=escalation, run=run, time_left=time_left, now=now, errors=errors)
         break  # the pages were read; another URL on the same journal would not help the model
 
-    if item is None:
-        # The addresses we hold did not work. They are often the wrong ones: OpenAlex gives the
-        # article-delivery host, and Elsevier, SAGE, Wiley and INFORMS refuse our crawler there,
-        # while the guidelines themselves sit on a society site that answers us normally. Ask a
-        # search provider where the page is; it returns the text with the result, so the fetch
-        # happens on its side. Off unless a key is configured, in which case this is a no-op.
+    # A page that was fetched is not the same as the right page. California Management Review's
+    # held homepage redirected to sagepub.com/shop/subscribe-to-a-journal/..., which was read
+    # successfully and of course carried no submission rules. Searching only on a failed fetch
+    # would never have fired there, so the search also runs when a page was read and produced
+    # nothing usable, which is the common case rather than the exception.
+    if item is None or not rules_found(item, min_confidence)[0]:
+        # The addresses we hold are often the wrong ones: OpenAlex gives the article-delivery or
+        # marketing host, and Elsevier, SAGE, Wiley and INFORMS refuse our crawler there, while
+        # the guidelines sit on a society site that answers us normally. Ask a search provider
+        # where the page is; it returns the text with the result, so the fetch happens on its side.
+        # Off unless a key is configured, in which case this is a no-op.
         from .guidelines_search import find_guidelines_pages
         searched = find_guidelines_pages(record)
         if searched:
-            item = _item_from_pages(record, searched, config, hints, extractor=extractor,
-                                    min_confidence=min_confidence, escalation=escalation, run=run,
-                                    time_left=time_left, now=now, errors=errors)
+            found = _item_from_pages(record, searched, config, hints, extractor=extractor,
+                                     min_confidence=min_confidence, escalation=escalation, run=run,
+                                     time_left=time_left, now=now, errors=errors)
+            # Only replace what we have when the search actually produced something; a worse
+            # reading must not overwrite a better one.
+            if found is not None and (item is None or rules_found(found, min_confidence)[0]):
+                item = found
 
     if item is not None:
         if item.origin != 'index' and not item.added_venue_id and item.discovery_status != 'ignored':

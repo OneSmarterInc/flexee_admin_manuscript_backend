@@ -110,3 +110,37 @@ def test_duplicates_are_not_tried_twice():
                  doaj={'guidelines_url': 'https://pubsonline.informs.org/page/opre/submission-guidelines'})
     urls = ir.entry_urls(record)
     assert urls.count('https://pubsonline.informs.org/page/opre/submission-guidelines') == 1
+
+
+# --- SAGE's retired per-journal subdomains ---------------------------------------------------
+# Most stored homepages are of this shape: abs.sagepub.com, cde.sagepub.com. The host no longer
+# serves the journal, but the subdomain is the same code the guidelines path wants.
+
+def test_a_per_journal_subdomain_carries_the_code():
+    urls = candidates_for(Rec('http://abs.sagepub.com/'))
+    assert urls[0] == 'https://www.sagepub.com/docs/default-source/msg/ABS'
+
+
+def test_several_retired_subdomains_from_the_index():
+    for homepage, code in (('http://ach.sagepub.com/', 'ACH'), ('http://cde.sagepub.com/', 'CDE'),
+                           ('http://cnc.sagepub.com/', 'CNC'), ('http://adh.sagepub.com/', 'ADH')):
+        assert candidates_for(Rec(homepage))[0].endswith('/msg/' + code), homepage
+
+
+def test_a_subdomain_that_is_not_a_journal_yields_nothing():
+    """www, journals, us, uk and the like are site sections, not journal codes."""
+    for homepage in ('http://www.sagepub.com/', 'https://journals.sagepub.com/',
+                     'https://us.sagepub.com/en-us/nam/journal/business-perspectives-and-research',
+                     'https://info.emeraldinsight.com/', 'https://advertising.sagepub.com/'):
+        assert candidates_for(Rec(homepage)) == [], homepage
+
+
+def test_a_numeric_product_page_yields_nothing():
+    """www.sagepub.com/journals/Journal201729/title has a product id, not a journal code."""
+    assert candidates_for(Rec('http://www.sagepub.com/journals/Journal201729/title')) == []
+    assert candidates_for(Rec('http://www.sagepub.com/journalsProdDesc.nav?prodId=Journal202004')) == []
+
+
+def test_the_path_still_wins_over_the_subdomain():
+    urls = candidates_for(Rec('https://journals.sagepub.com/home/alj'))
+    assert urls[0].endswith('/msg/ALJ')

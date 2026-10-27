@@ -328,11 +328,16 @@ class AddToVenueError(Exception):
         self.detail, self.status, self.code = detail, status, code
 
 
-def add_discovered_to_venue_agent(request, discovered_id):
+def add_discovered_to_venue_agent(request, discovered_id, *, preferred_name=''):
     """Turn a staged DiscoveredVenue into a live Venue plus an active VenueAgentConfig (one transaction).
 
     Shared by Venue Discovery's "Add to Venue Agent" and Venue Index's "Publish".
-    Returns (item, already_added). Raises AddToVenueError."""
+    Returns (item, already_added). Raises AddToVenueError.
+
+    preferred_name names the new Venue instead of the name read off the page. Venue Index passes
+    the journal's own catalogue title, because rules are often read from a publisher's or society's
+    site and the extracted name is then the publisher's, not the journal's. It is used only when a
+    Venue is created here; a venue that already exists is never renamed."""
     from .author_api import build_venue_config_fields, unique_venue_slug
     try:
         with transaction.atomic():
@@ -349,16 +354,21 @@ def add_discovered_to_venue_agent(request, discovered_id):
             if not item.name.strip() or item.venue_type not in {'journal', 'conference', 'publisher'}:
                 raise AddToVenueError('This discovered venue is incomplete and cannot be added.')
             from .services.index_screening import excluded_match
-            blocked_reason = excluded_match(item.name, item.organization_name)
+            # Check the name the venue will actually carry as well, so a preferred name cannot
+            # carry a blocklisted journal past a check that only saw the discovered name.
+            blocked_reason = (excluded_match(item.name, item.organization_name)
+                              or (excluded_match(str(preferred_name).strip(), item.organization_name)
+                                  if str(preferred_name or '').strip() else ''))
             if blocked_reason:
                 raise AddToVenueError(blocked_reason, code='excluded_from_index')
 
             config_fields = build_venue_config_fields(_config_data(item))
             organization, org_created = _organization_for(item)
+            venue_name = (str(preferred_name or '').strip() or item.name)[:300]
             venue = Venue.objects.create(
                 organization=organization,
-                name=item.name[:300],
-                slug=unique_venue_slug(item.name),
+                name=venue_name,
+                slug=unique_venue_slug(venue_name),
                 venue_type=item.venue_type,
                 description=(item.description or '')[:2000],
                 active=True,

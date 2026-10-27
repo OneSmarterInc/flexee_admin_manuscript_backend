@@ -51,16 +51,29 @@ class Command(BaseCommand):
             raise CommandError('More than one platform superuser exists: pass --actor <email>.')
         return found[0]
 
-    def _record_for(self, entry):
+    def _issn_index(self):
+        """Every ISSN in the index, mapped to its record id.
+
+        Built once in Python rather than queried per entry. A JSON "contains" lookup is not
+        supported on SQLite, and the index is small enough that one pass is cheaper than one query
+        per journal anyway.
+        """
+        index = {}
+        for pk, issn_l, issns in IndexedVenue.objects.values_list('id', 'issn_l', 'issns'):
+            for value in [issn_l, *(issns or [])]:
+                key = str(value or '').strip()
+                if key:
+                    index.setdefault(key, pk)
+        return index
+
+    def _record_for(self, entry, issn_index):
         """The index record this entry describes, matched on ISSN then on exact title."""
-        issns = [str(value).strip() for value in (entry.get('issn'), entry.get('issn_online')) if value]
-        for issn in issns:
-            record = (IndexedVenue.objects.filter(issn_l=issn).first()
-                      or IndexedVenue.objects.filter(issns__contains=[issn]).first())
-            if record is not None:
-                return record
+        for value in (entry.get('issn'), entry.get('issn_online')):
+            pk = issn_index.get(str(value or '').strip())
+            if pk is not None:
+                return IndexedVenue.objects.select_related('venue').filter(id=pk).first()
         title = str(entry.get('title') or '').strip()
-        return IndexedVenue.objects.filter(title__iexact=title).first() if title else None
+        return IndexedVenue.objects.select_related('venue').filter(title__iexact=title).first() if title else None
 
     def handle(self, *args, **options):
         path = Path(options['file']).expanduser()
@@ -73,6 +86,7 @@ class Command(BaseCommand):
         if not isinstance(entries, list) or not entries:
             raise CommandError('The file must contain a non-empty list of journal rule objects.')
         actor = self._actor(options['actor'])
+        issn_index = self._issn_index()
 
         # Validate every entry before writing any of them, so a bad file changes nothing.
         prepared, skipped = [], []
@@ -92,7 +106,7 @@ class Command(BaseCommand):
             if not (fields['article_types'] or fields['required_submission_items']
                     or fields['structured_desk_rejection_rules'] or fields['aims_scope']):
                 raise CommandError(f'{title}: no rules in this entry, so there is nothing to load.')
-            record = self._record_for(entry)
+            record = self._record_for(entry, issn_index)
             if record is None:
                 skipped.append((title, 'no index record matches its ISSN or title'))
                 continue

@@ -25,3 +25,6 @@ logs/
 production_e2e_*.json
 backups/
 *.pre-restore-*
+
+# ABDC rules working files
+abdc_work/

@@ -25,7 +25,7 @@ from review.models import ABDCJournal
 OUT_DIR = 'next_batches'
 CSV_PATH = 'next_remaining.csv'
 PER_BATCH = 20
-RATINGS = ('A*', 'A')          # change to ('A*', 'A', 'B', 'C') to go wider
+RATINGS = ('A*', 'A', 'B', 'C')          # change to ('A*', 'A', 'B', 'C') to go wider
 RATING_ORDER = {'A*': 0, 'A': 1, 'B': 2, 'C': 3}
 
 # Measured on 27 October against our own client. Tier 1 patterns are proved to work.

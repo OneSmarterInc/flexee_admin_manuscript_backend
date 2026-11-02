@@ -123,4 +123,22 @@ def test_the_admin_plans_page_does_not_query_per_step(monkeypatch):
     plans = response.json()['plans']
     steps = sum(len(p['steps']) for p in plans)
     assert response.status_code == 200 and len(plans) == 1 and steps >= 4
-    assert len(queries) < steps * 2   # before: several queries for every step
+    # Fixed authentication overhead includes session revocation. The important property
+    # is that adding steps does not add queries (no per-step database lookups).
+    baseline_queries = len(queries)
+    assert baseline_queries <= 8
+    from review.models import SubmissionPlanStep
+    from tests.test_submission_plan import venue
+    plan_id = plans[0]['id']
+    for offset in range(6):
+        extra = venue(f'Extra venue {offset}', f'extra-{offset}')
+        SubmissionPlanStep.objects.create(
+            plan_id=plan_id, order=steps + offset + 1, venue=extra,
+            venue_config=extra.agent_configs.get(), rationale='Performance fixture',
+            effort_class='ready',
+        )
+    with CaptureQueriesContext(connection) as larger_queries:
+        larger_response = admin.get('/api/admin/plans/')
+    assert larger_response.status_code == 200
+    assert sum(len(p['steps']) for p in larger_response.json()['plans']) == steps + 6
+    assert len(larger_queries) == baseline_queries

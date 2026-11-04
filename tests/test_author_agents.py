@@ -307,8 +307,8 @@ class AuthorAgentApiTests(TestCase):
         self.assertEqual(after[first.slug].eligibility, before[first.slug])
         self.assertEqual(after[second.slug].eligibility, before[second.slug])
         fit_summaries = [after[first.slug].fit_summary.lower(), after[second.slug].fit_summary.lower()]
-        self.assertTrue(any('applied-ai' in text for text in fit_summaries))
-        self.assertTrue(any('conference-paper' in text for text in fit_summaries))
+        self.assertTrue(all('no evidence-backed' in text for text in fit_summaries))
+        self.assertNotIn('The manuscript focuses on applied AI in operations.', after[first.slug].reasons)
         self.assertTrue(after[first.slug].evidence)
 
     @patch('review.services.author_agents.ai_chat_json')

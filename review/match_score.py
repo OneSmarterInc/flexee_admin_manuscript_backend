@@ -3,11 +3,10 @@
 The score explains fit from the manuscript's own data and the venue's configured
 rules. It is not a quality ranking and it never changes eligibility.
 
-    Scope fit with aims & topics          40
-    Accepted article type                 25
-    Venue requirements met                20
-    Methods & quality signals             15
+The displayed score is topical relevance only. The legacy breakdown retains
+separate type, requirements and methods diagnostics; these do not add to fit.
 """
+import ast
 import re
 
 WEIGHTS = {'scope': 40, 'type': 25, 'requirements': 20, 'methods': 15}
@@ -19,11 +18,40 @@ itself more most new not now of off on once only or other our out over own same 
 their them then there these they this those through to too under until up upon use used using very was we were what
 when where which while who whom why will with within without would you your journal journals article articles paper
 papers research study studies international review based approach analysis case data new results submission
+comparative comparison evaluation evaluating systematic performance small large model models
 manuscript manuscripts publish publishes published publication publications scope aims author authors work works
 '''.split())
 
 
+ALIASES = {'ai': 'artificial intelligence', 'rag': 'retrieval augmented generation',
+           'nlp': 'natural language processing', 'slm': 'small language model',
+           'llm': 'large language model', 'ml': 'machine learning'}
+
+
+def semantic_text(value):
+    """Extract content, not field names or line numbers, from old/new profiles."""
+    if isinstance(value, str) and value.strip().startswith('{'):
+        try:
+            value = ast.literal_eval(value[:10000])
+        except (ValueError, SyntaxError, RecursionError):
+            return ''
+    if isinstance(value, dict):
+        return str(value.get('text') or value.get('label') or '')
+    return value if isinstance(value, str) else ''
+
+
+def keyword_phrases(values):
+    if isinstance(values, str):
+        values = [values]
+    return [part.strip() for value in (values or [])
+            for part in re.split(r'[;,\n]', semantic_text(value)) if part.strip()]
+
+
 def _terms(text):
+    text = str(text or '').lower()
+    text = re.sub(r'\b(?:small|large) language models?\b', lambda m: m.group(0) + ' artificial intelligence natural language processing', text)
+    text = re.sub(r'\bintelligent\b', 'intelligence', text)
+    text = re.sub(r'\b(' + '|'.join(ALIASES) + r')s?\b', lambda m: ALIASES[m.group(1)], text)
     out = set()
     for token in re.findall(r'[a-zA-Z][a-zA-Z\-]{2,}', str(text or '').lower()):
         for part in token.split('-'):
@@ -37,17 +65,43 @@ def _profile_text(manuscript):
     semantic = (manuscript.parsed_profile or {}).get('semantic') or {}
     parts = []
     if isinstance(semantic, dict):
-        for key in ('topics', 'keywords', 'research_questions', 'contribution', 'summary', 'methods', 'field', 'domains'):
+        for key in ('topics', 'keywords', 'research_questions', 'contribution', 'contributions', 'summary', 'methods', 'field', 'domains'):
             value = semantic.get(key)
             if isinstance(value, list):
-                parts.extend(str(v) for v in value[:20] if not isinstance(v, dict))
+                parts.extend(semantic_text(v) for v in value[:20])
             elif isinstance(value, str):
-                parts.append(value)
+                parts.append(semantic_text(value))
     return ' '.join(parts)
 
 
 def _normalise(label):
     return re.sub(r'[^a-z0-9]+', '_', str(label or '').strip().lower()).strip('_')
+
+
+def domain_connection_unconfirmed(manuscript, config):
+    """Conservative flag, not exclusion: shared technology does not establish
+    the specialist disciplinary contribution required by a scope."""
+    disciplines = (
+        r'accounting|auditing|accountancy',
+        r'law|legal|jurisprudence|litigation',
+        r'microeconomics|macroeconomics|econometrics',
+        r'clinical|medicine|medical|patient|healthcare',
+        r'agricultural|agriculture|agronomy',
+        r'psychology|psychological|psychometric',
+    )
+    scope = (config.aims_scope or '').casefold()
+    manuscript_text = ' '.join([manuscript.title or '', manuscript.abstract or '',
+                                ' '.join(keyword_phrases(manuscript.keywords))]).casefold()
+    required = [pattern for pattern in disciplines if re.search(r'\b(?:' + pattern + r')\b', scope)]
+    return bool(required) and not any(re.search(r'\b(?:' + pattern + r')\b', manuscript_text) for pattern in required)
+
+
+def normalize_article_type(value):
+    label = _normalise(value)
+    return {'research_articles': 'research_article', 'research_paper': 'research_article',
+            'research_papers': 'research_article', 'original_research_article': 'research_article',
+            'review_articles': 'review_article', 'case_studies': 'case_study',
+            'conference_papers': 'conference_paper'}.get(label, label)
 
 
 def compute_match_score(manuscript, config, *, eligibility='needs_changes', violations=0, topic_similarity=None):
@@ -57,11 +111,11 @@ def compute_match_score(manuscript, config, *, eligibility='needs_changes', viol
     from .models import Manuscript
 
     # 1. Scope fit: manuscript title/abstract/keywords/profile vs venue aims, scope and reviewer focus.
-    keywords = [k for k in (manuscript.keywords or []) if str(k).strip()]
+    keywords = keyword_phrases(manuscript.keywords)
     ms_terms = _terms(' '.join([manuscript.title or '', manuscript.abstract or '', ' '.join(map(str, keywords)),
                                 _profile_text(manuscript)]))
     venue_text = ' '.join([config.aims_scope or '', ' '.join(map(str, config.reviewer_criteria or [])),
-                           config.quality_threshold or '', config.venue.name if config.venue_id else ''])
+                           config.quality_threshold or ''])
     venue_terms = _terms(venue_text)
     overlap = ms_terms & venue_terms
     if not config.aims_scope:
@@ -71,7 +125,9 @@ def compute_match_score(manuscript, config, *, eligibility='needs_changes', viol
         if keywords:
             keyword_hits = sum(1 for k in keywords if _terms(k) and _terms(k) <= venue_terms)
             keyword_ratio = keyword_hits / len(keywords)
-            scope_ratio = 0.6 * term_ratio + 0.4 * keyword_ratio
+            primary = _terms((manuscript.title or '').split(':', 1)[0])
+            primary_ratio = min(1.0, len(primary & venue_terms) / max(1, len(primary)) * 2.5)
+            scope_ratio = 0.6 * primary_ratio + 0.25 * keyword_ratio + 0.15 * term_ratio
         else:
             scope_ratio = term_ratio
         if topic_similarity is not None:
@@ -79,11 +135,13 @@ def compute_match_score(manuscript, config, *, eligibility='needs_changes', viol
             # aims are close in meaning (not just in shared words) is not scored as off-topic.
             # nomic-embed-text cosines run about 0.40 (unrelated) to 0.70 (very close).
             semantic_ratio = max(0.0, min(1.0, (topic_similarity - 0.40) / 0.30))
-            scope_ratio = max(scope_ratio, semantic_ratio)
+            # Similar embeddings alone do not establish subject relevance.
+            # Generic academic language must not turn an unrelated scope into a good fit.
+            scope_ratio = max(scope_ratio, min(semantic_ratio, scope_ratio + 0.20))
     scope = round(WEIGHTS['scope'] * min(1.0, scope_ratio))
 
     # 2. Accepted article type.
-    accepted = {_normalise(t) for t in (config.article_types or [])}
+    accepted = {normalize_article_type(t) for t in (config.article_types or [])}
     type_label = _normalise(dict(Manuscript.TYPE_CHOICES).get(manuscript.manuscript_type, manuscript.manuscript_type))
     if not accepted:
         type_points = round(WEIGHTS['type'] * 0.4)  # not configured: unknown, partial credit
@@ -94,28 +152,27 @@ def compute_match_score(manuscript, config, *, eligibility='needs_changes', viol
 
     # 3. Venue requirements met (structured desk-rejection rules).
     rules = len(config.structured_desk_rejection_rules or [])
-    requirements = round(WEIGHTS['requirements'] * (1 - min(violations, rules) / rules)) if rules else WEIGHTS['requirements']
+    requirements = round(WEIGHTS['requirements'] * (1 - min(violations, rules) / rules)) if rules else 0
 
     # 4. Methods & quality signals.
     methods = [m for m in (config.accepted_methods or []) if str(m).strip()]
     if not methods:
-        method_points = WEIGHTS['methods']  # the venue does not restrict methods
+        method_points = 0  # no recorded method restriction is not evidence of topical fit
     else:
         method_terms = _terms(' '.join(map(str, methods)))
         method_points = WEIGHTS['methods'] if ms_terms & method_terms else round(WEIGHTS['methods'] / 3)
 
-    # Requirements and methods only count in proportion to actual topical/type fit, so a venue on an
-    # unrelated subject cannot score well just because it has few rules.
-    fit_factor = min(1.0, (scope + type_points) / ((WEIGHTS['scope'] + WEIGHTS['type']) / 2))
-    requirements = round(requirements * fit_factor)
-    method_points = round(method_points * fit_factor)
-    score = scope + type_points + requirements + method_points
-    if accepted and type_points == 0:
-        score = min(score, 50)  # the venue does not take this kind of manuscript: never a strong fit
-    if eligibility == 'ineligible':
-        score = min(score, 30)  # a failed desk rule caps the score
-    score = max(0, min(100, score))
+    # Subject relevance is independent of submission eligibility. Missing rules
+    # must never inflate fit; routing still uses the existing deterministic gates.
+    score = round(100 * scope_ratio)
+    domain_unknown = domain_connection_unconfirmed(manuscript, config)
+    if domain_unknown:
+        score = min(score, 34)
     label = 'Strong fit' if score >= 75 else 'Good fit' if score >= 55 else 'Partial fit' if score >= 35 else 'Low fit'
+    if domain_unknown:
+        label = 'Discipline needs review'
+    if not config.aims_scope.strip():
+        score, label = None, 'Scope not recorded'
     return {
         'score': score,
         'label': label,

@@ -110,6 +110,10 @@ def journal_search(request):
         page = min(max(1, int(request.GET.get('page', 1))), MAX_PAGE)
     except (TypeError, ValueError):
         page = 1
+    try:
+        page_size = min(max(1, int(request.GET.get('page_size', PAGE_SIZE))), 50)
+    except (TypeError, ValueError):
+        page_size = PAGE_SIZE
 
     live = Venue.objects.author_visible().select_related('organization')
     listed = listed_records()
@@ -131,16 +135,16 @@ def journal_search(request):
     live_list = sorted(live, key=lambda v: (TIER_ORDER.get(v.trust_tier, 3), v.name.lower()))
     listed = listed.order_by('-metrics__works_count', 'title')
     total = len(live_list) + listed.count()
-    start, end = (page - 1) * PAGE_SIZE, page * PAGE_SIZE
+    start, end = (page - 1) * page_size, page * page_size
     records = {r.venue_id: r for r in IndexedVenue.objects.filter(venue__in=[v.id for v in live_list[start:end]])}
     items = [_live_item(v, records.get(v.id)) for v in live_list[start:end]]
     if end > len(live_list):
         from_listed = max(0, start - len(live_list))
-        items += [_listed_item(r) for r in listed[from_listed:from_listed + (PAGE_SIZE - len(items))]]
+        items += [_listed_item(r) for r in listed[from_listed:from_listed + (page_size - len(items))]]
     return JsonResponse({
         'items': items,
-        'pagination': {'page': page, 'page_size': PAGE_SIZE, 'total': total,
-                       'pages': max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)},
+        'pagination': {'page': page, 'page_size': page_size, 'total': total,
+                       'pages': max(1, (total + page_size - 1) // page_size)},
         'counts': {'claimed': Venue.objects.author_visible().filter(trust_tier=Venue.TIER_CLAIMED).count(),
                    'verified_index': Venue.objects.author_visible().filter(trust_tier=Venue.TIER_VERIFIED_INDEX).count(),
                    'listed': listed_records().count()},
@@ -152,7 +156,7 @@ def _rule_messages(config):
     for rule in (config.structured_desk_rejection_rules or []) if config else []:
         if isinstance(rule, dict) and rule.get('message'):
             out.append(rule['message'])
-    return out[:12]
+    return out
 
 
 def _required_items(config):
@@ -164,7 +168,7 @@ def _required_items(config):
                 items.append(str(label))
         elif item:
             items.append(str(item))
-    return items[:15]
+    return items
 
 
 @require_GET
@@ -185,6 +189,12 @@ def journal_venue_page(request, slug):
         'trust': payload['trust'],
         'matchable': venue.trust_tier in Venue.RULE_TIERS,
         'rules': {
+            **{key: view.get(key) for key in (
+                'quality_threshold', 'reviewer_criteria', 'policies', 'disclosures',
+                'desk_rejection_rules', 'structured_desk_rejection_rules',
+                'required_submission_items', 'config_notes', 'current_demand',
+                'submission_capacity', 'retention_days',
+            )},
             'aims_scope': view.get('aims_scope', ''),
             'article_types': view.get('article_types') or [],
             'limits': _rule_messages(config),

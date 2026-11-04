@@ -1,0 +1,26 @@
+{
+  "model": "batmac/gradient-ai-text-detector-onnx",
+  "revision": "776d0164ba0de631036c70f6a146d68a7cd4ea4e",
+  "files": {
+    "model.onnx": {
+      "sha256": "cba9f4d084a15206b0fe91aa74b6af818e503403b1df08893f88316c1a693455",
+      "source": "https://huggingface.co/batmac/gradient-ai-text-detector-onnx/resolve/776d0164ba0de631036c70f6a146d68a7cd4ea4e/onnx/model_q4.onnx",
+      "size": 408012176
+    },
+    "tokenizer.json": {
+      "sha256": "9313554f1d10f9e6addc02ea82c727f7e646d9cfb153d2cb62560b9268dd4ca4",
+      "source": "https://huggingface.co/batmac/gradient-ai-text-detector-onnx/resolve/776d0164ba0de631036c70f6a146d68a7cd4ea4e/tokenizer.json",
+      "size": 8649129
+    },
+    "config.json": {
+      "sha256": "ad6acc7701d399e359ea381088b20f8288bba5de78e8b9512f05f6d11c4f1214",
+      "source": "https://huggingface.co/batmac/gradient-ai-text-detector-onnx/resolve/776d0164ba0de631036c70f6a146d68a7cd4ea4e/config.json",
+      "size": 924
+    },
+    "README.md": {
+      "sha256": "01aa72c673148d1ffbf07051e6bcb2003ee89aa7c669814a8f03d0e059bdf1a9",
+      "source": "https://huggingface.co/batmac/gradient-ai-text-detector-onnx/resolve/776d0164ba0de631036c70f6a146d68a7cd4ea4e/README.md",
+      "size": 3337
+    }
+  }
+}

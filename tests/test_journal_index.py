@@ -27,6 +27,30 @@ def search(**params):
 
 
 @pytest.mark.django_db
+def test_public_rules_include_full_submission_requirements_and_approved_operational_fields():
+    venue = make_venue('Complete Rules', 'complete-rules')
+    fields = {
+        'quality_threshold': 'Original contribution',
+        'config_notes': 'Abstract: 250 words. Keywords: 1–7.',
+        'current_demand': {'topics': ['Accounting']},
+        'submission_capacity': {'monthly': 25},
+        'retention_days': 365,
+        'reviewer_criteria': ['Subject expertise'],
+        'policies': {'anonymous_review': True},
+        'disclosures': ['Funding statement'],
+        'desk_rejection_rules': ['Outside scope'],
+        'structured_desk_rejection_rules': [{'message': f'Limit {i}'} for i in range(16)],
+        'required_submission_items': [{'label': f'Item {i}', 'required': True, 'help_text': 'Supply details'} for i in range(18)],
+    }
+    VenueAgentConfig.objects.filter(venue=venue).update(**fields)
+    rules = Client().get('/api/journals/v/complete-rules/').json()['journal']['rules']
+    for key, value in fields.items():
+        assert rules[key] == value
+    assert len(rules['limits']) == 16
+    assert len(rules['required_items']) == 18
+
+
+@pytest.mark.django_db
 def test_search_lists_live_venues_first_then_listed_journals_with_their_tier():
     make_venue('Field Notes Journal', 'fnj')
     checked = make_venue('Journal of Applied AI', 'jaai')
@@ -81,6 +105,27 @@ def test_pagination_spans_live_and_listed():
 
 
 @pytest.mark.django_db
+def test_eight_result_pages_preserve_order_across_live_and_listed_boundary():
+    for i in range(3):
+        make_venue(f'Live {i}', f'compact-live-{i}')
+    for i in range(15):
+        listed(f'Listed {i:02d}', metrics={'works_count': 1000 - i})
+    responses = [search(page=page, page_size=8) for page in (1, 2, 3)]
+    assert [len(body['items']) for body in responses] == [8, 8, 2]
+    assert responses[0]['pagination'] == {'page': 1, 'page_size': 8, 'total': 18, 'pages': 3}
+    names = [item['name'] for body in responses for item in body['items']]
+    assert names == [f'Live {i}' for i in range(3)] + [f'Listed {i:02d}' for i in range(15)]
+    assert search(tier='listed', page_size=8)['pagination']['total'] == 15
+    assert search(q='Listed 14', page_size=8)['pagination']['pages'] == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('value,expected', [('bad', 20), ('0', 1), ('-8', 1), ('999999', 50)])
+def test_journal_page_size_is_bounded(value, expected):
+    assert search(page_size=value)['pagination']['page_size'] == expected
+
+
+@pytest.mark.django_db
 def test_live_journal_page_shows_rules_tier_date_and_only_live_calls():
     venue = make_venue('Journal of Applied AI', 'jaai')
     Venue.objects.filter(id=venue.id).update(
@@ -132,7 +177,7 @@ def test_topic_similarity_lifts_scope_for_close_meaning_without_shared_words():
     plain = compute_match_score(m, config)
     close = compute_match_score(m, config, topic_similarity=0.70)
     far = compute_match_score(m, config, topic_similarity=0.35)
-    assert close['breakdown']['scope'] == 40 and close['score'] > plain['score']
+    assert plain['score'] < close['score'] <= plain['score'] + 20
     assert far['breakdown']['scope'] == plain['breakdown']['scope']  # never lowers the word-based score
 
 

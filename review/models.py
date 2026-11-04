@@ -1328,3 +1328,35 @@ class PlanEvent(models.Model):
 
     class Meta:
         ordering = ['created_at']
+
+class JournalRuleCheck(models.Model):
+    """A reproducible author-facing check, separate from routing/readiness gates."""
+    manuscript = models.ForeignKey(Manuscript, on_delete=models.CASCADE, related_name='journal_rule_checks')
+    version = models.ForeignKey(ManuscriptVersion, on_delete=models.RESTRICT)
+    venue = models.ForeignKey(Venue, on_delete=models.CASCADE)
+    config = models.ForeignKey(VenueAgentConfig, on_delete=models.RESTRICT)
+    fingerprint = models.CharField(max_length=64)
+    report = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        constraints = [models.UniqueConstraint(fields=['manuscript', 'version', 'venue', 'config', 'fingerprint'], name='unique_journal_rule_check')]
+
+
+class RevokedSession(models.Model):
+    token_hash = models.CharField(max_length=64, primary_key=True)
+    expires_at = models.DateTimeField(db_index=True)
+
+
+class ManuscriptAIDetection(models.Model):
+    """Independent, file-version-specific estimate; never used for eligibility."""
+    version = models.OneToOneField(ManuscriptVersion, on_delete=models.CASCADE, related_name='ai_detection')
+    sha256 = models.CharField(max_length=64)
+    token = models.UUIDField(default=uuid.uuid4)
+    ai_score = models.FloatField(null=True, blank=True)
+    ai_status = models.CharField(max_length=20, default='PENDING', db_index=True)
+    ai_analysis_label = models.CharField(max_length=100, blank=True)
+    ai_processed_at = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    result = models.JSONField(default=dict, blank=True)

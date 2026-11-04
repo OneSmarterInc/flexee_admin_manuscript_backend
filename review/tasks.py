@@ -230,6 +230,7 @@ def run_semantic_readiness_task(job_id, manuscript_id):
     
     try:
         manuscript = Manuscript.objects.get(id=manuscript_id)
+        manuscript._readiness_job_id = job.id
         run_semantic_readiness(manuscript)
         
         job.status = 'completed'
@@ -529,6 +530,8 @@ def _purge_manuscript_content(manuscript, now):
             'updated_at',
         ]
     )
+    from .models import ManuscriptAIDetection
+    ManuscriptAIDetection.objects.filter(version__manuscript=manuscript).delete()
     manuscript.readiness_assessments.all().delete()
     manuscript.venue_matches.all().delete()
     ManuscriptEmbedding.objects.filter(manuscript=manuscript).delete()  # derived from the content

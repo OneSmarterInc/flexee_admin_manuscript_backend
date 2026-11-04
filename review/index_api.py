@@ -10,7 +10,7 @@ from .json_object import json_object
 from .audit import record_audit_event
 from .auth import require_platform_superuser
 from .index_schedule import get_index_schedule, set_index_schedule
-from .models import BlockedPublisher, IndexedVenue, VenueIndexRun
+from .models import BlockedPublisher, IndexedVenue, VenueIndexRun, Venue
 from .services.index_screening import CRITERIA, FLAG_TO_CRITERION, DecisionError, decide, screen_record, blocked_publisher_names
 from .services.index_rules import rules_candidates, rules_field, rules_summary
 from .services.rules_escalation import escalation_stats
@@ -169,7 +169,7 @@ def run_payload(run):
 @require_platform_superuser
 def index_list(request):
     config = IndexConfig()
-    base = IndexedVenue.objects.filter(field_profile=config.profile).select_related('venue', 'discovered')
+    base = IndexedVenue.objects.filter(field_profile=config.profile).exclude(venue_id__in=Venue.objects.filter(exclusion_reason__hidden_from_listings=True).values('pk')).select_related('venue', 'discovered')
     query = request.GET.get('q', '').strip()
     if query:
         base = base.filter(Q(title__icontains=query) | Q(publisher__icontains=query) |

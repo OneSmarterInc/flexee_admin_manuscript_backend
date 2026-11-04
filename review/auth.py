@@ -170,21 +170,21 @@ def _issued_before_password_change(payload, kind):
     try:
         from .models import Author, EditorUser
         if kind == 'admin':
-            changed_at = EditorUser.objects.filter(email=payload.get('u')).values_list('password_changed_at', flat=True).first()
+            changed_at = EditorUser.objects.filter(email__iexact=payload.get('u')).values_list('password_changed_at', flat=True).first()
         else:
             changed_at = Author.objects.filter(id=payload.get('aid')).values_list('password_changed_at', flat=True).first()
     except Exception:
-        return False
+        return True  # Fail closed when revocation cannot be checked.
     if not changed_at:
         return False
-    return int(payload.get('iat', 0)) < int(changed_at.timestamp())
+    return float(payload.get('iat', 0)) < changed_at.timestamp()
 
 
 def issue_session(username):
     secret = _session_secret()
     if not secret:
         raise RuntimeError('ADMIN_SESSION_SECRET is not configured')
-    now = int(time.time())
+    now = time.time()
     hours = int(os.getenv('ADMIN_SESSION_HOURS', '8'))
     payload = {'u': username, 'iat': now, 'exp': now + hours * 3600, 'n': secrets.token_hex(8)}
     body = _b64u(json.dumps(payload, separators=(',', ':')).encode('utf-8'))
@@ -207,6 +207,9 @@ def read_session(request):
         if not payload.get('u'):
             return None
         if _issued_before_password_change(payload, 'admin'):
+            return None
+        from .models import RevokedSession
+        if RevokedSession.objects.filter(token_hash=hashlib.sha256(token.encode()).hexdigest()).exists():
             return None
         return payload
     except Exception:
@@ -289,7 +292,7 @@ def issue_author_session(author_id):
     secret = _session_secret()
     if not secret:
         raise RuntimeError('ADMIN_SESSION_SECRET is not configured')
-    now = int(time.time())
+    now = time.time()
     hours = 24 * 7  # 1 week for authors
     payload = {'aid': str(author_id), 'iat': now, 'exp': now + hours * 3600, 'n': secrets.token_hex(8)}
     body = _b64u(json.dumps(payload, separators=(',', ':')).encode('utf-8'))
@@ -311,6 +314,9 @@ def read_author_session(request):
         if not payload.get('aid'):
             return None
         if _issued_before_password_change(payload, 'author'):
+            return None
+        from .models import RevokedSession
+        if RevokedSession.objects.filter(token_hash=hashlib.sha256(token.encode()).hexdigest()).exists():
             return None
         return payload
     except Exception:
@@ -363,3 +369,28 @@ def validate_password_change(current, new, confirm, *, min_length):
     if new == current:
         return 'The new password must be different from the current password.'
     return ''
+
+
+def revoke_session(request, *, author=False):
+    """Persist revocation of this browser's token without signing out other devices."""
+    from datetime import datetime, timezone
+    from .models import RevokedSession
+    token = request.COOKIES.get(AUTHOR_COOKIE_NAME if author else COOKIE_NAME, '')
+    if not token or '.' not in token or not _session_secret():
+        return
+    try:
+        body, signature = token.split('.', 1)
+        expected = _b64u(hmac.new(_session_secret(), body.encode('ascii'), hashlib.sha256).digest())
+        if not hmac.compare_digest(signature, expected):
+            return
+        payload = json.loads(_b64u_decode(body).decode('utf-8'))
+        expiry = datetime.fromtimestamp(float(payload['exp']), timezone.utc)
+        if not payload.get('aid' if author else 'u'):
+            return
+    except (ValueError, KeyError, TypeError, OverflowError, UnicodeError):
+        return
+    # Do not swallow storage errors: logout must not report success without revocation.
+    RevokedSession.objects.get_or_create(
+        token_hash=hashlib.sha256(token.encode()).hexdigest(),
+        defaults={'expires_at': expiry},
+    )

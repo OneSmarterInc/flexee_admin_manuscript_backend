@@ -1,7 +1,7 @@
 """Topical shortlist for matching (build plan step 5, section 7.1).
 
 Before any language model looks at a manuscript-venue pair, a local embedding model (Ollama, CPU,
-no per-query cost) narrows the matchable venues to the ~30 whose scope is closest to the manuscript.
+no per-query cost) narrows the matchable venues to the ~15 whose scope is closest to the manuscript.
 Only those get the policy gate and the AI fit explanation.
 
 No language model is involved and nothing escalates. If the embedding model cannot be reached, the
@@ -21,7 +21,7 @@ from .local_llm import DEFAULT_OLLAMA_URL
 logger = logging.getLogger(__name__)
 
 DEFAULT_EMBED_MODEL = 'nomic-embed-text'
-DEFAULT_SHORTLIST_SIZE = 30
+DEFAULT_SHORTLIST_SIZE = 15
 MAX_TEXT_CHARS = 6000   # nomic-embed-text reads about 2,000 tokens; the rest is cut by Ollama anyway
 BATCH = 32
 
@@ -107,17 +107,11 @@ def venue_text(venue, config=_MISSING):
 
 
 def manuscript_text(manuscript):
-    semantic = (manuscript.parsed_profile or {}).get('semantic') or {}
+    from ..match_score import _profile_text, keyword_phrases
     parts = [manuscript.title or '',
-             'Keywords: ' + ', '.join(map(str, manuscript.keywords or [])) if manuscript.keywords else '',
+             'Keywords: ' + ', '.join(keyword_phrases(manuscript.keywords)) if manuscript.keywords else '',
              manuscript.abstract or '']
-    if isinstance(semantic, dict):
-        for key in ('summary', 'topics', 'contribution', 'field', 'domains', 'methods'):
-            value = semantic.get(key)
-            if isinstance(value, list):
-                parts.append(', '.join(str(v) for v in value[:15] if not isinstance(v, dict)))
-            elif isinstance(value, str) and value != 'Semantic analysis unavailable':
-                parts.append(value)
+    parts.append(_profile_text(manuscript))
     return _clip('. '.join(p for p in parts if p))
 
 
@@ -211,7 +205,12 @@ def ensure_venue_vectors(venues, *, embed=None, time_limit=None, say=lambda m: N
             say(f'Time limit reached; {len(todo) - start} venues are embedded next time.')
             break
         chunk = todo[start:start + BATCH]
-        new = embed([doc_prefix + text for _v, text, _d in chunk], model=model)
+        try:
+            new = embed([doc_prefix + text for _v, text, _d in chunk], model=model)
+        except EmbeddingUnavailable:
+            if not vectors:
+                raise
+            break  # preserve valid cached vectors when only the new batch fails
         for (venue, _text, digest), vector in zip(chunk, new):
             VenueEmbedding.objects.update_or_create(venue=venue, defaults={'model': model, 'text_hash': digest,
                                                                            'vector': vector})
@@ -268,19 +267,31 @@ def build_shortlist(manuscript, venues, *, size=None, embed=None, prefer=(), tim
                 embed = _with_timeout(embed or _embedder(), time_limit)
             query = manuscript_vector(manuscript, embed=embed)
             vectors = ensure_venue_vectors(venues, embed=embed, time_limit=time_limit)
-            if len(vectors) < len(venues):
-                raise EmbeddingUnavailable(f'{len(venues) - len(vectors)} venues are not embedded yet.')
-            similarity = {v.id: round(dot(query, vectors[v.id]), 4) for v in venues}
+            similarity = {v.id: round(dot(query, vectors[v.id]), 4) for v in venues if v.id in vectors}
+            info['embedding_similarity'] = dict(similarity)
+            if len(vectors) < len(venues) and vectors:
+                info['method'] = 'hybrid'
+                info['note'] = f'{len(venues) - len(vectors)} venues use keyword fallback.'
+                configs = active_configs(venues)
+                from ..match_score import compute_match_score
+                # Use one topical score scale across embedded and unembedded venues.
+                similarity = {v.id: (compute_match_score(manuscript, configs.get(v.id),
+                              topic_similarity=similarity.get(v.id))['score'] or 0) / 100 for v in venues}
         except EmbeddingUnavailable as exc:
             logger.warning('Topical shortlist falls back to keywords: %s', exc)
             info['note'] = str(exc)
             similarity = {}
     if venues and not similarity:
         info['method'] = 'keywords'
-        ms_terms, configs = _manuscript_terms(manuscript), active_configs(venues)
-        similarity = {v.id: _keyword_similarity(ms_terms, v, configs.get(v.id)) for v in venues}
+        configs = active_configs(venues)
+        from ..match_score import compute_match_score
+        similarity = {v.id: (compute_match_score(manuscript, configs.get(v.id))['score'] or 0) / 100 for v in venues}
+    from ..match_score import compute_match_score
+    configs = active_configs(venues)
+    ranking = {v.id: (compute_match_score(manuscript, configs.get(v.id),
+               topic_similarity=info.get('embedding_similarity', {}).get(v.id))['score'] or 0) for v in venues}
     prefer = set(prefer)
-    ranked = sorted(venues, key=lambda v: (-similarity.get(v.id, 0.0), v.id not in prefer, v.name.lower()))
+    ranked = sorted(venues, key=lambda v: (-ranking.get(v.id, 0.0), v.id not in prefer, v.name.lower()))
     kept = ranked[:size]
     info.update(kept=len(kept), similarity=similarity, rank={v.id: i for i, v in enumerate(ranked, 1)})
     if not venues:

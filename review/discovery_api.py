@@ -148,7 +148,7 @@ def discovery_list(request):
     # Type and search filters apply to the tab counts too, so a count always
     # matches what the table can show; the status filter is reported separately.
     # Index journals are approved from Venue Index ("Publish"), so they are not listed here.
-    base = DiscoveredVenue.objects.exclude(origin='index')
+    base = DiscoveredVenue.objects.exclude(origin='index').exclude(added_venue_id__in=Venue.objects.filter(exclusion_reason__hidden_from_listings=True).values('pk'))
     if venue_type in {'journal', 'publisher', 'conference'}:
         base = base.filter(venue_type=venue_type)
     if query:

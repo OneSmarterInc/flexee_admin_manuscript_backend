@@ -16,6 +16,7 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 
 from .json_object import json_object
 from .auth import (
+    revoke_session,
     require_admin,
     require_author,
     issue_author_session,
@@ -540,9 +541,11 @@ def _clean_keywords(value):
 
 
 def _manuscript_payload(item):
+    from .services.ai_detection import detection_payload
     latest_readiness = item.current_readiness().first()
     return {
         'id': str(item.id),
+        **detection_payload(item),
         'created_at': item.created_at.isoformat(),
         'updated_at': item.updated_at.isoformat(),
         'author_name': item.author_name,
@@ -697,6 +700,7 @@ def _match_payload(item):
         'semantic_possible': bool(item.venue_config_id) or item.venue.agent_configs.filter(active=True).exists(),
         'reasons': item.reasons,
         'gaps': item.gaps,
+        'gap_items': item.gap_items or [],
         'evidence': item.evidence,
         'topic_similarity': item.topic_similarity,
         'shortlist_rank': item.shortlist_rank,
@@ -835,6 +839,8 @@ def author_manuscripts(request):
             )
     except StorageQuotaExceeded as exc:
         return JsonResponse(exc.payload(), status=413)
+    from .services.ai_detection import enqueue_detection
+    enqueue_detection(item)
     return JsonResponse({
         'manuscript': _manuscript_payload(item),
         'access_token': access_token,
@@ -990,6 +996,10 @@ def author_update_manuscript(request, manuscript_id):
                 reset_submissions += 1
     except StorageQuotaExceeded as exc:
         return JsonResponse(exc.payload(), status=413)
+
+    if content is not None:
+        from .services.ai_detection import enqueue_detection
+        enqueue_detection(manuscript)
 
     if old_file_name and old_file_name != manuscript.manuscript_file.name and not versions.file_in_use(old_file_name):
         storage = manuscript.manuscript_file.storage
@@ -1229,6 +1239,7 @@ def author_sign_out_other_devices(request):
 
 @require_POST
 def author_logout(request):
+    revoke_session(request, author=True)
     response = JsonResponse({'detail': 'Logged out'})
     clear_author_session_cookie(response)
     return response
@@ -1778,7 +1789,8 @@ def _generate_deterministic_matches(manuscript, latest_readiness, venues):
             gaps.append('This venue does not yet have an active venue-agent configuration.')
             gap_items.append(gap_item('venue_not_configured', gaps[-1], 'out'))
         else:
-            accepted = {_normalise_label(item) for item in config.article_types}
+            from .match_score import normalize_article_type
+            accepted = {normalize_article_type(item) for item in config.article_types}
             manuscript_type = _normalise_label(manuscript.manuscript_type)
             manuscript_type_label = _normalise_label(
                 dict(Manuscript.TYPE_CHOICES).get(manuscript.manuscript_type, manuscript.manuscript_type)
@@ -1803,13 +1815,13 @@ def _generate_deterministic_matches(manuscript, latest_readiness, venues):
                     })
                     eligibility = 'needs_changes'
             else:
-                gaps.append('Accepted article types are not configured for this venue.')
+                gaps.append('Not checked: accepted article types are missing from the journal record.')
                 gap_items.append(gap_item('venue_rules_incomplete', gaps[-1], 'out'))
 
             if config.aims_scope:
                 reasons.append('Aims and scope are configured and ready for semantic fit analysis.')
             else:
-                gaps.append('Aims and scope are not yet configured.')
+                gaps.append('Not checked: aims and scope are missing from the journal record.')
                 gap_items.append(gap_item('venue_rules_incomplete', gaps[-1], 'out'))
 
             desk_violations = _structured_desk_rule_violations(
@@ -1858,7 +1870,7 @@ def _apply_shortlist(manuscript, matches, info):
     for match in matches:
         # Only embedding similarities are stored: keyword overlap is on a different scale and the
         # match score already counts shared words.
-        similarity = info['similarity'].get(match.venue_id) if info['method'] == 'embedding' else None
+        similarity = info.get('embedding_similarity', info['similarity'] if info['method'] == 'embedding' else {}).get(match.venue_id)
         rank = info['rank'].get(match.venue_id)
         if match.topic_similarity != similarity or match.shortlist_rank != rank:
             match.topic_similarity, match.shortlist_rank = similarity, rank
@@ -2138,6 +2150,8 @@ def author_manuscript_versions(request, manuscript_id):
         return JsonResponse(exc.payload(), status=413)
 
     manuscript.refresh_from_db()
+    from .services.ai_detection import enqueue_detection
+    enqueue_detection(manuscript)
     return JsonResponse({
         'version': versions.version_payload(version, current_id=manuscript.current_version_id),
         'manuscript': _manuscript_payload(manuscript),
@@ -2710,7 +2724,7 @@ def author_transfer_submission(request, submission_id):
 @require_admin
 def admin_venues(request):
     if request.method == 'GET':
-        items = Venue.objects.select_related('organization').all()
+        items = Venue.objects.select_related('organization').exclude(pk__in=Venue.objects.filter(exclusion_reason__hidden_from_listings=True).values('pk'))
         if not request.editor_user.platform_superuser:
             org_ids = request.editor_user.memberships.values_list('organization_id', flat=True)
             items = items.filter(organization_id__in=org_ids)
@@ -3130,3 +3144,50 @@ def author_job_status(request, job_id):
         'result_reference': job.reference_id,
         'error': public_error,
     })
+
+@require_http_methods(['GET', 'POST'])
+def author_journal_rule_check(request, manuscript_id, venue_id):
+    """Check current file against a pinned journal configuration; never change routing."""
+    from .models import JournalRuleCheck
+    from .services.journal_checks import ENGINE, digest, evaluate_rules, compare_checks
+    manuscript, error = _author_manuscript_or_error(request, manuscript_id)
+    if error:
+        return error
+    venue = Venue.objects.filter(id=venue_id, active=True, excluded=False).first()
+    if not venue:
+        return JsonResponse({'detail': 'Journal unavailable.'}, status=404)
+    config = _active_config(venue)
+    if not config:
+        return JsonResponse({'detail': 'No active journal rules are available.'}, status=409)
+    if manuscript.content_purged_at:
+        return JsonResponse({'detail': 'Manuscript content was removed under the retention policy.'}, status=409)
+    if not manuscript.current_version_id:
+        if request.method == 'GET':
+            return JsonResponse({'report': None})
+        versions.create_initial_version(manuscript)
+    fingerprint = digest([ENGINE, manuscript.manuscript_sha256, manuscript.manuscript_type, manuscript.disclosure,
+                          config.article_types, config.structured_desk_rejection_rules, config.required_submission_items, config.policies])
+    lookup = dict(manuscript=manuscript, version_id=manuscript.current_version_id, venue=venue, config=config, fingerprint=fingerprint)
+    saved = JournalRuleCheck.objects.filter(**lookup).first()
+    if saved or request.method == 'GET':
+        return JsonResponse({'report': saved.report if saved else None})
+    try:
+        document = load_manuscript_text(manuscript)
+    except Exception:
+        document = None
+    rows = evaluate_rules(manuscript, config, document)
+    previous = JournalRuleCheck.objects.filter(manuscript=manuscript, venue=venue, config=config).exclude(version_id=manuscript.current_version_id).first()
+    rows = compare_checks(rows, previous.report.get('checks', []) if previous else [])
+    counts = {status: sum(x['status'] == status for x in rows) for status in ['failed', 'passed', 'not_checked']}
+    report = dict(engine=ENGINE, manuscript_version=manuscript.current_version.number, config_version=config.version,
+                  checked_at=timezone.now().isoformat(), previous_version=previous.report.get('manuscript_version') if previous else None,
+                  checks=rows, counts=counts,
+                  status='Changes needed' if counts['failed'] else 'No changes needed for the requirements checked' if counts['passed'] else 'Unable to assess',
+                  source_urls=venue.source_urls or [], last_verified_at=venue.last_verified_at.isoformat() if venue.last_verified_at else None)
+    # An upload/config switch during extraction must not attach old results to a new version.
+    with transaction.atomic():
+        current = Manuscript.objects.select_for_update().get(pk=manuscript.pk)
+        if current.current_version_id != manuscript.current_version_id or current.manuscript_sha256 != manuscript.manuscript_sha256 or current.disclosure != manuscript.disclosure or current.manuscript_type != manuscript.manuscript_type:
+            return JsonResponse({'detail': 'Manuscript changed during the check. Please recheck.'}, status=409)
+        saved, _ = JournalRuleCheck.objects.get_or_create(**lookup, defaults={'report': report})
+    return JsonResponse({'report': saved.report})

@@ -2,7 +2,7 @@ Django==5.2.17
 httpx==0.28.1
 httpcore==1.0.9
 python-docx==1.2.0
-pypdf==6.19.0
+pypdf==6.21.4
 gunicorn==23.0.0
 psycopg2-binary==2.9.10
 dj-database-url==3.0.1
@@ -11,3 +11,5 @@ sentry-sdk[django]==2.70.0
 anthropic==1.8.0
 redis>=5.0,<8.0
 cryptography>=42,<51
+
+certifi>=2026.10.19

@@ -104,7 +104,7 @@ def test_strong_fit_scores_high():
     from review.match_score import compute_match_score
     result = compute_match_score(make_manuscript(), make_config(), eligibility='eligible')
     assert result['score'] >= 75 and result['label'] == 'Strong fit'
-    assert result['breakdown']['type'] == 25 and result['breakdown']['requirements'] == 20
+    assert result['breakdown']['type'] == 25 and result['breakdown']['requirements'] == 0
     assert 'inspection' in result['matched_terms']
 
 
@@ -118,12 +118,13 @@ def test_wrong_type_and_unrelated_scope_score_low():
 
 
 @pytest.mark.django_db
-def test_failed_desk_rule_caps_the_score():
+def test_failed_desk_rule_does_not_change_topical_fit():
     from review.match_score import compute_match_score
     config = make_config(structured_desk_rejection_rules=[{'field': 'word_count', 'operator': '>', 'value': 100,
                                                             'message': 'Too long'}])
     result = compute_match_score(make_manuscript(), config, eligibility='ineligible', violations=1)
-    assert result['breakdown']['requirements'] == 0 and result['score'] <= 30
+    assert result['breakdown']['requirements'] == 0
+    assert result['score'] == compute_match_score(make_manuscript(), config)['score']
 
 
 @pytest.mark.django_db
@@ -185,8 +186,8 @@ def test_django_q_scheduler_queues_discovery_at_the_set_time_and_keeps_the_local
 
 
 @pytest.mark.django_db
-def test_type_not_accepted_caps_the_score_even_with_perfect_scope():
+def test_type_not_accepted_is_separate_from_topical_fit():
     from review.match_score import compute_match_score
     config = make_config(article_types=['Book manuscript'])
     result = compute_match_score(make_manuscript(), config)
-    assert result['breakdown']['type'] == 0 and result['score'] <= 50 and result['label'] != 'Strong fit'
+    assert result['breakdown']['type'] == 0 and result['score'] >= 75

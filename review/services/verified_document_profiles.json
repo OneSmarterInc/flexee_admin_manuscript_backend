@@ -1,0 +1,476 @@
+{
+  "International Journal of Information Systems and Supply Chain Management": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://www.igi-global.com/publish/contributor-resources/journal-guidelines-for-submission/?titleid=1097",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        100,
+        150
+      ],
+      "keywords": [
+        5,
+        10
+      ]
+    },
+    "coverage": "Initial article abstract and keywords only. Book reviews excluded; minimum manuscript length and final-stage instructions require separate checks.",
+    "manuscript_types": [
+      "research_article",
+      "review_article",
+      "case_study",
+      "practitioner_article"
+    ]
+  },
+  "International Journal of Information Technology and Web Engineering": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://www.igi-global.com/publish/contributor-resources/journal-guidelines-for-submission/?titleid=1093",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        100,
+        150
+      ],
+      "keywords": [
+        5,
+        10
+      ]
+    },
+    "coverage": "Initial article abstract and keywords only. Book reviews excluded; minimum manuscript length and final-stage instructions require separate checks.",
+    "manuscript_types": [
+      "research_article",
+      "review_article",
+      "case_study",
+      "practitioner_article"
+    ]
+  },
+  "Information Resources Management Journal": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://www.igi-global.com/publish/contributor-resources/journal-guidelines-for-submission/?titleid=1073",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        100,
+        150
+      ],
+      "keywords": [
+        5,
+        10
+      ]
+    },
+    "coverage": "Initial article abstract and keywords only. Book reviews excluded; minimum manuscript length and final-stage instructions require separate checks.",
+    "manuscript_types": [
+      "research_article",
+      "review_article",
+      "case_study",
+      "practitioner_article"
+    ]
+  },
+  "International Journal of Business Intelligence Research": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://www.igi-global.com/publish/contributor-resources/journal-guidelines-for-submission/?titleid=1168",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        100,
+        150
+      ],
+      "keywords": [
+        5,
+        10
+      ]
+    },
+    "coverage": "Initial article abstract and keywords only. Book reviews excluded; minimum manuscript length and final-stage instructions require separate checks.",
+    "manuscript_types": [
+      "research_article",
+      "review_article",
+      "case_study",
+      "practitioner_article"
+    ]
+  },
+  "International Journal of Enterprise Information Systems": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://www.igi-global.com/publish/contributor-resources/journal-guidelines-for-submission/?titleid=1086",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        100,
+        150
+      ],
+      "keywords": [
+        5,
+        10
+      ]
+    },
+    "coverage": "Initial article abstract and keywords only. Book reviews excluded; minimum manuscript length and final-stage instructions require separate checks.",
+    "manuscript_types": [
+      "research_article",
+      "review_article",
+      "case_study",
+      "practitioner_article"
+    ]
+  },
+  "International Journal of Technology and Human Interaction": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://www.igi-global.com/publish/contributor-resources/journal-guidelines-for-submission/?titleid=1084",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        100,
+        150
+      ],
+      "keywords": [
+        5,
+        10
+      ]
+    },
+    "coverage": "Initial article abstract and keywords only. Book reviews excluded; minimum manuscript length and final-stage instructions require separate checks.",
+    "manuscript_types": [
+      "research_article",
+      "review_article",
+      "case_study",
+      "practitioner_article"
+    ]
+  },
+  "Journal of Cases on Information Technology": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://www.igi-global.com/publish/contributor-resources/journal-guidelines-for-submission/?titleid=1075",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        100,
+        150
+      ],
+      "keywords": [
+        5,
+        10
+      ]
+    },
+    "coverage": "Initial article abstract and keywords only. Book reviews excluded; minimum manuscript length and final-stage instructions require separate checks.",
+    "manuscript_types": [
+      "research_article",
+      "review_article",
+      "case_study",
+      "practitioner_article"
+    ]
+  },
+  "Journal of Database Management": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://www.igi-global.com/publish/contributor-resources/journal-guidelines-for-submission/?titleid=1072",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        100,
+        150
+      ],
+      "keywords": [
+        5,
+        10
+      ]
+    },
+    "coverage": "Initial article abstract and keywords only. Book reviews excluded; minimum manuscript length and final-stage instructions require separate checks.",
+    "manuscript_types": [
+      "research_article",
+      "review_article",
+      "case_study",
+      "practitioner_article"
+    ]
+  },
+  "Spektrum Industri": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://journal3.uad.ac.id/index.php/spektrum/about/submissions",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "font": "Times New Roman",
+      "font-size": 12,
+      "spacing": 1,
+      "margins": 0.7874015748031495,
+      "columns": 1,
+      "keywords": [
+        null,
+        6
+      ]
+    },
+    "coverage": "Ambiguous abstract range and appendix-excluding length limit are not automatically enforced."
+  },
+  "Production and Operations Management": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://www.poms.org/journal/author_instructions",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        null,
+        350
+      ],
+      "keywords": [
+        1,
+        6
+      ],
+      "font-size": 11,
+      "spacing": 1.5,
+      "margins": 1,
+      "identity": true
+    },
+    "coverage": "Partial measurable DOCX checks; other requirements need manual review."
+  },
+  "Advances in Educational Technology and Psychology": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://clausiuspress.com/journal/AETP/forAuthors.html",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        100,
+        300
+      ],
+      "keywords": [
+        3,
+        5
+      ],
+      "font": "Times New Roman",
+      "font-size": 10,
+      "spacing": 1,
+      "columns": 1
+    },
+    "coverage": "Partial measurable DOCX checks; other requirements need manual review."
+  },
+  "Event Management": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://cognizantcommunication.com/publication/event-management/",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        null,
+        150
+      ],
+      "keywords": [
+        null,
+        8
+      ]
+    },
+    "coverage": "Partial measurable DOCX checks; other requirements need manual review."
+  },
+  "Journal of Supply Chain and Operations Management": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://jscom.scholasticahq.com/for-authors",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        null,
+        150
+      ],
+      "keywords": [
+        null,
+        5
+      ],
+      "font": "Times New Roman",
+      "font-size": 12,
+      "spacing": 2,
+      "margins": 1,
+      "identity": true
+    },
+    "coverage": "Body formatting only; single-spaced references and page limits need separate review."
+  },
+  "Jurnal Terapan Teknologi Informasi": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://jutei.ukdw.ac.id/index.php/jurnal/about/submissions",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "font-size": 10,
+      "spacing": 1
+    },
+    "coverage": "Partial measurable DOCX checks; other requirements need manual review."
+  },
+  "Academy of Management Journal": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://www.aom.org/publications/journals/publishing-with-aom/author-and-reviewer-resources/author-resources/submitting-to-journal/",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "font": "Times New Roman",
+      "font-size": 12,
+      "spacing": 2,
+      "margins": 1,
+      "identity": true
+    },
+    "coverage": "Partial measurable DOCX checks; other requirements need manual review."
+  },
+  "ACM SIGMIS Database the DATABASE for Advances in Information Systems": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://sigmis.org/the-data-base/submission-guidelines/",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        null,
+        200
+      ]
+    },
+    "coverage": "Formatting suggestions are not mandatory failures. Confirm submission-system abstract separately."
+  },
+  "African Journal of Procurement, Logistics & Supply Chain Management": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://damaacademia.com/index.php/ajplscm/Guide_to_Authors",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        150,
+        250
+      ]
+    },
+    "coverage": "Partial measurable DOCX checks; other requirements need manual review."
+  },
+  "Applied Stochastic Models in Business and Industry": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://onlinelibrary.wiley.com/page/journal/15264025/homepage/forauthors.html",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        null,
+        250
+      ],
+      "keywords": [
+        null,
+        5
+      ]
+    },
+    "coverage": "Partial measurable DOCX checks; other requirements need manual review."
+  },
+  "Embodied Intelligence in Physical Systems": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://www.keaipublishing.com/en/journals/embodied-intelligence-in-physical-systems/guide-for-authors/",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        null,
+        250
+      ],
+      "keywords": [
+        3,
+        8
+      ]
+    },
+    "coverage": "Structured abstract content requires manual review; no single-paragraph requirement."
+  },
+  "Human Resource Management Journal": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://onlinelibrary.wiley.com/page/journal/17488583/homepage/forauthors.html",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "keywords": [
+        null,
+        7
+      ]
+    },
+    "coverage": "Partial measurable DOCX checks; other requirements need manual review."
+  },
+  "IEEE Transactions on Engineering Management": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://www.ieee-tems.org/guidelines-for-authors/",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        200,
+        250
+      ]
+    },
+    "coverage": "Alternative single/double-column formats are allowed; no uniform formatting failure is applied."
+  },
+  "IEEE Transactions on Intelligent Transportation Systems": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://ieee-itss.org/pub/t-its/",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        150,
+        250
+      ],
+      "abstract-paragraphs": 1,
+      "keywords": [
+        null,
+        6
+      ],
+      "spacing": 1
+    },
+    "coverage": "Partial measurable DOCX checks; other requirements need manual review."
+  },
+  "International Journal of Accounting Auditing and Performance Evaluation": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://www.inderscience.com/mobile/inauthors/index.php?pid=71",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "abstract-length": [
+        null,
+        149
+      ],
+      "identity": true,
+      "metadata": true
+    },
+    "coverage": "Abstract must be less than 150 words; preferred font and approximate keywords are not mandatory failures."
+  },
+  "International Journal of Quality & Reliability Management": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://www.emerald.com/journals/author-guidance/1627/emerald-publishing-author-guidelines",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "keywords": [
+        null,
+        6
+      ]
+    },
+    "coverage": "Abstract limit includes keywords and classification; not enforced as an abstract-only count."
+  },
+  "Journal of Humanitarian Logistics and Supply Chain Management": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://www.emerald.com/journals/author-guidance/1627/emerald-publishing-author-guidelines",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "keywords": [
+        null,
+        6
+      ]
+    },
+    "coverage": "Abstract limit includes keywords and classification; not enforced as an abstract-only count."
+  },
+  "Issues in Information Systems": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://iacis.org/iis/guideline.php",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "identity": true
+    },
+    "coverage": "Known author identity only; no guarantee of complete anonymization. Other rules require review."
+  },
+  "Journal of Global Information Management": {
+    "id": "initial-2026-11-02",
+    "source_url": "https://www.igi-global.com/calls-for-papers/journal-global-information-management/1070",
+    "verified_at": "2026-11-02",
+    "stage": "initial_submission",
+    "checks": {
+      "identity": true
+    },
+    "coverage": "Known author identity only; no guarantee of complete anonymization. Other rules require review."
+  }
+}

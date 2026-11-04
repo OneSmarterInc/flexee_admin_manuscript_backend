@@ -226,3 +226,9 @@ else:
 
 
 DEFAULT_FROM_EMAIL = os.getenv('NOTIFY_FROM_EMAIL', 'editor@flexee.org')
+
+# Dedicated CPU detector queue: never consumes readiness/matching jobs.
+Q_CLUSTER['ALT_CLUSTERS'] = {
+    'flexee_detector': {'workers': 1, 'timeout': 660, 'retry': 720,
+                        'queue_limit': 10, 'cpu_affinity': None, 'scheduler': False}
+}

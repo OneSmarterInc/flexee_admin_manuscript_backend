@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -33,7 +34,7 @@ def _semantic_budget_seconds():
 
 
 AGENT_VERSION = 'author-agents-v1'
-DEFAULT_CHUNK_CHARS = 5600
+DEFAULT_CHUNK_CHARS = 3500
 DEFAULT_MAX_CHUNKS = 8
 DEFAULT_CROSSREF_CHECKS = 5
 SUPPORTED_FILES = ('.docx', '.pdf', '.md')
@@ -276,6 +277,8 @@ Return JSON only with these keys and value types:
   "findings": []
 }}
 
+Keep the response compact: summary at most 60 words, at most 3 strings in each topic/method/contribution/limitation list,
+at most 2 evidence points and 2 findings. Use short sentences. Return a complete JSON object within this budget.
 Populate every non-empty value with manuscript-specific content taken from the supplied metadata or numbered
 chunk. Never copy schema labels, instruction text, generic placeholders, or example wording into the response.
 For example, do NOT return strings such as "topic", "method or study design actually visible in this chunk",
@@ -313,6 +316,9 @@ SCHEMA_PLACEHOLDER_VALUES = {
 
 
 def _semantic_values(value, *, limit, item_limit):
+    from ..match_score import semantic_text
+    if isinstance(value, list):
+        value = [semantic_text(item) for item in value]
     values = _clean_string_list(value, limit=limit, item_limit=item_limit)
     return [
         item for item in values
@@ -484,6 +490,28 @@ def _persist_readiness_evidence(manuscript, assessment, findings, model):
         )
 
 
+def _readiness_checkpoint_key(manuscript, chunks):
+    # Include the actual prompts: metadata, text, boundaries and prompt changes
+    # invalidate results. A revised manuscript or a different model starts fresh.
+    identity = [AGENT_VERSION, 'checkpoint-v1', str(manuscript.current_version_id),
+                os.getenv('AI_PROVIDER', ''), os.getenv('OLLAMA_MODEL', ''),
+                os.getenv('ANTHROPIC_MODEL', ''),
+                [_chunk_prompt(manuscript, chunk) for chunk in chunks]]
+    return hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
+
+
+def _save_readiness_checkpoint(manuscript, assessment, checkpoint, total):
+    count = len(checkpoint['results'])
+    assessment.summary = {'checkpoint': checkpoint, 'chunks_analyzed': count,
+                          'chunks_total': total, 'coverage_percent': round(100 * count / total)}
+    assessment.save(update_fields=['summary'])
+    job_id = getattr(manuscript, '_readiness_job_id', None)
+    if job_id:
+        from ..models import ReviewJob
+        ReviewJob.objects.filter(pk=job_id, status='processing').update(
+            progress=min(99, round(100 * count / total)), updated_at=timezone.now())
+
+
 def run_semantic_readiness(manuscript):
     mechanical = manuscript.current_readiness().filter(
         status='completed',
@@ -509,13 +537,28 @@ def run_semantic_readiness(manuscript):
         all_chunks = _chunk_numbered_lines(text)
         if not all_chunks:
             raise AgentInputError('No extractable manuscript text is available for semantic readiness.')
-        selected = _select_chunks(all_chunks)
+        key = _readiness_checkpoint_key(manuscript, all_chunks)
+        checkpoint = {'key': key, 'results': {}}
+        for previous in manuscript.current_readiness().exclude(pk=assessment.pk).filter(
+                engine_version__startswith=f'{AGENT_VERSION}:semantic-readiness').order_by('-created_at')[:20]:
+            saved = (previous.summary or {}).get('checkpoint', {})
+            if saved.get('key') == key and isinstance(saved.get('results'), dict):
+                checkpoint = saved
+                break
+        # Limit work per attempt, not total coverage. Each retry moves on to unread
+        # sections instead of repeatedly sampling the same parts of a long paper.
+        remaining_chunks = [c for c in all_chunks if str(c['index']) not in checkpoint['results']]
+        limit = _env_int('AUTHOR_AGENT_MAX_CHUNKS', DEFAULT_MAX_CHUNKS, minimum=1, maximum=24)
+        selected = remaining_chunks[:limit]
+        _save_readiness_checkpoint(manuscript, assessment, checkpoint, len(all_chunks))
 
         ai_failed = False
-        models = []
-        results = []
+        cached = [checkpoint['results'][k] for k in sorted(checkpoint['results'], key=int)]
+        models = [entry['model'] for entry in cached]
+        results = [entry['result'] for entry in cached]
         failed_chunks = []
-        if not ai_available():
+        available = ai_available()
+        if not available and not results:
             ai_failed = True
         else:
             # A small local model sometimes returns one malformed answer. Retry
@@ -526,7 +569,7 @@ def run_semantic_readiness(manuscript):
             # mid-chunk, so the `except` below and the failure handling further down never run and the
             # assessment stays 'pending' for ever. The budget stops the loop while the process is still ours.
             deadline = run_deadline
-            for index, chunk in enumerate(selected):
+            for index, chunk in enumerate(selected if available else []):
                 last_error = None
                 for _attempt in range(SEMANTIC_CHUNK_ATTEMPTS):
                     remaining = deadline - time.monotonic()
@@ -547,6 +590,8 @@ def run_semantic_readiness(manuscript):
                         continue
                     models.append(model)
                     results.append(result)
+                    checkpoint['results'][str(chunk['index'])] = {'model': model, 'result': result}
+                    _save_readiness_checkpoint(manuscript, assessment, checkpoint, len(all_chunks))
                     last_error = None
                     break
                 if last_error is not None:
@@ -629,6 +674,7 @@ def run_semantic_readiness(manuscript):
             )
 
         summary = {
+            'checkpoint': checkpoint,
             'word_count': mechanical.summary.get('word_count', word_count(text)),
             'blocking_issues': mechanical.summary.get('blocking_issues', 0),
             'warnings': warning_count,
@@ -644,7 +690,7 @@ def run_semantic_readiness(manuscript):
             'chunks_failed': len(failed_chunks),
             # Review 5, R5-20: an exhausted run was saved as a clean 'completed' and its numbers did not
             # add up, because chunks the budget never reached counted as neither analysed nor failed.
-            'chunks_not_attempted': max(0, len(selected) - len(results) - len(failed_chunks)),
+            'chunks_not_attempted': max(0, len(all_chunks) - len(results) - len(failed_chunks)),
             'budget_exhausted': time.monotonic() >= run_deadline,
             'model': model,
             'note': (
@@ -826,6 +872,12 @@ Return JSON only:
   ]
 }}
 
+Each reason and gap must ALSO include "venue_quote": a short exact excerpt from the cited venue field,
+and "manuscript_quote": a short exact excerpt from a cited manuscript evidence point.
+Missing or empty journal fields mean UNKNOWN, never manuscript noncompliance. Do not create gaps from them.
+Do not infer a subject connection merely from generic words such as evaluation, systems, modeling or education.
+If the main contribution is outside the journal's discipline, return no positive fit reasons.
+Never treat the absence of information in the supplied profile as proof it is missing from the manuscript.
 venue_fields may only name fields present in the supplied venue configuration.
 manuscript_evidence_ids may only reference IDs that exist in semantic_profile.evidence_points.
 Do not invent manuscript quotations or line numbers; matching operates on the grounded semantic profile.
@@ -845,6 +897,8 @@ def _sanitize_match_items(value, valid_evidence_ids):
             continue
         out.append({
             'text': text,
+            'venue_quote': _clean_text(item.get('venue_quote'), 400),
+            'manuscript_quote': _clean_text(item.get('manuscript_quote'), 400),
             'venue_fields': _clean_string_list(item.get('venue_fields'), limit=8, item_limit=80),
             'manuscript_evidence_ids': [
                 evidence_id for evidence_id in _clean_string_list(
@@ -865,7 +919,10 @@ def _config_field_excerpt(config, field):
     }
     if field not in allowed:
         return None
-    return _clean_text(json.dumps(getattr(config, field), ensure_ascii=False), 900)
+    value = getattr(config, field)
+    if not value:
+        return None
+    return _clean_text(json.dumps(value, ensure_ascii=False), 900)
 
 
 def _profile_evidence_map(manuscript):
@@ -910,6 +967,28 @@ def _match_evidence(match, config, reasons, gaps):
     return evidence[:60]
 
 
+def _grounded_match_items(items, config, manuscript):
+    points = _profile_evidence_map(manuscript)
+    def normalized(value):
+        return ' '.join(str(value or '').casefold().split())
+    accepted = []
+    for item in items:
+        venue_quote = normalized(item.get('venue_quote'))
+        manuscript_quote = normalized(item.get('manuscript_quote'))
+        fields = [field for field in item['venue_fields'] if _config_field_excerpt(config, field)]
+        evidence_ids = [key for key in item['manuscript_evidence_ids'] if key in points]
+        if len(venue_quote) < 12 or len(manuscript_quote) < 12:
+            continue
+        if not any(venue_quote in normalized(_config_field_excerpt(config, field)) for field in fields):
+            continue
+        if not any(manuscript_quote in normalized(points[key].get('text', '') + ' ' +
+                   (points[key].get('source') or {}).get('excerpt', '')) for key in evidence_ids):
+            continue
+        item = {**item, 'venue_fields': fields, 'manuscript_evidence_ids': evidence_ids}
+        accepted.append(item)
+    return accepted
+
+
 def run_semantic_matching(manuscript, *, venue_ids=None):
     profile = (manuscript.parsed_profile or {}).get('semantic')
     if not isinstance(profile, dict) or not profile:
@@ -924,6 +1003,11 @@ def run_semantic_matching(manuscript, *, venue_ids=None):
     if not matches:
         raise AgentInputError('Run the deterministic venue policy gate before semantic venue matching.')
 
+    # Rebuild the policy gate so earlier AI claims do not accumulate on retries.
+    from ..author_api import _generate_deterministic_matches
+    readiness = manuscript.current_readiness().filter(status='completed').first()
+    if readiness:
+        matches = _generate_deterministic_matches(manuscript, readiness, [m.venue for m in matches])
     models = set()
     errors = []
     updated = []
@@ -944,13 +1028,16 @@ def run_semantic_matching(manuscript, *, venue_ids=None):
             )
             models.add(model)
             evidence_ids = set(_profile_evidence_map(manuscript))
-            reasons = _sanitize_match_items(data.get('reasons'), evidence_ids)
-            gaps = _sanitize_match_items(data.get('gaps'), evidence_ids)
+            reasons = _grounded_match_items(_sanitize_match_items(data.get('reasons'), evidence_ids), config, manuscript)
+            gaps = _grounded_match_items(_sanitize_match_items(data.get('gaps'), evidence_ids), config, manuscript)
+            from ..match_score import compute_match_score
+            if (compute_match_score(manuscript, config, topic_similarity=match.topic_similarity)['score'] or 0) < 35:
+                reasons = []
             semantic_reason_text = [item['text'] for item in reasons]
-            semantic_gap_text = [item['text'] for item in gaps]
+            semantic_gap_text = ['Needs human review: ' + item['text'] for item in gaps]
             
-            fit_summary = _clean_text(data.get('fit_summary'), 1200)
-            evidence = _match_evidence(match, config, reasons, gaps)
+            fit_summary = _clean_text(' '.join(semantic_reason_text), 1200) or 'No evidence-backed subject fit explanation is available; human review is needed.'
+            evidence = list(match.evidence or []) + _match_evidence(match, config, reasons, gaps)
         except Exception as exc:
             errors.append({'venue_id': str(match.venue_id), 'detail': str(exc)})
             models.add('deterministic-fallback')

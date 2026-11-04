@@ -1,0 +1,6 @@
+onnxruntime==1.23.2
+tokenizers==0.22.1
+langdetect==1.0.9
+numpy>=1.24
+pypdf>=5
+python-docx>=1.1

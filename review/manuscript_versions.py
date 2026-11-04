@@ -188,6 +188,8 @@ def purge_version_file(version, now):
     name = version.file.name if version.file else ''
     storage = version.file.storage if version.file else None
     with transaction.atomic():
+        from .models import ManuscriptAIDetection
+        ManuscriptAIDetection.objects.filter(version=version).delete()
         ManuscriptVersion.objects.filter(id=version.id).update(file='', bytes=0, abstract='', parsed_profile={},
                                                                content_purged_at=now)
     if name and storage is not None:

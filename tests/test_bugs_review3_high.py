@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 """High findings of review 3 (C1, P1, Y1, F1 backend part). Each test failed before its fix."""
 import json
 import re
@@ -100,7 +101,7 @@ def test_y1_job_swept_in_the_queue_still_runs_when_the_worker_reaches_it(monkeyp
     from review import tasks
     calls = []
     monkeypatch.setattr(tasks, 'run_semantic_readiness', lambda manuscript: calls.append(manuscript))
-    monkeypatch.setattr(tasks.Manuscript.objects, 'get', lambda **kw: object())
+    monkeypatch.setattr(tasks.Manuscript.objects, 'get', lambda **kw: SimpleNamespace())
     ref = str(uuid.uuid4())
     job = ReviewJob.objects.create(job_type='semantic_readiness', reference_id=ref, status='queued')
     ReviewJob.objects.filter(id=job.id).update(created_at=timezone.now() - timedelta(minutes=15))
@@ -117,7 +118,7 @@ def test_y1_a_job_that_failed_for_another_reason_is_not_run_again(monkeypatch):
     from review import tasks
     calls = []
     monkeypatch.setattr(tasks, 'run_semantic_readiness', lambda manuscript: calls.append(manuscript))
-    monkeypatch.setattr(tasks.Manuscript.objects, 'get', lambda **kw: object())
+    monkeypatch.setattr(tasks.Manuscript.objects, 'get', lambda **kw: SimpleNamespace())
     ref = str(uuid.uuid4())
     job = ReviewJob.objects.create(job_type='semantic_readiness', reference_id=ref, status='failed',
                                    error_message='Model error.')

@@ -12,7 +12,7 @@ from django.views.decorators.http import require_GET, require_POST
 from .json_object import json_object
 from .auth import normalize_email
 from .auth import (
-    clear_session_cookie, issue_session, read_session, remote_hash, require_admin,
+    revoke_session, clear_session_cookie, issue_session, read_session, remote_hash, require_admin,
     set_session_cookie, verify_password, verify_totp, require_platform_superuser,
     hash_password, validate_password_change,
     PASSWORD_CHANGE_MAX_FAILURES, PASSWORD_CHANGE_WINDOW_MINUTES,
@@ -614,6 +614,7 @@ def admin_logout(request):
         user = EditorUser.objects.filter(email=session.get('u')).first()
         record_admin_auth_event(request, 'admin.logout', user=user, username=str(session.get('u') or ''))
     response = JsonResponse({'ok': True})
+    revoke_session(request)
     clear_session_cookie(response)
     response['Cache-Control'] = 'no-store'
     return response

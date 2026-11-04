@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/OneSmarterInc/Ai_Detector",
+  "commit": "76dd83011b7b08c8fe11d7ef86a6ebb8a0fefd36",
+  "source_file": "backend/ai_file_inspector/core/detector.py",
+  "sha256": "9233b03de9acd362777c029af6943abd1de03042d0dfaea4cf86b222977049c2",
+  "integration": "Detector source preserved; wrapper supplies packaged model path and strips text excerpts."
+}

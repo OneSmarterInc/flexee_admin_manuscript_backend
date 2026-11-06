@@ -222,16 +222,58 @@ def run_public_review_task(job_id, submission_id):
                 tags={'job_type': 'public_review'},
             )
 
+def _schedule_readiness_retry(job_id):
+    """Keep the same job/polling ID; scheduled redelivery remains claim-once."""
+    from django_q.models import Schedule
+    with transaction.atomic():
+        job = ReviewJob.objects.select_for_update().get(pk=job_id)
+        if job.status not in ('processing', 'failed') or job.auto_retry_count >= 3:
+            return False
+        manuscript = Manuscript.objects.filter(pk=job.reference_id, content_purged_at__isnull=True).first()
+        if not manuscript or not job.readiness_version or str(manuscript.current_version_id) != job.readiness_version:
+            return False
+        if ReviewJob.objects.filter(job_type=job.job_type, reference_id=job.reference_id,
+                                   status__in=['queued', 'processing']).exclude(pk=job.pk).exists():
+            return False
+        job.auto_retry_count += 1
+        job.retry_at = timezone.now() + timedelta(seconds=30 * 2 ** (job.auto_retry_count - 1))
+        job.status = 'queued'
+        job.completed_at = None
+        job.error_message = ''
+        job.save(update_fields=['auto_retry_count', 'retry_at', 'status', 'completed_at', 'error_message', 'updated_at'])
+        Schedule.objects.create(
+            func='review.tasks.run_semantic_readiness_task',
+            args=repr(job.pk) + ', ' + repr(job.reference_id),
+            schedule_type=Schedule.ONCE, repeats=1, next_run=job.retry_at,
+        )
+        return True
+
+
 @monitor_background_task('semantic_readiness')
 def run_semantic_readiness_task(job_id, manuscript_id):
+    # An old queue delivery must not bypass the scheduled backoff.
+    if ReviewJob.objects.filter(pk=job_id, retry_at__gt=timezone.now()).exists():
+        return
     job = _claim_job(job_id)
     if job is None:
         return
-    
+
     try:
+        from .services.author_agents import AgentInputError
         manuscript = Manuscript.objects.get(id=manuscript_id)
+        version = str(manuscript.current_version_id)
+        if manuscript.content_purged_at or (job.readiness_version and job.readiness_version != version):
+            raise AgentInputError('The manuscript version changed or was removed. Run checks on the current file.')
+        if not job.readiness_version:
+            job.readiness_version = version
+            job.save(update_fields=['readiness_version'])
         manuscript._readiness_job_id = job.id
-        run_semantic_readiness(manuscript)
+        assessment = run_semantic_readiness(manuscript)
+        coverage = (assessment.summary or {}).get('coverage', {})
+        if coverage.get('complete') is False:
+            if _schedule_readiness_retry(job.id):
+                return
+            raise AgentInputError('Automatic retries finished. Completed sections are saved; use Resume analysis to try again.')
         
         job.status = 'completed'
         job.completed_at = timezone.now()
@@ -248,6 +290,9 @@ def run_semantic_readiness_task(job_id, manuscript_id):
         job.error_message = str(e)
         job.completed_at = timezone.now()
         job.save(update_fields=['status', 'error_message', 'completed_at'])
+        from .services.author_agents import AgentInputError
+        if not isinstance(e, (AgentInputError, Manuscript.DoesNotExist)):
+            _schedule_readiness_retry(job.id)
 
 @monitor_background_task('semantic_matching')
 def run_semantic_matching_task(job_id, manuscript_id, venue_ids=None):
@@ -353,7 +398,7 @@ def sweep_stuck_jobs_task():
     candidates = list(
         ReviewJob.objects.filter(status='processing', updated_at__lt=processing_cutoff)
     ) + list(
-        ReviewJob.objects.filter(status='queued', created_at__lt=queued_cutoff)
+        ReviewJob.objects.filter(status='queued', updated_at__lt=queued_cutoff)
     )
     count = 0
 
@@ -369,6 +414,7 @@ def sweep_stuck_jobs_task():
         updated = ReviewJob.objects.filter(
             id=job.id,
             status=previous_status,
+            updated_at=job.updated_at,
         ).update(
             status='failed',
             error_message=message,
@@ -427,6 +473,9 @@ def sweep_stuck_jobs_task():
             # per-row execution status. Never destroy them because a parent job
             # timed out.
             pass
+
+        if job.job_type == 'semantic_readiness':
+            _schedule_readiness_retry(job.id)
 
     return f"Swept {count} stuck jobs."
 

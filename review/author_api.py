@@ -1730,6 +1730,8 @@ def author_readiness(request, manuscript_id):
         'readiness': _readiness_payload(item),
         'mechanical_readiness': _readiness_payload(mechanical) if mechanical else None,
         'semantic_readiness': _readiness_payload(semantic) if semantic else None,
+        'active_semantic_job_id': ReviewJob.objects.filter(job_type='semantic_readiness',
+            reference_id=str(manuscript.pk), status__in=['queued', 'processing']).values_list('pk', flat=True).first(),
     })
 
 
@@ -3134,6 +3136,7 @@ def author_job_status(request, job_id):
             'Background processing timed out. Please try again.' if 'timed out' in raw_error
             else 'Finish the readiness check first: open the Readiness step and wait until the AI has read '
                  'your manuscript, then try again.' if 'semantic readiness' in raw_error
+            else 'Automatic retries finished. Completed sections are saved. Use Resume analysis to try again.' if 'automatic retries finished' in raw_error
             else 'The background job could not be completed. Please try again.'
         )
 
@@ -3142,6 +3145,8 @@ def author_job_status(request, job_id):
         'status': job.status,
         'progress': job.progress,
         'result_reference': job.reference_id,
+        'auto_retry_count': job.auto_retry_count,
+        'retry_at': job.retry_at.isoformat() if job.retry_at else None,
         'error': public_error,
     })
 

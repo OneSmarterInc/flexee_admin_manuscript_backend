@@ -989,6 +989,28 @@ def _grounded_match_items(items, config, manuscript):
     return accepted
 
 
+def _cached_match_call(manuscript, match, config):
+    prompt = _match_prompt(manuscript, match, config)
+    identity = [AGENT_VERSION, str(manuscript.current_version_id), manuscript.manuscript_sha256,
+                str(config.pk), config.version, prompt,
+                {key: os.getenv(key, '') for key in (
+                    'AI_PROVIDER', 'OLLAMA_BASE_URL', 'OLLAMA_MODEL', 'OLLAMA_TEMPERATURE',
+                    'OLLAMA_THINK', 'OLLAMA_NUM_CTX', 'ANTHROPIC_MODEL')}]
+    key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    cached = match.semantic_cache or {}
+    if cached.get('key') == key and isinstance(cached.get('data'), dict):
+        return cached['model'], cached['data']
+    if not ai_available():
+        raise RuntimeError('AI unavailable')
+    model, data = _agent_json(prompt, max_tokens=700, operation='semantic_matching')
+    # Cache only successful object responses; failures remain retryable.
+    if isinstance(data, dict):
+        VenueMatch.objects.filter(pk=match.pk, version__content_purged_at__isnull=True,
+                                  manuscript__content_purged_at__isnull=True).update(
+            semantic_cache={'key': key, 'model': model, 'data': data})
+    return model, data
+
+
 def run_semantic_matching(manuscript, *, venue_ids=None):
     profile = (manuscript.parsed_profile or {}).get('semantic')
     if not isinstance(profile, dict) or not profile:
@@ -1019,13 +1041,9 @@ def run_semantic_matching(manuscript, *, venue_ids=None):
             updated.append(match)
             continue
         try:
-            if not ai_available() or profile.get('summary') == 'Semantic analysis unavailable':
+            if profile.get('summary') == 'Semantic analysis unavailable':
                 raise RuntimeError('AI unavailable')
-            model, data = _agent_json(
-                _match_prompt(manuscript, match, config),
-                max_tokens=700,
-                operation='semantic_matching',
-            )
+            model, data = _cached_match_call(manuscript, match, config)
             models.add(model)
             evidence_ids = set(_profile_evidence_map(manuscript))
             reasons = _grounded_match_items(_sanitize_match_items(data.get('reasons'), evidence_ids), config, manuscript)

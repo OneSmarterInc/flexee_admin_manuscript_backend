@@ -506,6 +506,7 @@ class VenueMatch(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     eligibility = models.CharField(max_length=20, choices=ELIGIBILITY_CHOICES, default='needs_changes')
+    semantic_cache = models.JSONField(default=dict, blank=True)
     fit_summary = models.TextField(blank=True)
     reasons = models.JSONField(default=list, blank=True)
     gaps = models.JSONField(default=list, blank=True)
@@ -695,6 +696,9 @@ class ReviewJob(models.Model):
         ('completed', 'Completed'),
         ('failed', 'Failed')
     ]
+    auto_retry_count = models.PositiveSmallIntegerField(default=0)
+    retry_at = models.DateTimeField(null=True, blank=True)
+    readiness_version = models.CharField(max_length=36, blank=True, default='')
     job_type = models.CharField(max_length=50) # 'semantic_readiness', 'semantic_matches', 'venue_assessment'
     reference_id = models.CharField(max_length=36, db_index=True) # UUID string
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='queued', db_index=True)

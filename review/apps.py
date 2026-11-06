@@ -5,10 +5,11 @@ from django.db.models.signals import post_migrate
 def register_sweeper_schedule(sender, **kwargs):
     from django_q.models import Schedule
 
-    Schedule.objects.get_or_create(
+    Schedule.objects.update_or_create(
         func='review.tasks.sweep_stuck_jobs_task',
         defaults={
-            'schedule_type': Schedule.HOURLY,
+            'schedule_type': Schedule.MINUTES,
+            'minutes': 5,
             'repeats': -1
         }
     )

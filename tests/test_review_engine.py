@@ -33,7 +33,7 @@ class EngineTests(unittest.TestCase):
         self.assertFalse(payload["stream"])
         self.assertEqual(payload["format"], "json")
         self.assertEqual(payload["options"]["num_predict"], 123)
-        self.assertEqual(payload["options"]["num_ctx"], 16384)
+        self.assertEqual(payload["options"]["num_ctx"], 4096)
 
     @patch.dict(os.environ, {"OLLAMA_NUM_CTX": "4096", "AI_PROVIDER": "ollama"})
     def test_chapter_summary_uses_small_context_and_output_budget(self):

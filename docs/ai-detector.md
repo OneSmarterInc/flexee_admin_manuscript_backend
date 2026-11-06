@@ -63,3 +63,9 @@ allowlists are unchanged (TXT utility support does not add TXT to the portal all
 remain usable in the portal but receive Not checked from this detector. No OCR is included.
 
 Latest upstream review: uses the core-only detector from backend/ai_file_inspector/core/detector.py. Flexee owns authentication, version-linked storage and its durable queue; the optional standalone React/Django host is not mounted. The summary card retains the model signal out of 100, not the separate AI-like section-share percentage.
+
+## Automatic startup on this Windows laptop
+
+Run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_detector_startup.ps1` once as the local user. The current-user Task Scheduler entry `Flexee AI Detector Worker` starts at sign-in, uses no saved password or administrator privileges, stays enabled on battery, and restarts its supervisor on failure. The supervisor restarts an exited worker after 15 seconds and uses a mutex and process identity to prevent duplicate launches. It can adopt the recorded live worker after a supervisor restart. Logs and the process record are in the ignored logs directory.
+
+This is local Windows setup, not AWS service provisioning. Processing pauses while the laptop is off or asleep and resumes after it is awake and the user is signed in. PostgreSQL and the detector dependencies must be available. To stop automatic processing intentionally, disable the scheduled task and stop its recorded worker; closing the normal readiness worker does not stop this separate queue.

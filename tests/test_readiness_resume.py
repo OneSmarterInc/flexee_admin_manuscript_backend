@@ -46,7 +46,7 @@ def test_interruption_keeps_checkpoint_and_changed_metadata_invalidates(prepared
         return 'test-model',{'summary':'First section'}
     monkeypatch.setattr(a,'_agent_json',interrupted)
     with pytest.raises(KeyboardInterrupt): a.run_semantic_readiness(prepared)
-    assert prepared.current_readiness().first().summary['chunks_analyzed']==1
+    assert prepared.current_readiness().filter(engine_version__contains='semantic-readiness').first().summary['chunks_analyzed']==1
     prepared.title='Changed title'
     calls.clear()
     monkeypatch.setattr(a,'_agent_json',lambda prompt,**kw:(calls.append(prompt) or ('test-model',{'summary':'Checked'})))

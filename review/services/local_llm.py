@@ -76,6 +76,19 @@ def estimate_prompt_tokens(prompt):
     return max(1, (len(str(prompt or "")) + 3) // 4)
 
 
+def request_context_size(prompt, configured, output_tokens):
+    """Allocate a smaller KV cache for short prompts; never truncate input here."""
+    if os.getenv('OLLAMA_ADAPTIVE_CONTEXT', 'true').lower() != 'true':
+        return configured
+    # Double the existing token estimate plus a framing margin, keeping the
+    # configured context as the ceiling. Larger inputs retain that full ceiling.
+    needed = 2 * estimate_prompt_tokens(prompt) + output_tokens + 512
+    for size in (4096, 8192, 16384, 32768):
+        if size >= needed:
+            return min(configured, size)
+    return configured
+
+
 def assert_prompt_fits_context(prompt, *, num_ctx, num_predict):
     available_prompt_tokens = int(num_ctx) - int(num_predict)
     estimated_prompt_tokens = estimate_prompt_tokens(prompt)
@@ -268,7 +281,7 @@ def ollama_chat_json(
         "format": "json",
         "options": {
             "temperature": temperature,
-            "num_ctx": num_ctx,
+            "num_ctx": request_context_size(prompt, num_ctx, num_predict),
             "num_predict": num_predict,
         },
     }

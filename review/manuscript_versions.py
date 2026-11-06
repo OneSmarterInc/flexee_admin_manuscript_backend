@@ -190,6 +190,7 @@ def purge_version_file(version, now):
     with transaction.atomic():
         from .models import ManuscriptAIDetection
         ManuscriptAIDetection.objects.filter(version=version).delete()
+        VenueMatch.objects.filter(version=version).update(semantic_cache={})
         ManuscriptVersion.objects.filter(id=version.id).update(file='', bytes=0, abstract='', parsed_profile={},
                                                                content_purged_at=now)
     if name and storage is not None:

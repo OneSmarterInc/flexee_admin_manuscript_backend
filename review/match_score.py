@@ -125,7 +125,7 @@ def compute_match_score(manuscript, config, *, eligibility='needs_changes', viol
         if keywords:
             keyword_hits = sum(1 for k in keywords if _terms(k) and _terms(k) <= venue_terms)
             keyword_ratio = keyword_hits / len(keywords)
-            primary = _terms((manuscript.title or '').split(':', 1)[0])
+            primary = _terms(re.sub(r'^\s*manuscript\s+title\s*:\s*', '', manuscript.title or '', flags=re.I))
             primary_ratio = min(1.0, len(primary & venue_terms) / max(1, len(primary)) * 2.5)
             scope_ratio = 0.6 * primary_ratio + 0.25 * keyword_ratio + 0.15 * term_ratio
         else:

@@ -491,6 +491,7 @@ def admin_claim_reject(request, claim_id):
 # ---------------------------------------------------------------------------
 
 @require_POST
+@transaction.atomic
 def editor_set_password(request):
     data = _json(request) or {}
     try:
@@ -499,7 +500,7 @@ def editor_set_password(request):
         return JsonResponse({'detail': 'This link has expired. Ask Flexee for a new one.'}, status=400)
     except signing.BadSignature:
         return JsonResponse({'detail': 'This link is not valid.'}, status=400)
-    user = EditorUser.objects.filter(id=payload.get('user')).first()
+    user = EditorUser.objects.select_for_update().filter(id=payload.get('user')).first()
     if user is None or payload.get('fp') != _password_fingerprint(user):
         return JsonResponse({'detail': 'This link was already used. Sign in, or ask Flexee for a new one.'}, status=400)
     password, confirm = str(data.get('password') or ''), str(data.get('confirm') or '')

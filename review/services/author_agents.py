@@ -500,7 +500,20 @@ def _readiness_checkpoint_key(manuscript, chunks):
     return hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
 
 
+def _lock_live_manuscript(manuscript):
+    """Caller holds an atomic block; serialize derived writes with retention/revision."""
+    from ..models import Manuscript
+    current = Manuscript.objects.select_for_update().filter(pk=manuscript.pk).first()
+    if (current is None or current.content_purged_at
+            or current.current_version_id != manuscript.current_version_id
+            or current.manuscript_sha256 != manuscript.manuscript_sha256):
+        raise AgentInputError('Manuscript changed or its content was removed during analysis.')
+    return current
+
+
+@transaction.atomic
 def _save_readiness_checkpoint(manuscript, assessment, checkpoint, total):
+    _lock_live_manuscript(manuscript)
     count = len(checkpoint['results'])
     assessment.summary = {'checkpoint': checkpoint, 'chunks_analyzed': count,
                           'chunks_total': total, 'coverage_percent': round(100 * count / total)}
@@ -616,8 +629,8 @@ def run_semantic_readiness(manuscript):
                 'limitations': [],
                 'evidence_points': [],
                 'coverage': {
-                    'total_chunks': len(all_chunks), 
-                    'analyzed_chunks': 0, 
+                    'total_chunks': len(all_chunks),
+                    'analyzed_chunks': 0,
                     'complete': False,
                     'chunks_analyzed': 0,
                     'chunks_total': len(all_chunks),
@@ -699,33 +712,35 @@ def run_semantic_readiness(manuscript):
             ),
         }
 
-        manuscript.parsed_profile = {
-            **(manuscript.parsed_profile or {}),
-            'semantic': profile,
-            'semantic_model': model,
-            'semantic_agent_version': AGENT_VERSION,
-        }
-        manuscript.save(update_fields=['parsed_profile', 'updated_at'])
+        with transaction.atomic():
+            _lock_live_manuscript(manuscript)
+            manuscript.parsed_profile = {
+                **(manuscript.parsed_profile or {}),
+                'semantic': profile,
+                'semantic_model': model,
+                'semantic_agent_version': AGENT_VERSION,
+            }
+            manuscript.save(update_fields=['parsed_profile', 'updated_at'])
 
-        assessment.status = 'completed'
-        assessment.completed_at = timezone.now()
-        assessment.engine_version = f'{AGENT_VERSION}:semantic-readiness:{model}'[:100]
-        assessment.summary = summary
-        assessment.findings = combined_findings
-        assessment.save(update_fields=['status', 'completed_at', 'engine_version', 'summary', 'findings'])
-        _persist_readiness_evidence(manuscript, assessment, semantic_findings, model)
+            assessment.status = 'completed'
+            assessment.completed_at = timezone.now()
+            assessment.engine_version = f'{AGENT_VERSION}:semantic-readiness:{model}'[:100]
+            assessment.summary = summary
+            assessment.findings = combined_findings
+            assessment.save(update_fields=['status', 'completed_at', 'engine_version', 'summary', 'findings'])
+            _persist_readiness_evidence(manuscript, assessment, semantic_findings, model)
         return assessment
     except AgentInputError:
         assessment.status = 'failed'
         assessment.completed_at = timezone.now()
         assessment.error = {'detail': 'Semantic readiness input validation failed.'}
-        assessment.save(update_fields=['status', 'completed_at', 'error'])
+        ReadinessAssessment.objects.filter(pk=assessment.pk).update(status=assessment.status, completed_at=assessment.completed_at, error=assessment.error)
         raise
     except Exception as exc:
         assessment.status = 'failed'
         assessment.completed_at = timezone.now()
         assessment.error = {'detail': str(exc)}
-        assessment.save(update_fields=['status', 'completed_at', 'error'])
+        ReadinessAssessment.objects.filter(pk=assessment.pk).update(status=assessment.status, completed_at=assessment.completed_at, error=assessment.error)
         raise AgentExecutionError(str(exc), assessment_id=str(assessment.id)) from exc
 
 
@@ -1053,7 +1068,7 @@ def run_semantic_matching(manuscript, *, venue_ids=None):
                 reasons = []
             semantic_reason_text = [item['text'] for item in reasons]
             semantic_gap_text = ['Needs human review: ' + item['text'] for item in gaps]
-            
+
             fit_summary = _clean_text(' '.join(semantic_reason_text), 1200) or 'No evidence-backed subject fit explanation is available; human review is needed.'
             evidence = list(match.evidence or []) + _match_evidence(match, config, reasons, gaps)
         except Exception as exc:

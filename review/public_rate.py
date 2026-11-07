@@ -31,13 +31,13 @@ def _window_start(now, window_seconds):
     return now - timedelta(seconds=epoch % window_seconds, microseconds=now.microsecond)
 
 
-def hit(request, scope, limit, window_seconds):
+def hit(request, scope, limit, window_seconds, *, identity=None):
     """Count one request. Returns (allowed, retry_after_seconds)."""
     from .models import PublicRequestWindow
 
     now = timezone.now()
     start = _window_start(now, window_seconds)
-    network = remote_hash(request)
+    network = identity or remote_hash(request)
     rows = PublicRequestWindow.objects.filter(scope=scope, remote_hash=network, window_start=start)
     if not rows.update(count=F('count') + 1):
         try:

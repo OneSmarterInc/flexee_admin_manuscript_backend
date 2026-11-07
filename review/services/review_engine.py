@@ -97,16 +97,8 @@ def word_count(text):
 
 
 def extract_text(content, filename):
-    name = str(filename or '').lower()
-    if name.endswith('.docx'):
-        doc = Document(BytesIO(content))
-        return normalize_text('\n'.join(p.text for p in doc.paragraphs))
-    if name.endswith('.pdf'):
-        reader = PdfReader(BytesIO(content))
-        return normalize_text('\n'.join((page.extract_text() or '') for page in reader.pages))
-    if name.endswith('.md'):
-        return normalize_text(content.decode('utf-8', errors='replace'))
-    raise ValueError('Manuscript must be a .docx, .pdf, or .md file')
+    from .document_processing import extract_document
+    return normalize_text(extract_document(content, filename))
 
 
 def _chapter_heading_candidate(value):

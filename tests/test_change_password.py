@@ -157,3 +157,21 @@ def test_editors_do_not_see_author_password_events(author):
     Membership.objects.create(user=editor, organization=Organization.objects.create(name='Org'), role='editor')
     actions = [e['action'] for e in admin_client(editor).get('/api/admin/audit-events/').json()['events']]
     assert 'author.password_changed' not in actions
+
+
+@pytest.mark.django_db
+def test_admin_replacement_session_survives_clock_precision_difference(admin, monkeypatch):
+    from datetime import timedelta
+    from django.utils import timezone
+    from review import auth
+    client = admin_client(admin)
+    other_browser = admin_client(admin)
+    changed_at = timezone.now() + timedelta(seconds=1)
+    # Reproduce clocks disagreeing by a fraction of a millisecond at issuance.
+    monkeypatch.setattr(timezone, 'now', lambda: changed_at)
+    monkeypatch.setattr(auth.time, 'time', lambda: changed_at.timestamp() - 0.0005)
+    response = post(client, ADMIN_URL, current_password='old-admin-password',
+                    new_password='new-admin-password-1', confirm_password='new-admin-password-1')
+    assert response.status_code == 200
+    assert client.get('/api/admin/session/').json()['authenticated'] is True
+    assert other_browser.get('/api/admin/session/').json()['authenticated'] is False

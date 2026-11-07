@@ -161,6 +161,19 @@ def _author_access_error(request, manuscript):
     return None
 
 
+def _analysis_limit(request, manuscript):
+    from .public_rate import hit, limited_response, _env_int
+    identity = hashlib.sha256(('analysis:' + str(manuscript.author_account_id or manuscript.pk)).encode()).hexdigest()
+    for scope, seconds, default, env in (
+        ('author_analysis_minute', 60, 30, 'AUTHOR_ANALYSIS_PER_MINUTE'),
+        ('author_analysis_hour', 3600, 120, 'AUTHOR_ANALYSIS_PER_HOUR'),
+    ):
+        allowed, retry = hit(request, scope, max(1, _env_int(env, default)), seconds, identity=identity)
+        if not allowed:
+            return limited_response(retry)
+    return None
+
+
 def _json_body(request):
     """The request's JSON object, or {} (bug L2: a JSON array or number used to reach .get() and give 500)."""
     try:
@@ -1056,7 +1069,7 @@ def author_register(request):
         # name, not a message with a link in it.
         return JsonResponse({'detail': 'Enter your name only (up to 120 characters, no web addresses).',
                              'field': 'name'}, status=400)
-    
+
     if len(password) < 8:
         return JsonResponse({'detail': 'Password must be at least 8 characters'}, status=400)
 
@@ -1386,11 +1399,12 @@ def author_password_reset_request(request):
     return JsonResponse({'ok': True, 'detail': PASSWORD_RESET_GENERIC_REPLY})
 
 
-def _author_from_reset_token(token):
+def _author_from_reset_token(token, *, lock=False):
     from django.core.signing import BadSignature, SignatureExpired, loads
     try:
         data = loads(token or '', salt=PASSWORD_RESET_SALT, max_age=PASSWORD_RESET_MAX_AGE_SECONDS)
-        author = Author.objects.get(id=data.get('aid'))
+        authors = Author.objects.select_for_update() if lock else Author.objects
+        author = authors.get(id=data.get('aid'))
     except (BadSignature, SignatureExpired, Author.DoesNotExist, ValueError, TypeError):
         return None
     if data.get('fp') != _password_fingerprint(author):
@@ -1399,6 +1413,7 @@ def _author_from_reset_token(token):
 
 
 @require_http_methods(['GET', 'POST'])
+@transaction.atomic
 def author_password_reset_confirm(request):
     """GET ?token= checks a link; POST {token, new_password, confirm_password} sets the password."""
     if request.method == 'GET':
@@ -1409,7 +1424,7 @@ def author_password_reset_confirm(request):
 
     from .auth import hash_password
     data = _json_body(request)
-    author = _author_from_reset_token(str(data.get('token', '')))
+    author = _author_from_reset_token(str(data.get('token', '')), lock=True)
     if not author:
         return JsonResponse({'detail': 'This reset link is invalid or has expired. Request a new one.', 'code': 'invalid_token'}, status=400)
     if data.get('check'):
@@ -1522,7 +1537,7 @@ def author_session(request):
     session = read_author_session(request)
     if not session:
         return JsonResponse({'detail': 'Not logged in'}, status=401)
-    
+
     try:
         author = Author.objects.get(id=session['aid'])
     except Author.DoesNotExist:
@@ -1556,7 +1571,7 @@ def _headline_submission(manuscript):
 def author_manuscripts_list(request):
     author_id = request.flexee_author['aid']
     items = Manuscript.objects.filter(author_account_id=author_id).order_by('-created_at')
-    
+
     result = []
     for m in items:
         sub = _headline_submission(m)
@@ -1573,7 +1588,7 @@ def author_manuscripts_list(request):
                                       if m.matches_seen_at else 0)
         payload['has_file'] = bool(m.manuscript_file) and not m.content_purged_at
         result.append(payload)
-        
+
     return JsonResponse({'manuscripts': result})
 
 
@@ -1598,6 +1613,9 @@ def author_run_readiness(request, manuscript_id):
     access_error = _author_access_error(request, manuscript)
     if access_error:
         return access_error
+    limit_error = _analysis_limit(request, manuscript)
+    if limit_error is not None:
+        return limit_error
 
     assessment = ReadinessAssessment.objects.create(
         manuscript=manuscript,
@@ -1664,19 +1682,22 @@ def author_run_readiness(request, manuscript_id):
             'has_references_section': findings[3]['status'] == 'pass',
             'has_data_availability_statement': findings[4]['status'] == 'pass',
         }
-        manuscript.parsed_profile = profile
-        manuscript.save(update_fields=['parsed_profile', 'updated_at'])
+        with transaction.atomic():
+            from .services.author_agents import _lock_live_manuscript
+            _lock_live_manuscript(manuscript)
+            manuscript.parsed_profile = profile
+            manuscript.save(update_fields=['parsed_profile', 'updated_at'])
 
-        assessment.status = 'completed'
-        assessment.completed_at = timezone.now()
-        assessment.summary = summary
-        assessment.findings = findings
-        assessment.save(update_fields=['status', 'completed_at', 'summary', 'findings'])
+            assessment.status = 'completed'
+            assessment.completed_at = timezone.now()
+            assessment.summary = summary
+            assessment.findings = findings
+            assessment.save(update_fields=['status', 'completed_at', 'summary', 'findings'])
     except Exception as exc:
         assessment.status = 'failed'
         assessment.completed_at = timezone.now()
         assessment.error = {'detail': str(exc)}
-        assessment.save(update_fields=['status', 'completed_at', 'error'])
+        ReadinessAssessment.objects.filter(pk=assessment.pk).update(status=assessment.status, completed_at=assessment.completed_at, error=assessment.error)
         # Review 2, F7: say why, so the screen shows the reason and not "Request failed (422)".
         return JsonResponse({'detail': f'The readiness check could not read the manuscript file: {str(exc)[:200]}',
                              'readiness': _readiness_payload(assessment)}, status=422)
@@ -1693,6 +1714,9 @@ def author_run_semantic_readiness(request, manuscript_id):
     access_error = _author_access_error(request, manuscript)
     if access_error:
         return access_error
+    limit_error = _analysis_limit(request, manuscript)
+    if limit_error is not None:
+        return limit_error
 
     job, _ = _queue_unique_job(
         'semantic_readiness',
@@ -1922,6 +1946,9 @@ def author_generate_matches(request, manuscript_id):
     access_error = _author_access_error(request, manuscript)
     if access_error:
         return access_error
+    limit_error = _analysis_limit(request, manuscript)
+    if limit_error is not None:
+        return limit_error
 
     latest_readiness = manuscript.current_readiness().filter(status='completed').first()
     if not latest_readiness or latest_readiness.status != 'completed':
@@ -1960,6 +1987,9 @@ def author_run_semantic_matches(request, manuscript_id):
     access_error = _author_access_error(request, manuscript)
     if access_error:
         return access_error
+    limit_error = _analysis_limit(request, manuscript)
+    if limit_error is not None:
+        return limit_error
 
     data = _json_body(request)
     venue_ids = data.get('venue_ids')
@@ -2260,6 +2290,9 @@ def author_run_venue_assessment(request, submission_id):
     access_error = _author_access_error(request, submission.manuscript)
     if access_error:
         return access_error
+    limit_error = _analysis_limit(request, submission.manuscript)
+    if limit_error is not None:
+        return limit_error
 
     if submission.status not in EDITABLE_SUBMISSION_STATUSES:
         # Review 3, P5: a packet already sent (or closed) is what the editor has; it is not reassessed or changed.
@@ -3105,7 +3138,7 @@ def author_job_status(request, job_id):
         job = ReviewJob.objects.get(id=job_id)
     except ReviewJob.DoesNotExist:
         return JsonResponse({'detail': 'Job not found'}, status=404)
-        
+
     if job.job_type in ('semantic_readiness', 'semantic_matches', 'submission_plan'):
         try:
             item = Manuscript.objects.get(id=job.reference_id)
@@ -3176,6 +3209,9 @@ def author_journal_rule_check(request, manuscript_id, venue_id):
     saved = JournalRuleCheck.objects.filter(**lookup).first()
     if saved or request.method == 'GET':
         return JsonResponse({'report': saved.report if saved else None})
+    limit_error = _analysis_limit(request, manuscript)
+    if limit_error is not None:
+        return limit_error
     try:
         document = load_manuscript_text(manuscript)
     except Exception:

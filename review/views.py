@@ -600,7 +600,7 @@ def admin_change_password(request):
     record_audit_event(request, 'admin.password_changed', resource_type='admin_session', resource_id=user.id)
 
     # Keep this browser signed in with a fresh session; older sessions stop working.
-    token, max_age = issue_session(user.email)
+    token, max_age = issue_session(user.email, not_before=user.password_changed_at)
     response = JsonResponse({'ok': True})
     set_session_cookie(response, token, max_age)
     return response

@@ -180,11 +180,13 @@ def _issued_before_password_change(payload, kind):
     return float(payload.get('iat', 0)) < changed_at.timestamp()
 
 
-def issue_session(username):
+def issue_session(username, *, not_before=None):
     secret = _session_secret()
     if not secret:
         raise RuntimeError('ADMIN_SESSION_SECRET is not configured')
-    now = time.time()
+    # The replacement cookie must not predate the password timestamp when
+    # datetime.now() and time.time() differ in precision (notably on Windows).
+    now = max(time.time(), not_before.timestamp()) if not_before is not None else time.time()
     hours = int(os.getenv('ADMIN_SESSION_HOURS', '8'))
     payload = {'u': username, 'iat': now, 'exp': now + hours * 3600, 'n': secrets.token_hex(8)}
     body = _b64u(json.dumps(payload, separators=(',', ':')).encode('utf-8'))

@@ -63,3 +63,20 @@ def test_chunk_limit_advances_on_retry(prepared,monkeypatch):
     second=a.run_semantic_readiness(prepared)
     assert second.summary['coverage']['complete'] is True
     assert len(calls)==2 and 'CHUNK 2' in calls[1]
+
+
+@pytest.mark.django_db
+def test_default_processes_more_than_eight_sections_without_scheduled_retry(prepared, monkeypatch):
+    monkeypatch.delenv('AUTHOR_AGENT_MAX_CHUNKS', raising=False)
+    text = '\n'.join('Section content' for _ in range(16))
+    monkeypatch.setattr(a, 'load_manuscript_text', lambda m: text)
+    monkeypatch.setattr(a, '_chunk_numbered_lines', lambda text: [
+        {'index': i, 'start_line': i, 'end_line': i, 'text': 'Section content'}
+        for i in range(1,17)])
+    calls = []
+    monkeypatch.setattr(a, '_agent_json', lambda prompt, **kw:
+        (calls.append(prompt) or ('test-model', {'summary': 'Checked section'})))
+    result = a.run_semantic_readiness(prepared)
+    assert len(calls) == 16
+    assert result.summary['coverage']['complete'] is True
+    assert result.summary['chunks_not_attempted'] == 0

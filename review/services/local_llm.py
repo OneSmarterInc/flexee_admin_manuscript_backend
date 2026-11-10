@@ -277,7 +277,7 @@ def ollama_chat_json(
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
-        "keep_alive": "5m",
+        "keep_alive": os.getenv("OLLAMA_KEEP_ALIVE", "15m"),
         "format": "json",
         "options": {
             "temperature": temperature,

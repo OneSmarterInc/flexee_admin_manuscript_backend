@@ -648,12 +648,12 @@ class AuthorAgentApiTests(TestCase):
         ).order_by('-created_at').first()
         self.assertIsNotNone(assessment)
 
-        # AUTHOR_AGENT_MAX_CHUNKS defaults to 8
-        self.assertEqual(assessment.summary['chunks_analyzed'], 8)
+        # Default processes all sections when calls fit within the time budget
+        self.assertEqual(assessment.summary['chunks_analyzed'], 25)
         self.assertEqual(assessment.summary['chunks_total'], 25)
-        self.assertEqual(assessment.summary['coverage_percent'], 32)
+        self.assertEqual(assessment.summary['coverage_percent'], 100)
         
         # Verify same on the nested coverage dict
-        self.assertEqual(assessment.summary['coverage']['chunks_analyzed'], 8)
+        self.assertEqual(assessment.summary['coverage']['chunks_analyzed'], 25)
         self.assertEqual(assessment.summary['coverage']['chunks_total'], 25)
-        self.assertEqual(assessment.summary['coverage']['coverage_percent'], 32)
+        self.assertEqual(assessment.summary['coverage']['coverage_percent'], 100)

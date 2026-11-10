@@ -470,11 +470,12 @@ def _aggregate_profile(chunk_results, *, total_chunks, analyzed_chunks):
 
 
 def _persist_readiness_evidence(manuscript, assessment, findings, model):
+    rows = []
     for finding in findings:
         source = finding.get('source') if isinstance(finding, dict) else None
         if not isinstance(source, dict) or source.get('type') != 'manuscript':
             continue
-        EvidenceFinding.objects.create(
+        rows.append(EvidenceFinding(
             manuscript=manuscript,
             finding_type=f"agent:readiness:{finding.get('code', 'finding')}"[:100],
             claim=_clean_text(finding.get('detail'), 1200),
@@ -487,7 +488,9 @@ def _persist_readiness_evidence(manuscript, assessment, findings, model):
                 'model': model,
                 'grounding': 'validated manuscript line range',
             },
-        )
+        ))
+
+    EvidenceFinding.objects.bulk_create(rows, batch_size=100)
 
 
 def _readiness_checkpoint_key(manuscript, chunks):
@@ -561,7 +564,9 @@ def run_semantic_readiness(manuscript):
         # Limit work per attempt, not total coverage. Each retry moves on to unread
         # sections instead of repeatedly sampling the same parts of a long paper.
         remaining_chunks = [c for c in all_chunks if str(c['index']) not in checkpoint['results']]
-        limit = _env_int('AUTHOR_AGENT_MAX_CHUNKS', DEFAULT_MAX_CHUNKS, minimum=1, maximum=24)
+        # By default finish all remaining sections within the existing wall-clock budget.
+        # An explicit operator limit still applies; checkpoints preserve unfinished work.
+        limit = _env_int('AUTHOR_AGENT_MAX_CHUNKS', len(remaining_chunks) or 1, minimum=1, maximum=max(24, len(remaining_chunks)))
         selected = remaining_chunks[:limit]
         _save_readiness_checkpoint(manuscript, assessment, checkpoint, len(all_chunks))
 
@@ -1118,11 +1123,21 @@ def _citation_checks(text, manuscript_sha, *, deadline=None):
     )
     rng = random.Random(str(manuscript_sha or ''))
     sampled = rng.sample(citations, count) if len(citations) > count else list(citations)
-    results = []
-    for citation in sampled:
+    from concurrent.futures import ThreadPoolExecutor
+
+    def verify(citation):
         if deadline is not None and time.monotonic() >= deadline:
-            break
-        result = _verify_citation_crossref(citation)
+            return None
+        return _verify_citation_crossref(citation)
+
+    # Only two network requests at once; preserve sample order and all results.
+    # Each queued lookup checks the deadline before starting.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        verified = list(pool.map(verify, sampled))
+    results = []
+    for citation, result in zip(sampled, verified):
+        if result is None:
+            continue
         results.append({
             'citation': _clean_text(citation, 700),
             'status': result.get('status', 'not found'),

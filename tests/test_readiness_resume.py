@@ -80,3 +80,25 @@ def test_default_processes_more_than_eight_sections_without_scheduled_retry(prep
     assert len(calls) == 16
     assert result.summary['coverage']['complete'] is True
     assert result.summary['chunks_not_attempted'] == 0
+
+
+def test_default_chunks_keep_every_numbered_line(monkeypatch):
+    monkeypatch.delenv('AUTHOR_AGENT_CHUNK_CHARS', raising=False)
+    text = '\n'.join(f'Line {i}: ' + 'research evidence ' * 15 for i in range(180))
+    chunks = a._chunk_numbered_lines(text)
+    old_chunks = a._chunk_numbered_lines(text, max_chars=3500)
+    assert len(chunks) == len(old_chunks)
+    assert '\n'.join(c['text'] for c in chunks) == '\n'.join(
+        f'[L{i}] {line.rstrip()}' for i, line in enumerate(text.splitlines(), 1))
+    assert chunks[0]['start_line'] == 1
+    assert chunks[-1]['end_line'] == 180
+
+
+@pytest.mark.django_db
+def test_readiness_records_section_timings(prepared, monkeypatch):
+    monkeypatch.setattr(a, '_agent_json', lambda *args, **kwargs:
+        ('test-model', {'summary': 'Checked'}))
+    result = a.run_semantic_readiness(prepared)
+    timings = result.summary['chunk_timings']
+    assert [t['chunk'] for t in timings] == [1, 2]
+    assert all(t['completed'] and t['attempts'] == 1 and t['seconds'] >= 0 for t in timings)

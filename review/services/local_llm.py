@@ -242,8 +242,10 @@ def ollama_chat_json(
     timeout=None,
     num_ctx=None,
     return_usage=False,
+    response_schema=None,
+    model_override=None,
 ):
-    if _shared_qwen_settings()['enabled']:
+    if model_override is None and _shared_qwen_settings()['enabled']:
         return shared_qwen_chat_json(
             prompt,
             max_tokens=max_tokens,
@@ -255,7 +257,7 @@ def ollama_chat_json(
     import httpx
 
     base_url = os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_URL).rstrip("/")
-    model = os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL).strip() or DEFAULT_OLLAMA_MODEL
+    model = model_override or os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL).strip() or DEFAULT_OLLAMA_MODEL
     num_ctx = int(
         num_ctx if num_ctx is not None else os.getenv(
             "OLLAMA_NUM_CTX", str(DEFAULT_OLLAMA_NUM_CTX)
@@ -278,7 +280,7 @@ def ollama_chat_json(
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
         "keep_alive": os.getenv("OLLAMA_KEEP_ALIVE", "15m"),
-        "format": "json",
+        "format": response_schema or "json",
         "options": {
             "temperature": temperature,
             "num_ctx": request_context_size(prompt, num_ctx, num_predict),
@@ -321,6 +323,9 @@ def ollama_chat_json(
         content = payload.get("message", {}).get("content", "")
     except (ValueError, AttributeError) as exc:
         raise RuntimeError("Ollama returned an invalid JSON response") from exc
+
+    if payload.get("done_reason") == "length":
+        raise RuntimeError("Ollama response reached its output token limit before completion.")
 
     content = _strip_thinking(content)
     if not content:

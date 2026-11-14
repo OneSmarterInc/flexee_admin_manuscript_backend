@@ -1,3 +1,4 @@
+from .author_ai_api import author_ai_settings
 from django.urls import path
 from . import views, discovery_api, index_api, claims_api, journal_index_api, plan_api
 from . import author_api
@@ -24,6 +25,7 @@ urlpatterns = [
     path('author/password-reset/', author_api.author_password_reset_request),
     path('author/password-reset/confirm/', author_api.author_password_reset_confirm),
     path('author/session/', author_api.author_session),
+    path('author/ai-settings/', author_ai_settings),
     path('author/jobs/<int:job_id>/', author_api.author_job_status),
     path('author/manuscripts/list/', author_api.author_manuscripts_list),
     path('author/manuscripts/', author_api.author_manuscripts),

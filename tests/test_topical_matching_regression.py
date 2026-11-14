@@ -80,3 +80,49 @@ def test_shared_ai_is_not_enough_for_accounting_or_law():
     assert compute_match_score(m,c,topic_similarity=.9)['label']=='Discipline needs review'
     m.abstract='We examine legal implications of artificial intelligence and law.'
     assert compute_match_score(m,c,topic_similarity=.9)['score'] > 34
+
+
+@pytest.mark.django_db
+def test_abstract_and_contribution_outweigh_case_study_title():
+    m=make_manuscript(title='Comparative Evaluation of SLMs: A Case Study on FLEXEE Supply Chain Manual',
+        abstract='We benchmark small language models and retrieval augmented generation, measuring reasoning and information retrieval accuracy.',
+        keywords=['SLMs', 'RAG', 'language model benchmarking'],
+        parsed_profile={'semantic': {'topics': ['Supply chain management'] * 20,
+            'contributions': ['Benchmark of small language models in retrieval augmented generation']}})
+    ai=make_config(aims_scope='Artificial intelligence, natural language processing, information retrieval and machine learning.')
+    supply=make_config(slug='supply-context',aims_scope='Supply chain management, operations, logistics and business education.')
+    assert compute_match_score(m,ai)['score'] > compute_match_score(m,supply)['score']
+    m.abstract='We study supply chain management, logistics, inventory and procurement operations.'
+    m.keywords=['supply chain management', 'logistics', 'procurement']
+    m.parsed_profile={'semantic': {'contributions': ['New procurement and inventory methods for supply chain management']}}
+    assert compute_match_score(m,supply)['score'] > compute_match_score(m,ai)['score']
+
+
+@pytest.mark.django_db
+def test_quality_and_reviewer_text_cannot_inflate_topic_score():
+    m = make_manuscript(title='AI language model benchmarking',
+        abstract='We benchmark artificial intelligence for information retrieval.', keywords=['AI', 'RAG'])
+    c = make_config(aims_scope='Medieval history and archaeological excavations.')
+    baseline = compute_match_score(m, c)
+    c.reviewer_criteria = ['Artificial intelligence and language model expertise']
+    c.quality_threshold = 'Novel information retrieval and retrieval augmented generation performance'
+    assert compute_match_score(m, c)['score'] == baseline['score']
+    assert compute_match_score(m, c)['matched_terms'] == baseline['matched_terms']
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('similarity', [float('nan'), float('inf'), float('-inf')])
+def test_invalid_embedding_does_not_change_score(similarity):
+    m, c = make_manuscript(), make_config()
+    assert compute_match_score(m, c, topic_similarity=similarity)['score'] == compute_match_score(m, c)['score']
+
+@pytest.mark.django_db
+def test_complete_scope_and_literal_quotes_are_validated():
+    from review.services.author_agents import _grounded_match_items
+    m = make_manuscript(parsed_profile={'semantic': {'evidence_points': [
+        {'id': 'M001', 'text': 'We evaluate language models in information retrieval.'}]}})
+    c = make_config(aims_scope=('General background. ' * 70) + 'We welcome "information retrieval" research.')
+    item = {'text': 'Relevant research contribution.', 'venue_fields': ['aims_scope'],
+        'venue_quote': '"information retrieval" research',
+        'manuscript_evidence_ids': ['M001'], 'manuscript_quote': 'language models in information retrieval'}
+    assert _grounded_match_items([item], c, m)
+    assert not _grounded_match_items([{**item, 'venue_quote': 'fabricated unrelated research'}], c, m)

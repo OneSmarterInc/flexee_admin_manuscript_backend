@@ -109,7 +109,7 @@ def _anthropic_chat_json(
     raw = _strip_fences(raw.strip())
     stop_reason = getattr(message, 'stop_reason', None)
     if stop_reason == 'refusal' or not raw:
-        # Review 4, Y7: Anthropic billed for this call even though there is no answer to use — a reply that
+        # Review 4, Y7: Anthropic billed for this call even though there is no answer to use â€” a reply that
         # is all thinking and stopped at max_tokens, or a refusal. The usage it reported travels with the
         # exception so the failure is recorded at its real cost instead of zero.
         detail = ('Anthropic declined this request (stop_reason: refusal).' if stop_reason == 'refusal'
@@ -218,8 +218,12 @@ def _tracked_call(provider, prompt, *, max_tokens, timeout, operation):
                 return_usage=True,
             )
         elif provider == 'ollama':
+            from .matching_schema import operation_schema
+            output_options = ({'response_schema': operation_schema(operation)}
+                              if operation_schema(operation) is not None else {})
             result = ollama_chat_json(
                 prompt,
+                **output_options,
                 max_tokens=max_tokens,
                 timeout=timeout,
                 return_usage=True,
@@ -282,6 +286,15 @@ def ai_chat_json(
     Dispatch to the configured provider while recording usage and applying
     transactional cost reservations before billable cloud calls.
     """
+    from .author_ai import current_selection, custom_chat
+    selection = current_selection()
+    if selection is not None:
+        if selection.provider != 'default':
+            return custom_chat(selection, prompt, max_tokens, timeout)
+        from .matching_schema import operation_schema
+        return ollama_chat_json(prompt, max_tokens=max_tokens, timeout=timeout,
+                                model_override=selection.model,
+                                response_schema=operation_schema(operation))
     provider = (force_provider or os.getenv('AI_PROVIDER', 'auto')).strip().lower()
 
     if provider == 'mock':
@@ -334,6 +347,11 @@ def ai_chat_json(
 
 def ai_available() -> bool:
     """Return True if at least one AI provider is likely reachable."""
+    from .author_ai import current_selection
+    selection = current_selection()
+    if selection is not None:
+        # Route failures explicitly at call time; do not silently use another provider.
+        return True
     provider = os.getenv('AI_PROVIDER', 'auto').strip().lower()
     if provider == 'mock':
         return True

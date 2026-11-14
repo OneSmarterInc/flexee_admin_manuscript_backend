@@ -108,10 +108,16 @@ def venue_text(venue, config=_MISSING):
 
 def manuscript_text(manuscript):
     from ..match_score import _profile_text, keyword_phrases
-    parts = [manuscript.title or '',
+    parts = [manuscript.abstract or '',
              'Keywords: ' + ', '.join(keyword_phrases(manuscript.keywords)) if manuscript.keywords else '',
-             manuscript.abstract or '']
-    parts.append(_profile_text(manuscript))
+             manuscript.title or '']
+    semantic = (manuscript.parsed_profile or {}).get('semantic') or {}
+    if isinstance(semantic, dict):
+        from ..match_score import semantic_text
+        contributions = semantic.get('contributions') or []
+        if not isinstance(contributions, list):
+            contributions = [contributions]
+        parts.append('Research contribution: ' + ' '.join(semantic_text(v) for v in contributions[:20]))
     return _clip('. '.join(p for p in parts if p))
 
 

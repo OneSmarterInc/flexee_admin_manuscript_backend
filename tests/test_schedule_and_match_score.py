@@ -143,7 +143,9 @@ def test_match_payload_includes_score():
     match = VenueMatch.objects.create(manuscript=make_manuscript(), venue=config.venue, venue_config=config,
                                       eligibility='eligible')
     payload = _match_payload(match)
-    assert set(payload['match_score']) == {'score', 'label', 'breakdown', 'matched_terms'}
+    assert set(payload['match_score']) == {'score', 'label', 'breakdown', 'matched_terms', 'basis', 'estimated'}
+    assert payload['match_score']['basis'] == 'preliminary'
+    assert payload['match_score']['estimated'] is True
     assert 0 <= payload['match_score']['score'] <= 100
 
 

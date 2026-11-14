@@ -7,6 +7,7 @@ The displayed score is topical relevance only. The legacy breakdown retains
 separate type, requirements and methods diagnostics; these do not add to fit.
 """
 import ast
+import math
 import re
 
 WEIGHTS = {'scope': 40, 'type': 25, 'requirements': 20, 'methods': 15}
@@ -49,7 +50,7 @@ def keyword_phrases(values):
 
 def _terms(text):
     text = str(text or '').lower()
-    text = re.sub(r'\b(?:small|large) language models?\b', lambda m: m.group(0) + ' artificial intelligence natural language processing', text)
+    text = re.sub(r'\b(?:(?:small|large) )?language models?\b', lambda m: m.group(0) + ' artificial intelligence natural language processing', text)
     text = re.sub(r'\bintelligent\b', 'intelligence', text)
     text = re.sub(r'\b(' + '|'.join(ALIASES) + r')s?\b', lambda m: ALIASES[m.group(1)], text)
     out = set()
@@ -114,30 +115,35 @@ def compute_match_score(manuscript, config, *, eligibility='needs_changes', viol
     keywords = keyword_phrases(manuscript.keywords)
     ms_terms = _terms(' '.join([manuscript.title or '', manuscript.abstract or '', ' '.join(map(str, keywords)),
                                 _profile_text(manuscript)]))
-    venue_text = ' '.join([config.aims_scope or '', ' '.join(map(str, config.reviewer_criteria or [])),
-                           config.quality_threshold or ''])
+    # Reviewer expertise and quality policies are not the journal's subject scope.
+    venue_text = config.aims_scope or ''
     venue_terms = _terms(venue_text)
     overlap = ms_terms & venue_terms
     if not config.aims_scope:
         scope_ratio = 0.0
     else:
-        term_ratio = min(1.0, len(overlap) / max(1, min(len(ms_terms), 20)) * 2.5)
-        if keywords:
-            keyword_hits = sum(1 for k in keywords if _terms(k) and _terms(k) <= venue_terms)
-            keyword_ratio = keyword_hits / len(keywords)
-            primary = _terms(re.sub(r'^\s*manuscript\s+title\s*:\s*', '', manuscript.title or '', flags=re.I))
-            primary_ratio = min(1.0, len(primary & venue_terms) / max(1, len(primary)) * 2.5)
-            scope_ratio = 0.6 * primary_ratio + 0.25 * keyword_ratio + 0.15 * term_ratio
-        else:
-            scope_ratio = term_ratio
-        if topic_similarity is not None:
+        # Keep application words in the title from outweighing the author's abstract.
+        semantic = (manuscript.parsed_profile or {}).get('semantic') or {}
+        contribution = semantic.get('contributions', semantic.get('contribution', [])) if isinstance(semantic, dict) else []
+        if not isinstance(contribution, list):
+            contribution = [contribution]
+        signals = [
+            (0.45, manuscript.abstract or ''),
+            (0.30, ' '.join(keywords)),
+            (0.15, ' '.join(semantic_text(v) for v in contribution)),
+            (0.10, re.sub(r'^\s*manuscript\s+title\s*:\s*', '', manuscript.title or '', flags=re.I)),
+        ]
+        weighted = [(weight, _terms(text)) for weight, text in signals if _terms(text)]
+        scope_ratio = (sum(weight * min(1.0, len(terms & venue_terms) / max(1, min(len(terms), 20)) * 2.5)
+                           for weight, terms in weighted) / sum(weight for weight, _ in weighted)) if weighted else 0.0
+        if isinstance(topic_similarity, (int, float)) and math.isfinite(topic_similarity):
             # Build plan step 5/8: the local embedding similarity also counts for scope, so a venue whose
             # aims are close in meaning (not just in shared words) is not scored as off-topic.
             # nomic-embed-text cosines run about 0.40 (unrelated) to 0.70 (very close).
             semantic_ratio = max(0.0, min(1.0, (topic_similarity - 0.40) / 0.30))
             # Similar embeddings alone do not establish subject relevance.
             # Generic academic language must not turn an unrelated scope into a good fit.
-            scope_ratio = max(scope_ratio, min(semantic_ratio, scope_ratio + 0.20))
+            scope_ratio = max(scope_ratio, min(semantic_ratio, scope_ratio + 0.05))
     scope = round(WEIGHTS['scope'] * min(1.0, scope_ratio))
 
     # 2. Accepted article type.
@@ -179,3 +185,47 @@ def compute_match_score(manuscript, config, *, eligibility='needs_changes', viol
         'breakdown': {'scope': scope, 'type': type_points, 'requirements': requirements, 'methods': method_points},
         'matched_terms': sorted(overlap)[:8],
     }
+
+
+
+def semantic_score_signature(manuscript, config):
+    """Invalidate estimates after the document, author metadata or scope changes."""
+    import hashlib
+    import json
+    payload = [str(manuscript.current_version_id), manuscript.manuscript_sha256,
+               manuscript.title, manuscript.abstract, manuscript.keywords,
+               manuscript.parsed_profile, str(config.pk), config.version, config.aims_scope]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def estimated_match_score(match):
+    """Use an evidence-backed semantic rubric when available; otherwise keep the preliminary estimate."""
+    config = match.venue_config
+    fallback = compute_match_score(match.manuscript, config, topic_similarity=match.topic_similarity)
+    fallback.update(basis='preliminary', estimated=True)
+    cache = match.semantic_cache or {}
+    if not config or cache.get('score_signature') != semantic_score_signature(match.manuscript, config):
+        return fallback
+    data = cache.get('data')
+    rubric = data.get('subject_fit_rubric') if isinstance(data, dict) else None
+    if not isinstance(rubric, dict) or type(rubric.get('application_context_only')) is not bool:
+        return fallback
+    from .services.author_agents import _grounded_match_items, _sanitize_match_items, _profile_evidence_map
+    evidence_ids = set(_profile_evidence_map(match.manuscript))
+    scores = []
+    for name in ('research_contribution', 'subject_alignment'):
+        item = rubric.get(name)
+        if not isinstance(item, dict) or type(item.get('rating')) is not int or not 0 <= item['rating'] <= 4:
+            return fallback
+        if item.get('venue_fields') != ['aims_scope']:
+            return fallback
+        if not _grounded_match_items(_sanitize_match_items([item], evidence_ids), config, match.manuscript):
+            return fallback
+        scores.append(item['rating'])
+    score = round(100 * (0.7 * scores[0] + 0.3 * scores[1]) / 4)
+    if rubric['application_context_only']:
+        score = min(score, 49)
+    if domain_connection_unconfirmed(match.manuscript, config):
+        score = min(score, 34)
+    return {**fallback, 'score': score, 'basis': 'semantic_rubric',
+            'label': 'Estimated subject fit', 'rubric': rubric}

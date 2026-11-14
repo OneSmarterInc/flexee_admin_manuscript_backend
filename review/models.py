@@ -1364,3 +1364,12 @@ class ManuscriptAIDetection(models.Model):
     ai_processed_at = models.DateTimeField(null=True, blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
     result = models.JSONField(default=dict, blank=True)
+
+
+class AuthorAISettings(models.Model):
+    author = models.OneToOneField(Author, on_delete=models.CASCADE, related_name='ai_settings')
+    provider = models.CharField(max_length=20, default='default')
+    model = models.CharField(max_length=120, default='qwen3:1.7b')
+    api_key = EncryptedCharField(max_length=4096, blank=True, default='')
+    revision = models.UUIDField(default=uuid.uuid4)
+    updated_at = models.DateTimeField(auto_now=True)
